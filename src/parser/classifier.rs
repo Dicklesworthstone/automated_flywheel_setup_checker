@@ -1,6 +1,5 @@
 //! Error classification logic
 
-use super::error::ParsedError;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +112,17 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         };
     }
 
+    // Syntax errors
+    if is_syntax_error(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Configuration,
+            category: "syntax_error".to_string(),
+            suggestion: Some("Fix syntax error in script".to_string()),
+            retryable: false,
+            confidence: 0.85,
+        };
+    }
+
     // Unknown
     ErrorClassification {
         severity: ErrorSeverity::Unknown,
@@ -121,6 +131,16 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         retryable: false,
         confidence: 0.0,
     }
+}
+
+fn is_syntax_error(stderr: &str) -> bool {
+    let patterns = [
+        r"(?i)syntax error",
+        r"(?i)unexpected token",
+        r"(?i)parse error",
+    ];
+
+    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
 }
 
 fn is_bootstrap_mismatch(stderr: &str) -> bool {
@@ -140,6 +160,7 @@ fn is_checksum_mismatch(stderr: &str) -> bool {
     let patterns = [
         r"(?i)checksum.*mismatch",
         r"(?i)checksum.*verification.*failed",
+        r"(?i)checksum.*did\s+not\s+match",
         r"(?i)sha256.*mismatch",
         r"(?i)hash.*verification.*failed",
         r"(?i)expected.*hash.*got",
@@ -161,6 +182,10 @@ fn is_network_error(stderr: &str) -> bool {
         r"(?i)could not resolve host",
         r"(?i)curl.*failed",
         r"(?i)wget.*failed",
+        r"(?i)ssl certificate problem",
+        r"(?i)unable to acquire.*lock",
+        r"(?i)dpkg.*lock",
+        r"(?i)apt.*lock",
     ];
 
     patterns

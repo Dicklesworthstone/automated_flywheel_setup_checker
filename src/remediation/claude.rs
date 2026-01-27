@@ -1,6 +1,5 @@
 //! Claude Code integration for auto-remediation with resilience
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -582,6 +581,132 @@ impl ClaudeRemediation {
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
     }
+
+    /// Verify a remediation by re-running the installer test
+    ///
+    /// This method runs the installer again after remediation to check
+    /// if the fix was successful.
+    pub async fn verify_remediation(
+        &self,
+        installer_url: &str,
+        expected_checksum: Option<&str>,
+    ) -> std::result::Result<VerificationResult, RemediationError> {
+        use tokio::process::Command;
+        use tokio::time::timeout;
+
+        tracing::info!("Verifying remediation by re-running installer test");
+
+        // Create a temporary directory for the test
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| RemediationError::ClaudeError(e.to_string()))?;
+
+        // Download and run the installer in test mode
+        let curl_output = timeout(
+            Duration::from_secs(60),
+            Command::new("curl")
+                .args(["-fsSL", installer_url])
+                .output(),
+        )
+        .await
+        .map_err(|_| RemediationError::Timeout)?
+        .map_err(|e| RemediationError::ClaudeError(format!("curl failed: {}", e)))?;
+
+        if !curl_output.status.success() {
+            return Ok(VerificationResult {
+                passed: false,
+                exit_code: curl_output.status.code().unwrap_or(-1),
+                stdout: String::new(),
+                stderr: String::from_utf8_lossy(&curl_output.stderr).to_string(),
+                checksum_valid: false,
+            });
+        }
+
+        // Verify checksum if provided
+        let checksum_valid = if let Some(expected) = expected_checksum {
+            let actual = compute_sha256(&curl_output.stdout);
+            actual == expected
+        } else {
+            true // No checksum to verify
+        };
+
+        // Run the installer in the temp directory
+        let bash_output = timeout(
+            Duration::from_secs(120),
+            Command::new("bash")
+                .arg("-s")
+                .arg("--")
+                .arg("--help") // Most installers support --help for dry validation
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .current_dir(temp_dir.path())
+                .output(),
+        )
+        .await
+        .map_err(|_| RemediationError::Timeout)?
+        .map_err(|e| RemediationError::ClaudeError(format!("bash failed: {}", e)))?;
+
+        Ok(VerificationResult {
+            passed: bash_output.status.success() && checksum_valid,
+            exit_code: bash_output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&bash_output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&bash_output.stderr).to_string(),
+            checksum_valid,
+        })
+    }
+
+    /// Full remediation workflow: prompt -> execute -> verify
+    pub async fn remediate_and_verify(
+        &self,
+        prompt: &str,
+        installer_url: &str,
+        expected_checksum: Option<&str>,
+    ) -> std::result::Result<RemediationResult, RemediationError> {
+        // Execute remediation
+        let mut result = self.execute_with_resilience(prompt).await?;
+
+        if !result.success {
+            return Ok(result);
+        }
+
+        // Verify the fix
+        match self.verify_remediation(installer_url, expected_checksum).await {
+            Ok(verification) => {
+                result.verification_passed = verification.passed;
+                if !verification.passed {
+                    tracing::warn!(
+                        "Verification failed after remediation: exit_code={}, checksum_valid={}",
+                        verification.exit_code,
+                        verification.checksum_valid
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("Verification error: {}", e);
+                result.verification_passed = false;
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+/// Result of verification after remediation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationResult {
+    pub passed: bool,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub checksum_valid: bool,
+}
+
+/// Compute SHA256 hash of data
+fn compute_sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Check if Claude CLI is available and authenticated

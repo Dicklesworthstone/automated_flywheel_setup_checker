@@ -1,0 +1,4 @@
+✖ Bootstrap mismatch: generated scripts do not match manifest.
+    → Expected: f268d13ef347ba501c480574ec52ca13e0600cf2857921389e1a1d74ad688f0a
+    → Actual:   983652176a1ba3a69ce840db1f27d12c1a0f82d52a516d118b172a8ddc87c30e
+    → Fix: retry or pin ACFS_REF to a tag/sha to avoid mixed refs.

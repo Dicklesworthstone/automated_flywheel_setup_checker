@@ -5,6 +5,7 @@
 
 mod checksums_tests;
 mod config_tests;
+mod notify_tests;
 mod parser_tests;
 mod remediation_tests;
 mod reporting_tests;

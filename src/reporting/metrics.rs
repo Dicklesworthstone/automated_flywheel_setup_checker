@@ -1,7 +1,10 @@
 //! Prometheus metrics export
 
+use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Metrics data structure
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -9,6 +12,85 @@ pub struct Metrics {
     pub counters: HashMap<String, u64>,
     pub gauges: HashMap<String, f64>,
     pub histograms: HashMap<String, Vec<f64>>,
+}
+
+/// Metrics snapshot saved to disk
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    pub last_test: Option<DateTime<Utc>>,
+    pub last_success: Option<DateTime<Utc>>,
+    pub last_failure: Option<DateTime<Utc>>,
+    pub success_rate_24h: f64,
+    pub total_tests_24h: u64,
+    pub successful_tests_24h: u64,
+    pub total_remediations_24h: u64,
+    pub uptime_seconds: u64,
+    pub snapshot_time: DateTime<Utc>,
+}
+
+impl Default for MetricsSnapshot {
+    fn default() -> Self {
+        Self {
+            last_test: None,
+            last_success: None,
+            last_failure: None,
+            success_rate_24h: 0.0,
+            total_tests_24h: 0,
+            successful_tests_24h: 0,
+            total_remediations_24h: 0,
+            uptime_seconds: 0,
+            snapshot_time: Utc::now(),
+        }
+    }
+}
+
+impl MetricsSnapshot {
+    /// Save metrics snapshot to a JSON file
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load metrics snapshot from a JSON file
+    pub fn load(path: &Path) -> Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let snapshot = serde_json::from_str(&json)?;
+        Ok(snapshot)
+    }
+
+    /// Update snapshot with a new test result
+    pub fn record_test(&mut self, success: bool) {
+        self.last_test = Some(Utc::now());
+        self.total_tests_24h += 1;
+
+        if success {
+            self.last_success = Some(Utc::now());
+            self.successful_tests_24h += 1;
+        } else {
+            self.last_failure = Some(Utc::now());
+        }
+
+        // Recalculate success rate
+        if self.total_tests_24h > 0 {
+            self.success_rate_24h =
+                self.successful_tests_24h as f64 / self.total_tests_24h as f64;
+        }
+
+        self.snapshot_time = Utc::now();
+    }
+
+    /// Record a remediation attempt
+    pub fn record_remediation(&mut self) {
+        self.total_remediations_24h += 1;
+        self.snapshot_time = Utc::now();
+    }
+
+    /// Update uptime
+    pub fn set_uptime(&mut self, seconds: u64) {
+        self.uptime_seconds = seconds;
+        self.snapshot_time = Utc::now();
+    }
 }
 
 /// Exports metrics in Prometheus format
@@ -63,6 +145,7 @@ impl MetricsExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_counter() {
@@ -79,5 +162,41 @@ mod tests {
         exporter.set_gauge("temperature", 23.5);
 
         assert_eq!(exporter.metrics.gauges.get("test_temperature"), Some(&23.5));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("metrics.json");
+
+        let mut snapshot = MetricsSnapshot::default();
+        snapshot.record_test(true);
+        snapshot.record_test(true);
+        snapshot.record_test(false);
+        snapshot.record_remediation();
+        snapshot.set_uptime(3600);
+
+        snapshot.save(&path).unwrap();
+        let loaded = MetricsSnapshot::load(&path).unwrap();
+
+        assert_eq!(loaded.total_tests_24h, 3);
+        assert_eq!(loaded.total_remediations_24h, 1);
+        assert_eq!(loaded.uptime_seconds, 3600);
+        assert!(loaded.last_test.is_some());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_success_rate() {
+        let mut snapshot = MetricsSnapshot::default();
+
+        // All successes
+        snapshot.record_test(true);
+        snapshot.record_test(true);
+        assert!((snapshot.success_rate_24h - 1.0).abs() < 0.01);
+
+        // One failure
+        snapshot.record_test(false);
+        // Now 2 successes out of 3 = 0.666...
+        assert!((snapshot.success_rate_24h - 0.666).abs() < 0.01);
     }
 }

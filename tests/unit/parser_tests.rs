@@ -362,6 +362,53 @@ fn test_parsed_error_builder_chain() {
 }
 
 // ============================================================================
+// Bootstrap and Checksum Error Tests (from fixtures)
+// ============================================================================
+
+#[test]
+fn test_classify_bootstrap_mismatch() {
+    let stderr = load_error_fixture("bootstrap_mismatch.txt");
+    let result = classify_error(&stderr, 1);
+    assert_eq!(result.severity, ErrorSeverity::Configuration);
+    assert_eq!(result.category, "bootstrap_mismatch");
+    assert!(!result.retryable);
+}
+
+#[test]
+fn test_classify_checksum_mismatch_from_fixture() {
+    let stderr = load_error_fixture("checksum_mismatch.txt");
+    let result = classify_error(&stderr, 1);
+    assert_eq!(result.severity, ErrorSeverity::Configuration);
+    assert_eq!(result.category, "checksum_mismatch");
+    assert!(!result.retryable);
+}
+
+#[test]
+fn test_classify_ssl_certificate_error() {
+    let stderr = load_error_fixture("ssl_certificate.txt");
+    let result = classify_error(&stderr, 60);
+    assert_eq!(result.severity, ErrorSeverity::Transient);
+    assert!(result.retryable);
+}
+
+#[test]
+fn test_classify_apt_lock_error() {
+    let stderr = load_error_fixture("apt_lock.txt");
+    let result = classify_error(&stderr, 1);
+    // Apt lock is a transient issue - another process is holding the lock
+    assert_eq!(result.severity, ErrorSeverity::Transient);
+    assert!(result.retryable);
+}
+
+#[test]
+fn test_classify_syntax_error() {
+    let stderr = load_error_fixture("syntax_error.txt");
+    let result = classify_error(&stderr, 2);
+    // Syntax errors are configuration issues
+    assert_eq!(result.severity, ErrorSeverity::Configuration);
+}
+
+// ============================================================================
 // ErrorClassification Tests
 // ============================================================================
 

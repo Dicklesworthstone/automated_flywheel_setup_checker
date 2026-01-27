@@ -218,6 +218,106 @@ impl Drop for JsonlReporter {
     }
 }
 
+/// Manager for log rotation and pruning
+pub struct LogRotation {
+    log_dir: std::path::PathBuf,
+    retention_days: u32,
+    file_prefix: String,
+}
+
+impl LogRotation {
+    /// Create a new log rotation manager
+    pub fn new(
+        log_dir: impl Into<std::path::PathBuf>,
+        retention_days: u32,
+        file_prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            log_dir: log_dir.into(),
+            retention_days,
+            file_prefix: file_prefix.into(),
+        }
+    }
+
+    /// Get the path for today's log file
+    pub fn current_log_path(&self) -> std::path::PathBuf {
+        let date = Utc::now().format("%Y%m%d");
+        self.log_dir.join(format!("{}_{}.jsonl", self.file_prefix, date))
+    }
+
+    /// Prune log files older than retention period
+    ///
+    /// Returns the number of files deleted
+    pub fn prune_old_logs(&self) -> Result<usize> {
+        use std::fs;
+
+        let cutoff = Utc::now() - chrono::Duration::days(self.retention_days as i64);
+        let cutoff_str = cutoff.format("%Y%m%d").to_string();
+
+        let mut deleted_count = 0;
+
+        if !self.log_dir.exists() {
+            return Ok(0);
+        }
+
+        for entry in fs::read_dir(&self.log_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Match files like "checker_20260126.jsonl"
+                if name.starts_with(&self.file_prefix) && name.ends_with(".jsonl") {
+                    // Extract date from filename
+                    if let Some(date_str) = name
+                        .strip_prefix(&format!("{}_", self.file_prefix))
+                        .and_then(|s| s.strip_suffix(".jsonl"))
+                    {
+                        if date_str < cutoff_str.as_str() {
+                            tracing::info!(path = %path.display(), "Pruning old log file");
+                            fs::remove_file(&path)?;
+                            deleted_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(deleted_count)
+    }
+
+    /// Get all log files sorted by date (newest first)
+    pub fn list_log_files(&self) -> Result<Vec<std::path::PathBuf>> {
+        use std::fs;
+
+        let mut files = Vec::new();
+
+        if !self.log_dir.exists() {
+            return Ok(files);
+        }
+
+        for entry in fs::read_dir(&self.log_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(&self.file_prefix) && name.ends_with(".jsonl") {
+                    files.push(path);
+                }
+            }
+        }
+
+        // Sort by filename (date) in reverse order
+        files.sort_by(|a, b| b.cmp(a));
+
+        Ok(files)
+    }
+
+    /// Get the retention period in days
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +383,63 @@ mod tests {
         assert!(LogLevel::Warn > LogLevel::Info);
         assert!(LogLevel::Info > LogLevel::Debug);
         assert!(LogLevel::Debug > LogLevel::Trace);
+    }
+
+    #[test]
+    fn test_log_rotation_current_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rotation = LogRotation::new(tmp.path(), 7, "checker");
+
+        let path = rotation.current_log_path();
+        let expected_date = chrono::Utc::now().format("%Y%m%d").to_string();
+
+        assert!(path.to_string_lossy().contains(&expected_date));
+        assert!(path.to_string_lossy().contains("checker_"));
+        assert!(path.to_string_lossy().ends_with(".jsonl"));
+    }
+
+    #[test]
+    fn test_log_rotation_prune() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rotation = LogRotation::new(tmp.path(), 7, "checker");
+
+        // Create an old log file (simulate 10 days ago)
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(10))
+            .format("%Y%m%d")
+            .to_string();
+        let old_file = tmp.path().join(format!("checker_{}.jsonl", old_date));
+        std::fs::write(&old_file, "{}").unwrap();
+
+        // Create a recent log file (today)
+        let today = chrono::Utc::now().format("%Y%m%d").to_string();
+        let today_file = tmp.path().join(format!("checker_{}.jsonl", today));
+        std::fs::write(&today_file, "{}").unwrap();
+
+        // Prune
+        let deleted = rotation.prune_old_logs().unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(!old_file.exists());
+        assert!(today_file.exists());
+    }
+
+    #[test]
+    fn test_log_rotation_list_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rotation = LogRotation::new(tmp.path(), 7, "checker");
+
+        // Create some log files
+        std::fs::write(tmp.path().join("checker_20260125.jsonl"), "{}").unwrap();
+        std::fs::write(tmp.path().join("checker_20260126.jsonl"), "{}").unwrap();
+        std::fs::write(tmp.path().join("checker_20260127.jsonl"), "{}").unwrap();
+        std::fs::write(tmp.path().join("other_file.txt"), "{}").unwrap(); // Should be ignored
+
+        let files = rotation.list_log_files().unwrap();
+
+        assert_eq!(files.len(), 3);
+        // Should be sorted newest first
+        assert!(files[0].to_string_lossy().contains("20260127"));
+        assert!(files[1].to_string_lossy().contains("20260126"));
+        assert!(files[2].to_string_lossy().contains("20260125"));
     }
 }
