@@ -33,6 +33,28 @@ pub struct ErrorClassification {
 
 /// Classify an error based on stderr content and exit code
 pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
+    // Bootstrap mismatch errors (specific to ACFS installer)
+    if is_bootstrap_mismatch(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Configuration,
+            category: "bootstrap_mismatch".to_string(),
+            suggestion: Some("Regenerate manifest_index.sh to fix bootstrap mismatch".to_string()),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
+    // Checksum mismatch errors
+    if is_checksum_mismatch(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Configuration,
+            category: "checksum_mismatch".to_string(),
+            suggestion: Some("Update checksums.yaml with new hash or verify installer integrity".to_string()),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
     // Network/transient errors
     if is_network_error(stderr) {
         return ErrorClassification {
@@ -101,6 +123,34 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
     }
 }
 
+fn is_bootstrap_mismatch(stderr: &str) -> bool {
+    let patterns = [
+        r"(?i)bootstrap.*mismatch",
+        r"(?i)bootstrap.*verification.*failed",
+        r"(?i)manifest.*mismatch",
+        r"(?i)expected.*bootstrap.*actual",
+    ];
+
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+}
+
+fn is_checksum_mismatch(stderr: &str) -> bool {
+    let patterns = [
+        r"(?i)checksum.*mismatch",
+        r"(?i)checksum.*verification.*failed",
+        r"(?i)sha256.*mismatch",
+        r"(?i)hash.*verification.*failed",
+        r"(?i)expected.*hash.*got",
+        r"(?i)integrity.*check.*failed",
+    ];
+
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+}
+
 fn is_network_error(stderr: &str) -> bool {
     let patterns = [
         r"(?i)connection refused",
@@ -113,7 +163,9 @@ fn is_network_error(stderr: &str) -> bool {
         r"(?i)wget.*failed",
     ];
 
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
 }
 
 fn is_permission_error(stderr: &str) -> bool {
@@ -153,6 +205,22 @@ fn is_resource_error(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_bootstrap_mismatch() {
+        let result = classify_error("Bootstrap mismatch: Expected abc123, Actual def456", 1);
+        assert_eq!(result.severity, ErrorSeverity::Configuration);
+        assert_eq!(result.category, "bootstrap_mismatch");
+        assert!(!result.retryable);
+    }
+
+    #[test]
+    fn test_classify_checksum_mismatch() {
+        let result = classify_error("Checksum verification failed: sha256 mismatch", 1);
+        assert_eq!(result.severity, ErrorSeverity::Configuration);
+        assert_eq!(result.category, "checksum_mismatch");
+        assert!(!result.retryable);
+    }
 
     #[test]
     fn test_classify_network_error() {

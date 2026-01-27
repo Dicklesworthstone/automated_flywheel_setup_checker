@@ -9,6 +9,7 @@ use automated_flywheel_setup_checker::{
     checksums::{parse_checksums, validate_checksums},
     config::load_config,
     parser::classify_error,
+    runner::{InstallerTest, InstallerTestRunner, RunnerConfig},
     SystemdWatchdog,
 };
 
@@ -222,9 +223,11 @@ async fn cmd_check(
     timeout: u64,
     dry_run: bool,
     _remediate: bool,
-    _fail_fast: bool,
+    fail_fast: bool,
     format: OutputFormat,
 ) -> Result<()> {
+    use std::time::Duration;
+
     let checksums_path = config.general.acfs_repo.join("checksums.yaml");
 
     if !checksums_path.exists() {
@@ -267,8 +270,112 @@ async fn cmd_check(
         return Ok(());
     }
 
-    // Actual check execution would happen here
-    println!("Check execution not yet implemented");
+    // Set up the runner with configuration
+    let runner_config = RunnerConfig {
+        default_timeout: Duration::from_secs(timeout),
+        dry_run: true, // Run installers with --dry-run for safety
+        ..Default::default()
+    };
+    let runner = InstallerTestRunner::new(runner_config);
+
+    // Convert checksums entries to InstallerTest objects
+    let tests: Vec<InstallerTest> = enabled
+        .iter()
+        .filter_map(|(name, entry)| {
+            // Skip entries without URLs
+            let url = entry.url.as_ref()?;
+            let mut test = InstallerTest::new(name.as_str(), url)
+                .with_timeout(Duration::from_secs(timeout));
+
+            // Add checksum if available (use the value field)
+            if let Some(checksum) = &entry.checksum {
+                test = test.with_sha256(&checksum.value);
+            }
+
+            Some(test)
+        })
+        .collect();
+
+    // Run tests (sequentially for now, parallel support via ParallelRunner)
+    let mut results = Vec::new();
+    let mut any_failed = false;
+
+    for test in &tests {
+        let result = runner.run_test_with_retry(test).await?;
+
+        if !result.success {
+            any_failed = true;
+        }
+
+        match format {
+            OutputFormat::Human => {
+                let status_icon = if result.success { "✓" } else { "✗" };
+                println!(
+                    "{} {} ({:?}, {}ms)",
+                    status_icon,
+                    result.installer_name,
+                    result.status,
+                    result.duration_ms
+                );
+                if !result.success && !result.stderr.is_empty() {
+                    // Show first few lines of stderr
+                    let stderr_preview: String = result
+                        .stderr
+                        .lines()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!("    stderr: {}", stderr_preview);
+                }
+            }
+            OutputFormat::Json => {
+                // Collect for final JSON output
+            }
+            OutputFormat::Jsonl => {
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+
+        results.push(result);
+
+        if fail_fast && any_failed {
+            break;
+        }
+    }
+
+    // Summary output
+    match format {
+        OutputFormat::Human => {
+            let passed = results.iter().filter(|r| r.success).count();
+            let failed = results.len() - passed;
+            println!();
+            println!(
+                "Results: {} passed, {} failed out of {} total",
+                passed,
+                failed,
+                results.len()
+            );
+        }
+        OutputFormat::Json => {
+            let output = serde_json::json!({
+                "results": results,
+                "summary": {
+                    "total": results.len(),
+                    "passed": results.iter().filter(|r| r.success).count(),
+                    "failed": results.iter().filter(|r| !r.success).count(),
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Jsonl => {
+            // Already printed per result
+        }
+    }
+
+    if any_failed {
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 
