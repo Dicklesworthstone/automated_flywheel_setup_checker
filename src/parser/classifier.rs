@@ -44,6 +44,17 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         };
     }
 
+    // Command not found (exit code 127 is definitive)
+    if exit_code == 127 {
+        return ErrorClassification {
+            severity: ErrorSeverity::Dependency,
+            category: "command_not_found".to_string(),
+            suggestion: Some("Required command is not installed".to_string()),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
     // Permission errors
     if is_permission_error(stderr)
         || exit_code == 126
@@ -58,7 +69,7 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         };
     }
 
-    // Dependency errors
+    // Dependency errors (general)
     if is_dependency_error(stderr) {
         return ErrorClassification {
             severity: ErrorSeverity::Dependency,
@@ -77,17 +88,6 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
             suggestion: Some("Check available disk space and memory".to_string()),
             retryable: false,
             confidence: 0.75,
-        };
-    }
-
-    // Command not found
-    if exit_code == 127 {
-        return ErrorClassification {
-            severity: ErrorSeverity::Dependency,
-            category: "command_not_found".to_string(),
-            suggestion: Some("Required command is not installed".to_string()),
-            retryable: false,
-            confidence: 0.95,
         };
     }
 
