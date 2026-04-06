@@ -7,6 +7,8 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'scripts/e2e/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/e2e-tests.yml'
   pull_request:
     branches: [main]
@@ -14,16 +16,26 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'scripts/e2e/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   rust-e2e:
     name: Rust E2E Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -31,8 +43,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --all-features
@@ -44,6 +55,7 @@ jobs:
     name: Bash E2E Tests
     runs-on: ubuntu-latest
     needs: rust-e2e
+    timeout-minutes: 45
 
     services:
       docker:
@@ -56,13 +68,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Build release binary
         run: cargo build --release
@@ -97,16 +106,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust-e2e, bash-e2e]
     if: always()
+    timeout-minutes: 5
 
     steps:
       - name: Check E2E results
         run: |
           if [[ "${{ needs.rust-e2e.result }}" == "failure" ]]; then
-            echo "Rust E2E tests failed"
+            echo "::error::Rust E2E tests failed"
             exit 1
           fi
           if [[ "${{ needs.bash-e2e.result }}" == "failure" ]]; then
-            echo "Bash E2E tests failed"
+            echo "::error::Bash E2E tests failed"
             exit 1
           fi
           echo "All E2E tests passed!"
