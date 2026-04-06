@@ -209,7 +209,7 @@ async fn run_command(
         }
 
         Commands::Validate { path, check_urls } => {
-            cmd_validate(config, path.clone(), *check_urls, cli.format)?;
+            cmd_validate(config, path.clone(), *check_urls, cli.format).await?;
         }
 
         Commands::ClassifyError { stderr, exit_code } => {
@@ -310,7 +310,7 @@ async fn cmd_check(
         backend,
         ..Default::default()
     };
-    let runner = InstallerTestRunner::new(runner_config);
+    let runner = InstallerTestRunner::new(runner_config.clone());
 
     // Convert checksums entries to InstallerTest objects
     let tests: Vec<InstallerTest> = enabled
@@ -330,20 +330,31 @@ async fn cmd_check(
         })
         .collect();
 
-    // Run tests (sequentially for now, parallel support via ParallelRunner)
-    let mut results = Vec::new();
-    let mut any_failed = false;
-
-    for test in &tests {
-        let result = runner.run_test_with_retry(test).await?;
-
-        if !result.success {
-            any_failed = true;
+    // Run tests — use parallel runner when parallel > 1
+    let results = if parallel > 1 {
+        use automated_flywheel_setup_checker::runner::ParallelRunner;
+        let pool = ParallelRunner::new(parallel, runner_config.clone()).with_fail_fast(fail_fast);
+        pool.run_all(tests).await?
+    } else {
+        // Sequential execution
+        let mut sequential_results = Vec::new();
+        for test in &tests {
+            let result = runner.run_test_with_retry(test).await?;
+            sequential_results.push(result);
+            if fail_fast && sequential_results.last().map(|r| !r.success).unwrap_or(false) {
+                break;
+            }
         }
+        sequential_results
+    };
 
+    let any_failed = results.iter().any(|r| !r.success);
+
+    // Print per-result output
+    for result in &results {
         match format {
             OutputFormat::Human => {
-                let status_icon = if result.success { "✓" } else { "✗" };
+                let status_icon = if result.success { "\u{2713}" } else { "\u{2717}" };
                 println!(
                     "{} {} ({:?}, {}ms)",
                     status_icon,
@@ -352,7 +363,6 @@ async fn cmd_check(
                     result.duration_ms
                 );
                 if !result.success && !result.stderr.is_empty() {
-                    // Show first few lines of stderr
                     let stderr_preview: String = result
                         .stderr
                         .lines()
@@ -362,18 +372,10 @@ async fn cmd_check(
                     println!("    stderr: {}", stderr_preview);
                 }
             }
-            OutputFormat::Json => {
-                // Collect for final JSON output
-            }
+            OutputFormat::Json => {}
             OutputFormat::Jsonl => {
                 println!("{}", serde_json::to_string(&result)?);
             }
-        }
-
-        results.push(result);
-
-        if fail_fast && any_failed {
-            break;
         }
     }
 
@@ -593,12 +595,14 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn cmd_validate(
+async fn cmd_validate(
     config: &automated_flywheel_setup_checker::Config,
     path: Option<PathBuf>,
-    check_urls: bool,
+    check_urls_flag: bool,
     format: OutputFormat,
 ) -> Result<()> {
+    use automated_flywheel_setup_checker::checksums::check_urls;
+
     let checksums_path = path.unwrap_or_else(|| config.general.acfs_repo.join("checksums.yaml"));
 
     if !checksums_path.exists() {
@@ -606,7 +610,7 @@ fn cmd_validate(
     }
 
     let checksums = parse_checksums(&checksums_path)?;
-    let result = validate_checksums(&checksums, check_urls);
+    let result = validate_checksums(&checksums, false); // format validation only
 
     match format {
         OutputFormat::Human => {
@@ -637,6 +641,64 @@ fn cmd_validate(
 
     if !result.valid {
         std::process::exit(1);
+    }
+
+    // URL checking (async)
+    if check_urls_flag {
+        println!();
+        println!("Checking URLs...");
+        let url_results = check_urls(&checksums).await;
+
+        let reachable = url_results.iter().filter(|r| r.reachable).count();
+        let broken = url_results.len() - reachable;
+
+        match format {
+            OutputFormat::Human => {
+                for r in &url_results {
+                    let icon = if r.reachable { "\u{2713}" } else { "\u{2717}" };
+                    let status_str = r
+                        .status
+                        .map(|s| format!("HTTP {}", s))
+                        .unwrap_or_else(|| "error".to_string());
+                    let error_str = r
+                        .error
+                        .as_ref()
+                        .map(|e| format!(" ({})", e))
+                        .unwrap_or_default();
+                    println!(
+                        "  {} {} - {} {}ms{}",
+                        icon, r.name, status_str, r.response_time_ms, error_str
+                    );
+                }
+                println!();
+                println!(
+                    "URL check: {} reachable, {} broken out of {} total",
+                    reachable,
+                    broken,
+                    url_results.len()
+                );
+            }
+            OutputFormat::Json => {
+                let output = serde_json::json!({
+                    "url_checks": url_results,
+                    "summary": {
+                        "total": url_results.len(),
+                        "reachable": reachable,
+                        "broken": broken,
+                    }
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            OutputFormat::Jsonl => {
+                for r in &url_results {
+                    println!("{}", serde_json::to_string(r)?);
+                }
+            }
+        }
+
+        if broken > 0 {
+            std::process::exit(1);
+        }
     }
 
     Ok(())
