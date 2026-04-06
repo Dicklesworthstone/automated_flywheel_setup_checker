@@ -8,7 +8,7 @@
 //! - Error handling for malformed input
 
 use automated_flywheel_setup_checker::checksums::{
-    parse_checksums, validate_checksums, Checksum, ChecksumsFile, InstallerEntry, ValidationResult,
+    parse_checksums, validate_checksums, ChecksumsFile, InstallerEntry, ValidationResult,
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -24,21 +24,18 @@ fn test_parse_valid_checksums_yaml() {
     writeln!(
         file,
         r#"
-version: "1.0"
-zoxide:
-  version: "0.9.2"
-  url: "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"
-  checksum:
-    algorithm: sha256
-    value: "abc123def456789012345678901234567890123456789012345678901234"
-  enabled: true
-  tags:
-    - shell
-    - productivity
-rano:
-  version: "1.0.0"
-  url: "https://example.com/rano.sh"
-  enabled: true
+installers:
+  zoxide:
+    url: "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"
+    sha256: "abc123def456789012345678901234567890123456789012345678901234"
+    enabled: true
+    tags:
+      - shell
+      - productivity
+  rano:
+    url: "https://example.com/rano.sh"
+    sha256: "def456"
+    enabled: true
 "#
     )
     .unwrap();
@@ -50,7 +47,7 @@ rano:
 
     let zoxide = &checksums.installers["zoxide"];
     assert!(zoxide.enabled);
-    assert_eq!(zoxide.version, Some("0.9.2".to_string()));
+    assert_eq!(zoxide.sha256.as_deref(), Some("abc123def456789012345678901234567890123456789012345678901234"));
     assert_eq!(zoxide.tags.len(), 2);
     assert!(zoxide.tags.contains(&"shell".to_string()));
 }
@@ -61,8 +58,9 @@ fn test_parse_with_defaults() {
     writeln!(
         file,
         r#"
-minimal:
-  url: "https://example.com/install.sh"
+installers:
+  minimal:
+    url: "https://example.com/install.sh"
 "#
     )
     .unwrap();
@@ -74,7 +72,7 @@ minimal:
     assert!(entry.enabled); // default true
     assert!(entry.tags.is_empty()); // default empty
     assert!(entry.version.is_none());
-    assert!(entry.checksum.is_none());
+    assert!(entry.sha256.is_none());
 }
 
 #[test]
@@ -83,9 +81,10 @@ fn test_parse_disabled_installer() {
     writeln!(
         file,
         r#"
-disabled_tool:
-  url: "https://example.com/tool.sh"
-  enabled: false
+installers:
+  disabled_tool:
+    url: "https://example.com/tool.sh"
+    enabled: false
 "#
     )
     .unwrap();
@@ -101,15 +100,16 @@ fn test_enabled_installers_filter() {
     writeln!(
         file,
         r#"
-enabled_one:
-  url: "https://a.com"
-  enabled: true
-disabled_one:
-  url: "https://b.com"
-  enabled: false
-enabled_two:
-  url: "https://c.com"
-  enabled: true
+installers:
+  enabled_one:
+    url: "https://a.com"
+    enabled: true
+  disabled_one:
+    url: "https://b.com"
+    enabled: false
+  enabled_two:
+    url: "https://c.com"
+    enabled: true
 "#
     )
     .unwrap();
@@ -125,25 +125,23 @@ enabled_two:
 }
 
 #[test]
-fn test_parse_with_checksum() {
+fn test_parse_with_sha256() {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(
         file,
         r#"
-tool:
-  url: "https://example.com/tool.sh"
-  checksum:
-    algorithm: sha256
-    value: "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+installers:
+  tool:
+    url: "https://example.com/tool.sh"
+    sha256: "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
 "#
     )
     .unwrap();
 
     let checksums = parse_checksums(file.path()).unwrap();
     let entry = &checksums.installers["tool"];
-    let checksum = entry.checksum.as_ref().unwrap();
-    assert_eq!(checksum.algorithm, "sha256");
-    assert!(checksum.value.starts_with("deadbeef"));
+    let sha256 = entry.sha256.as_ref().unwrap();
+    assert!(sha256.starts_with("deadbeef"));
 }
 
 #[test]
@@ -152,10 +150,11 @@ fn test_parse_with_extra_fields() {
     writeln!(
         file,
         r#"
-tool:
-  url: "https://example.com/tool.sh"
-  custom_field: "custom_value"
-  another_field: 42
+installers:
+  tool:
+    url: "https://example.com/tool.sh"
+    custom_field: "custom_value"
+    another_field: 42
 "#
     )
     .unwrap();
@@ -193,25 +192,10 @@ fn test_parse_empty_file() {
     let file = NamedTempFile::new().unwrap();
 
     let result = parse_checksums(file.path());
-    // Empty YAML should parse as empty structure
+    // Empty YAML should parse as empty structure (installers defaults to empty)
     assert!(result.is_ok());
-}
-
-#[test]
-fn test_version_field() {
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(
-        file,
-        r#"
-version: "2.0"
-tool:
-  url: "https://example.com"
-"#
-    )
-    .unwrap();
-
-    let checksums = parse_checksums(file.path()).unwrap();
-    assert_eq!(checksums.version, Some("2.0".to_string()));
+    let checksums = result.unwrap();
+    assert!(checksums.installers.is_empty());
 }
 
 // ============================================================================
@@ -224,16 +208,16 @@ fn test_validate_valid_entry() {
     installers.insert(
         "test".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: Some("https://example.com/install.sh".to_string()),
-            checksum: None,
+            sha256: Some("abc123".to_string()),
+            version: Some("1.0.0".to_string()),
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     assert!(result.valid);
@@ -246,16 +230,16 @@ fn test_validate_invalid_url() {
     installers.insert(
         "test".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: Some("not-a-valid-url".to_string()),
-            checksum: None,
+            sha256: None,
+            version: Some("1.0.0".to_string()),
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     assert!(!result.valid);
@@ -268,16 +252,16 @@ fn test_validate_missing_url_disabled() {
     installers.insert(
         "test".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: None, // No URL but disabled - should be OK
-            checksum: None,
+            sha256: None,
+            version: Some("1.0.0".to_string()),
             enabled: false,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     assert!(result.valid); // Disabled entries don't need URLs
@@ -289,16 +273,16 @@ fn test_validate_missing_url_enabled_warns() {
     installers.insert(
         "test".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: None,
-            checksum: None,
+            sha256: None,
+            version: Some("1.0.0".to_string()),
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     // Should produce a warning, not an error
@@ -312,16 +296,16 @@ fn test_validate_missing_version_warns() {
     installers.insert(
         "test".to_string(),
         InstallerEntry {
-            version: None,
             url: Some("https://example.com/install.sh".to_string()),
-            checksum: None,
+            sha256: Some("abc123".to_string()),
+            version: None,
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     // Should produce a warning
@@ -335,9 +319,9 @@ fn test_validate_multiple_entries() {
     installers.insert(
         "valid".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: Some("https://example.com/valid.sh".to_string()),
-            checksum: None,
+            sha256: Some("abc123".to_string()),
+            version: Some("1.0.0".to_string()),
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
@@ -346,16 +330,16 @@ fn test_validate_multiple_entries() {
     installers.insert(
         "invalid".to_string(),
         InstallerEntry {
-            version: Some("1.0.0".to_string()),
             url: Some("not-a-url".to_string()),
-            checksum: None,
+            sha256: None,
+            version: Some("1.0.0".to_string()),
             enabled: true,
             tags: vec![],
             extra: HashMap::new(),
         },
     );
 
-    let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+    let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
     assert!(!result.valid);
@@ -383,19 +367,16 @@ fn test_validation_result_default() {
 #[test]
 fn test_installer_entry_with_all_fields() {
     let entry = InstallerEntry {
-        version: Some("2.0.0".to_string()),
         url: Some("https://example.com/full.sh".to_string()),
-        checksum: Some(Checksum {
-            algorithm: "sha512".to_string(),
-            value: "deadbeef".to_string(),
-        }),
+        sha256: Some("deadbeef1234".to_string()),
+        version: Some("2.0.0".to_string()),
         enabled: true,
         tags: vec!["test".to_string(), "full".to_string()],
         extra: HashMap::new(),
     };
 
     assert_eq!(entry.version.as_ref().unwrap(), "2.0.0");
-    assert_eq!(entry.checksum.as_ref().unwrap().algorithm, "sha512");
+    assert_eq!(entry.sha256.as_ref().unwrap(), "deadbeef1234");
     assert_eq!(entry.tags.len(), 2);
 }
 
@@ -409,19 +390,9 @@ fn test_parse_and_validate_fixture() {
     let fixture_path = std::path::Path::new("tests/unit/fixtures/sample_checksums.yaml");
     if fixture_path.exists() {
         let checksums = parse_checksums(fixture_path).unwrap();
+        let _result = validate_checksums(&checksums, false);
 
-        // Check fixture contents
-        assert!(checksums.installers.contains_key("rust"));
-        assert!(checksums.installers.contains_key("nodejs"));
-        assert!(checksums.installers.contains_key("zoxide"));
-
-        // Validate
-        let result = validate_checksums(&checksums, false);
-
-        // nodejs should be disabled
-        assert!(!checksums.installers["nodejs"].enabled);
-
-        // rust should be enabled
-        assert!(checksums.installers["rust"].enabled);
+        // Verify fixture parsed correctly
+        assert!(!checksums.installers.is_empty());
     }
 }

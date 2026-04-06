@@ -1,34 +1,31 @@
-version: "1.0"
-rust:
-  version: "1.75.0"
-  url: "https://sh.rustup.rs"
-  checksum:
-    algorithm: sha256
-    value: "be3535b3033ff5e0ecc4d589a35d3656f681332f860c2e6e85f5c6c6f5e7f5e8"
-  enabled: true
-  tags:
-    - language
-    - essential
-nodejs:
-  version: "20.10.0"
-  url: "https://nodejs.org/dist/v20.10.0/node-v20.10.0-linux-x64.tar.xz"
-  checksum:
-    algorithm: sha256
-    value: "abc123def456789012345678901234567890123456789012345678901234"
-  enabled: false
-  tags:
-    - language
-    - javascript
-zoxide:
-  version: "0.9.2"
-  url: "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"
-  enabled: true
-  tags:
-    - shell
-    - productivity
-disabled_tool:
-  version: "1.0.0"
-  url: "https://example.com/disabled.sh"
-  enabled: false
-minimal_tool:
-  url: "https://example.com/minimal.sh"
+# Sample checksums.yaml matching actual ACFS format
+installers:
+  rust:
+    url: "https://sh.rustup.rs"
+    sha256: "be3535b3033ff5e0ecc4d589a35d3656f681332f860c2e6e85f5c6c6f5e7f5e8"
+    version: "1.75.0"
+    enabled: true
+    tags:
+      - language
+      - essential
+  nodejs:
+    url: "https://nodejs.org/dist/v20.10.0/node-v20.10.0-linux-x64.tar.xz"
+    sha256: "abc123def456789012345678901234567890123456789012345678901234"
+    version: "20.10.0"
+    enabled: false
+    tags:
+      - language
+      - javascript
+  zoxide:
+    url: "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"
+    version: "0.9.2"
+    enabled: true
+    tags:
+      - shell
+      - productivity
+  disabled_tool:
+    url: "https://example.com/disabled.sh"
+    version: "1.0.0"
+    enabled: false
+  minimal_tool:
+    url: "https://example.com/minimal.sh"

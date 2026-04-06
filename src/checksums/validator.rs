@@ -90,16 +90,16 @@ mod tests {
         installers.insert(
             "test".to_string(),
             InstallerEntry {
-                version: Some("1.0.0".to_string()),
                 url: Some("https://example.com/install.sh".to_string()),
-                checksum: None,
+                sha256: Some("abc123".to_string()),
+                version: Some("1.0.0".to_string()),
                 enabled: true,
                 tags: vec![],
                 extra: HashMap::new(),
             },
         );
 
-        let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+        let checksums = ChecksumsFile { installers };
 
         let result = validate_checksums(&checksums, false);
         assert!(result.valid);
@@ -112,16 +112,16 @@ mod tests {
         installers.insert(
             "test".to_string(),
             InstallerEntry {
-                version: Some("1.0.0".to_string()),
                 url: Some("not-a-valid-url".to_string()),
-                checksum: None,
+                sha256: None,
+                version: Some("1.0.0".to_string()),
                 enabled: true,
                 tags: vec![],
                 extra: HashMap::new(),
             },
         );
 
-        let checksums = ChecksumsFile { version: Some("1.0".to_string()), installers };
+        let checksums = ChecksumsFile { installers };
 
         let result = validate_checksums(&checksums, false);
         assert!(!result.valid);

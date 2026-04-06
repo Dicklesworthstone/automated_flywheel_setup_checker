@@ -287,9 +287,9 @@ async fn cmd_check(
             let mut test = InstallerTest::new(name.as_str(), url)
                 .with_timeout(Duration::from_secs(timeout));
 
-            // Add checksum if available (use the value field)
-            if let Some(checksum) = &entry.checksum {
-                test = test.with_sha256(&checksum.value);
+            // Add checksum if available
+            if let Some(sha256) = &entry.sha256 {
+                test = test.with_sha256(sha256);
             }
 
             Some(test)

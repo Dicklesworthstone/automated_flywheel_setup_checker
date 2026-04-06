@@ -6,47 +6,44 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Root structure of checksums.yaml
+///
+/// The actual ACFS format is:
+/// ```yaml
+/// installers:
+///   tool_name:
+///     url: "https://..."
+///     sha256: "hex..."
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChecksumsFile {
-    /// Schema version
+    /// Map of installer name to entry, nested under the `installers` key
     #[serde(default)]
-    pub version: Option<String>,
-    /// Map of installer name to entry
-    #[serde(flatten)]
     pub installers: HashMap<String, InstallerEntry>,
 }
 
-/// Entry for a single installer/tool
+/// Entry for a single installer/tool in checksums.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallerEntry {
-    /// Tool version
-    pub version: Option<String>,
     /// Download URL
     pub url: Option<String>,
-    /// Expected checksum
-    pub checksum: Option<Checksum>,
-    /// Whether the installer is enabled
+    /// Expected SHA-256 hash
+    pub sha256: Option<String>,
+    /// Tool version (not present in current ACFS format, kept for forward compat)
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Whether the installer is enabled (defaults to true)
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Tags for categorization
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Additional metadata
+    /// Absorb unknown fields gracefully
     #[serde(flatten)]
     pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 fn default_enabled() -> bool {
     true
-}
-
-/// Checksum specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Checksum {
-    /// Algorithm (sha256, sha512, etc.)
-    pub algorithm: String,
-    /// Expected hash value
-    pub value: String,
 }
 
 /// Parse a checksums.yaml file
@@ -77,18 +74,14 @@ mod tests {
         writeln!(
             file,
             r#"
-version: "1.0"
-rust:
-  version: "1.75.0"
-  url: "https://sh.rustup.rs"
-  enabled: true
-  tags:
-    - language
-    - essential
-nodejs:
-  version: "20.10.0"
-  url: "https://nodejs.org/dist/v20.10.0/node-v20.10.0-linux-x64.tar.xz"
-  enabled: false
+installers:
+  rust:
+    url: "https://sh.rustup.rs"
+    sha256: "abc123"
+  nodejs:
+    url: "https://nodejs.org/dist/v20.10.0/node-v20.10.0-linux-x64.tar.xz"
+    sha256: "def456"
+    enabled: false
 "#
         )
         .unwrap();
@@ -98,8 +91,9 @@ nodejs:
         assert!(checksums.installers.contains_key("nodejs"));
 
         let rust = &checksums.installers["rust"];
-        assert!(rust.enabled);
-        assert_eq!(rust.version, Some("1.75.0".to_string()));
+        assert!(rust.enabled); // default true
+        assert_eq!(rust.url, Some("https://sh.rustup.rs".to_string()));
+        assert_eq!(rust.sha256, Some("abc123".to_string()));
 
         let nodejs = &checksums.installers["nodejs"];
         assert!(!nodejs.enabled);
