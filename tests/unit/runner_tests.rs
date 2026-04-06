@@ -103,9 +103,9 @@ fn test_result_retries() {
 #[test]
 fn test_result_duration_tracking() {
     let result = TestResult::new("test").passed();
-    // Duration should be non-negative
-    assert!(result.duration.as_nanos() >= 0);
-    assert!(result.duration_ms >= 0);
+    // Duration fields should be populated (unsigned types are always >= 0)
+    let _ = result.duration.as_nanos();
+    let _ = result.duration_ms;
 }
 
 // ============================================================================

@@ -299,7 +299,7 @@ async fn cmd_check(
         };
         ExecutionBackend::Docker {
             container_config,
-            pull_policy: PullPolicy::from_str(&config.docker.pull_policy),
+            pull_policy: PullPolicy::parse_policy(&config.docker.pull_policy),
         }
     };
 
@@ -711,8 +711,10 @@ async fn cmd_validate(
 
     // URL checking (async)
     if check_urls_flag {
-        println!();
-        println!("Checking URLs...");
+        if matches!(format, OutputFormat::Human) {
+            println!();
+            println!("Checking URLs...");
+        }
         let url_results = check_urls(&checksums).await;
 
         let reachable = url_results.iter().filter(|r| r.reachable).count();

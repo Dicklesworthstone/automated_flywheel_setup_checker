@@ -49,7 +49,7 @@ pub enum PullPolicy {
 }
 
 impl PullPolicy {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_policy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "always" => PullPolicy::Always,
             "never" => PullPolicy::Never,
@@ -152,9 +152,11 @@ impl ContainerManager {
         // Ensure image is available
         self.ensure_image().await.context("Failed to ensure Docker image")?;
 
-        // Build container name: afsc-INSTALLERNAME-TIMESTAMP
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let container_name = format!("afsc-{}-{}", name, timestamp);
+        // Build container name: afsc-INSTALLERNAME-TIMESTAMP-RANDOM
+        // Include milliseconds and random suffix to avoid collisions in parallel mode
+        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f");
+        let random_suffix: u16 = rand::random();
+        let container_name = format!("afsc-{}-{}-{:04x}", name, timestamp, random_suffix);
 
         // Build environment variables
         let mut env: Vec<String> = vec![
@@ -186,7 +188,7 @@ impl ContainerManager {
 
         // Tmpfs mount for installer scratch space
         let mut tmpfs: HashMap<String, String> = HashMap::new();
-        tmpfs.insert("/tmp".to_string(), "rw,noexec,nosuid,size=512m".to_string());
+        tmpfs.insert("/tmp".to_string(), "rw,nosuid,size=512m".to_string());
         host_config.tmpfs = Some(tmpfs);
 
         // Volume binds

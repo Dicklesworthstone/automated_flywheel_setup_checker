@@ -230,6 +230,18 @@ fi
         let mut guard = ContainerGuard::new(container_id.clone(), manager.docker_arc());
         result = result.with_container_id(&container_id);
 
+        // Ensure curl is available in the container (ubuntu:22.04 doesn't include it)
+        debug!(container_id = %container_id, "Installing curl in container");
+        if let Err(e) = manager
+            .exec_in_container(
+                &container_id,
+                &["bash", "-c", "apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null 2>&1"],
+            )
+            .await
+        {
+            warn!(container_id = %container_id, error = %e, "Failed to install curl in container");
+        }
+
         // Build the verified install script (download → checksum → execute)
         let install_script = self.build_verified_install_script(
             &test.url,
@@ -430,12 +442,21 @@ fi
             result = result.with_checksum_result(checksum_result);
         }
 
-        // Build the install script (verified or direct)
-        let curl_bash_script = self.build_verified_install_script(
-            &test.url,
-            &test.name,
-            test.expected_sha256.as_deref(),
-        );
+        // Build the execution command.
+        // If we already downloaded and verified the script (checksum path above),
+        // execute the local file directly instead of re-downloading.
+        let curl_bash_script = if test.expected_sha256.is_some() {
+            let script_file = temp_path.join(format!("installer_{}.sh", test.name));
+            let dry_run_flag = if self.config.dry_run { " --dry-run" } else { "" };
+            format!(
+                "{} '{}'{}",
+                self.config.bash_path,
+                script_file.display(),
+                dry_run_flag
+            )
+        } else {
+            self.build_verified_install_script(&test.url, &test.name, None)
+        };
 
         debug!(script = %curl_bash_script, "Executing installer script locally");
 
@@ -572,7 +593,8 @@ fi
                 "Retrying failed test"
             );
 
-            result.add_retry(&result.stderr.clone(), wait_ms);
+            let stderr_copy = result.stderr.clone();
+            result.add_retry(&stderr_copy, wait_ms);
             tokio::time::sleep(Duration::from_millis(wait_ms)).await;
 
             result = self.run_test(test).await?;
