@@ -11,8 +11,8 @@ pub enum ValidationError {
     MissingUrl(String),
     #[error("Invalid URL for installer {0}: {1}")]
     InvalidUrl(String, String),
-    #[error("Missing version for installer: {0}")]
-    MissingVersion(String),
+    #[error("Missing sha256 checksum for installer: {0}")]
+    MissingChecksum(String),
     #[error("HTTP error checking URL {0}: {1}")]
     HttpError(String, String),
 }
@@ -63,19 +63,18 @@ pub fn validate_checksums(checksums: &ChecksumsFile, check_urls: bool) -> Valida
 }
 
 fn validate_entry(name: &str, entry: &InstallerEntry, result: &mut ValidationResult) {
-    // Check URL if present
+    // Check URL — every enabled installer must have one
     if let Some(url) = &entry.url {
         if let Err(e) = Url::parse(url) {
             result.add_error(ValidationError::InvalidUrl(name.to_string(), e.to_string()));
         }
     } else if entry.enabled {
-        // Only warn about missing URL for enabled installers
         result.add_warning(format!("No URL specified for enabled installer: {}", name));
     }
 
-    // Check version
-    if entry.version.is_none() && entry.enabled {
-        result.add_warning(format!("No version specified for enabled installer: {}", name));
+    // Check sha256 — every enabled installer should have a checksum
+    if entry.sha256.is_none() && entry.enabled {
+        result.add_warning(format!("No sha256 checksum for enabled installer: {}", name));
     }
 }
 

@@ -254,7 +254,11 @@ async fn cmd_check(
                 println!("Timeout: {}s per installer", timeout);
                 println!();
                 for (name, entry) in &enabled {
-                    println!("  - {} (v{})", name, entry.version.as_deref().unwrap_or("unknown"));
+                    if let Some(ver) = &entry.version {
+                        println!("  - {} (v{})", name, ver);
+                    } else {
+                        println!("  - {}", name);
+                    }
                 }
             }
             OutputFormat::Json | OutputFormat::Jsonl => {
@@ -414,13 +418,13 @@ fn cmd_list(
             println!("Installers ({}):", filtered.len());
             for (name, entry) in &filtered {
                 let status = if entry.enabled { "enabled" } else { "disabled" };
-                let version = entry.version.as_deref().unwrap_or("?");
                 let tags = if entry.tags.is_empty() {
                     String::new()
                 } else {
                     format!(" [{}]", entry.tags.join(", "))
                 };
-                println!("  {} ({}) - {}{}", name, version, status, tags);
+                let has_checksum = if entry.sha256.is_some() { " sha256" } else { "" };
+                println!("  {} - {}{}{}", name, status, has_checksum, tags);
             }
         }
         OutputFormat::Json => {
@@ -429,10 +433,10 @@ fn cmd_list(
                 .map(|(name, entry)| {
                     serde_json::json!({
                         "name": name,
-                        "version": entry.version,
+                        "url": entry.url,
+                        "sha256": entry.sha256,
                         "enabled": entry.enabled,
                         "tags": entry.tags,
-                        "url": entry.url,
                     })
                 })
                 .collect();
@@ -442,7 +446,8 @@ fn cmd_list(
             for (name, entry) in &filtered {
                 let output = serde_json::json!({
                     "name": name,
-                    "version": entry.version,
+                    "url": entry.url,
+                    "sha256": entry.sha256,
                     "enabled": entry.enabled,
                     "tags": entry.tags,
                 });

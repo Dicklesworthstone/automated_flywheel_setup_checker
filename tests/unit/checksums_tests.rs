@@ -291,13 +291,13 @@ fn test_validate_missing_url_enabled_warns() {
 }
 
 #[test]
-fn test_validate_missing_version_warns() {
+fn test_validate_missing_sha256_warns() {
     let mut installers = HashMap::new();
     installers.insert(
         "test".to_string(),
         InstallerEntry {
             url: Some("https://example.com/install.sh".to_string()),
-            sha256: Some("abc123".to_string()),
+            sha256: None,
             version: None,
             enabled: true,
             tags: vec![],
@@ -308,7 +308,7 @@ fn test_validate_missing_version_warns() {
     let checksums = ChecksumsFile { installers };
 
     let result = validate_checksums(&checksums, false);
-    // Should produce a warning
+    // Missing sha256 should produce a warning, not an error
     assert!(result.valid);
     assert!(!result.warnings.is_empty());
 }
