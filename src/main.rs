@@ -277,7 +277,7 @@ async fn cmd_check(
     // Set up the runner with configuration
     let runner_config = RunnerConfig {
         default_timeout: Duration::from_secs(timeout),
-        dry_run: true, // Run installers with --dry-run for safety
+        dry_run: false,
         ..Default::default()
     };
     let runner = InstallerTestRunner::new(runner_config);

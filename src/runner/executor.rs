@@ -33,7 +33,7 @@ impl Default for RunnerConfig {
     fn default() -> Self {
         Self {
             default_timeout: Duration::from_secs(300),
-            dry_run: true,
+            dry_run: false,
             curl_path: "curl".to_string(),
             bash_path: "bash".to_string(),
             extra_env: Vec::new(),
@@ -255,7 +255,7 @@ mod tests {
     fn test_runner_config_default() {
         let config = RunnerConfig::default();
         assert_eq!(config.default_timeout, Duration::from_secs(300));
-        assert!(config.dry_run);
+        assert!(!config.dry_run);
         assert_eq!(config.curl_path, "curl");
         assert_eq!(config.bash_path, "bash");
     }
