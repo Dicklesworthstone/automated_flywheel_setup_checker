@@ -18,3 +18,6 @@ mod test_config_workflow;
 
 #[path = "e2e/test_reporting_output.rs"]
 mod test_reporting_output;
+
+#[path = "e2e/test_docker_integration.rs"]
+mod test_docker_integration;

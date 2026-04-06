@@ -230,7 +230,7 @@ async fn cmd_check(
     parallel: usize,
     timeout: u64,
     dry_run: bool,
-    _remediate: bool,
+    remediate: bool,
     fail_fast: bool,
     local: bool,
     format: OutputFormat,
@@ -405,6 +405,72 @@ async fn cmd_check(
         }
         OutputFormat::Jsonl => {
             // Already printed per result
+        }
+    }
+
+    // Remediation for failures (when --remediate is enabled)
+    if remediate && any_failed {
+        use automated_flywheel_setup_checker::remediation::{
+            generate_prompt, ClaudeRemediation, ClaudeRemediationConfig as RemConfig,
+        };
+
+        if matches!(format, OutputFormat::Human) {
+            println!("\nAttempting auto-remediation for failures...");
+        }
+
+        let rem_config = RemConfig {
+            enabled: true,
+            cost_limit_usd: 1.0,
+            timeout_seconds: 120,
+            ..Default::default()
+        };
+        let remediation =
+            ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
+
+        for result in results.iter().filter(|r| !r.success) {
+            // Classify the error if not already done
+            let classification = result.error.clone().unwrap_or_else(|| {
+                automated_flywheel_setup_checker::parser::classify_error(
+                    &result.stderr,
+                    result.exit_code.unwrap_or(-1),
+                )
+            });
+            let prompt = generate_prompt(
+                &classification,
+                &result.stderr,
+                &config.general.acfs_repo,
+            );
+
+            match remediation.execute_with_resilience(&prompt).await {
+                Ok(rem_result) => {
+                    if matches!(format, OutputFormat::Human) {
+                        let status = if rem_result.success { "succeeded" } else { "partial" };
+                        println!(
+                            "\n  Remediation {} for {} (method: {:?}, cost: ${:.4})",
+                            status, result.installer_name, rem_result.method, rem_result.estimated_cost_usd
+                        );
+                        if !rem_result.changes_made.is_empty() {
+                            println!("  Files to modify:");
+                            for change in &rem_result.changes_made {
+                                println!("    - {} ({:?})", change.path.display(), change.change_type);
+                            }
+                        }
+                        if !rem_result.claude_output.is_empty() {
+                            let preview: String = rem_result.claude_output.lines().take(5)
+                                .collect::<Vec<_>>().join("\n    ");
+                            println!("  Output: {}", preview);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(format, OutputFormat::Human) {
+                        println!(
+                            "  Remediation failed for {}: {}",
+                            result.installer_name, e
+                        );
+                    }
+                }
+            }
         }
     }
 

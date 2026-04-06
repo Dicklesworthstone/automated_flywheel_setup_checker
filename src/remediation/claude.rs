@@ -559,10 +559,42 @@ impl ClaudeRemediation {
 
     fn parse_changes(
         &self,
-        _output: &str,
+        output: &str,
     ) -> std::result::Result<Vec<FileChange>, RemediationError> {
-        // Parse Claude output for file changes
-        // Implementation depends on Claude output format
+        // Try to parse Claude's JSON response for structured suggestions
+        // Expected format: {"suggestions": [{"type": "fix", "description": "...",
+        //   "files": [{"path": "...", "content": "..."}]}]}
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
+            if let Some(suggestions) = parsed.get("suggestions").and_then(|s| s.as_array()) {
+                let mut changes = Vec::new();
+                for suggestion in suggestions {
+                    if let Some(files) = suggestion.get("files").and_then(|f| f.as_array()) {
+                        for file in files {
+                            let path = file
+                                .get("path")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let diff = file
+                                .get("content")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.to_string());
+                            if !path.is_empty() {
+                                changes.push(FileChange {
+                                    path: PathBuf::from(path),
+                                    change_type: ChangeType::Modified,
+                                    diff,
+                                    size_bytes: 0,
+                                });
+                            }
+                        }
+                    }
+                }
+                return Ok(changes);
+            }
+        }
+
+        // If not valid JSON or no suggestions, return empty (fall through to fallback)
         Ok(vec![])
     }
 
