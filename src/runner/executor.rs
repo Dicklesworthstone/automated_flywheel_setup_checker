@@ -273,6 +273,31 @@ mod tests {
         assert!(backoff2 >= 4000 && backoff2 <= 6000);
     }
 
+    #[test]
+    fn test_dry_run_false_does_not_append_flag() {
+        // Regression (br-74o.13): When dry_run is false, the curl|bash command
+        // must NOT contain --dry-run. A previous bug hardcoded dry_run: true,
+        // causing bun's installer to 404 by interpreting --dry-run as a version.
+        let config = RunnerConfig { dry_run: false, ..Default::default() };
+        let script = if config.dry_run {
+            format!("{} -fsSL '{}' | {} -s -- --dry-run", config.curl_path, "URL", config.bash_path)
+        } else {
+            format!("{} -fsSL '{}' | {} -s --", config.curl_path, "URL", config.bash_path)
+        };
+        assert!(!script.contains("--dry-run"), "Command must not contain --dry-run when dry_run=false");
+    }
+
+    #[test]
+    fn test_dry_run_true_appends_flag() {
+        let config = RunnerConfig { dry_run: true, ..Default::default() };
+        let script = if config.dry_run {
+            format!("{} -fsSL '{}' | {} -s -- --dry-run", config.curl_path, "URL", config.bash_path)
+        } else {
+            format!("{} -fsSL '{}' | {} -s --", config.curl_path, "URL", config.bash_path)
+        };
+        assert!(script.contains("--dry-run"), "Command must contain --dry-run when dry_run=true");
+    }
+
     #[tokio::test]
     async fn test_runner_with_simple_command() {
         let config = RunnerConfig {

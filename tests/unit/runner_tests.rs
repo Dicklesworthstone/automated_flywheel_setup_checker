@@ -361,6 +361,29 @@ fn test_status_copy() {
 }
 
 // ============================================================================
+// dry_run Regression Tests (br-74o.13)
+// ============================================================================
+
+#[test]
+fn test_runner_config_dry_run_default_false() {
+    // Regression: dry_run was hardcoded to true, causing installers to receive
+    // --dry-run as an argument (e.g., bun interpreted it as a version string → 404)
+    let config = automated_flywheel_setup_checker::runner::RunnerConfig::default();
+    assert!(!config.dry_run, "RunnerConfig::default().dry_run must be false");
+}
+
+#[test]
+fn test_installer_test_no_dry_run_in_default_config() {
+    // Verify that when dry_run is false (the default), the runner would NOT
+    // pass --dry-run to installer scripts
+    let config = automated_flywheel_setup_checker::runner::RunnerConfig::default();
+    assert!(
+        !config.dry_run,
+        "Default config must not pass --dry-run to installer scripts"
+    );
+}
+
+// ============================================================================
 // Edge Cases
 // ============================================================================
 
