@@ -178,10 +178,11 @@ impl ContainerManager {
             host_config.nano_cpus = Some((cpu * 1_000_000_000.0) as i64);
         }
 
-        // Tmpfs mount for installer scratch space
-        let mut tmpfs: HashMap<String, String> = HashMap::new();
-        tmpfs.insert("/tmp".to_string(), "rw,nosuid,size=512m".to_string());
-        host_config.tmpfs = Some(tmpfs);
+        // NOTE: We deliberately do NOT mount /tmp as tmpfs. Docker's default overlay
+        // filesystem for /tmp allows exec, but tmpfs mounts add noexec by default
+        // (even with "exec" in the options string — Bollard may not pass it correctly).
+        // Installers like rustup download binaries to /tmp and need exec permission.
+        // The container is ephemeral anyway, so a real /tmp is fine.
 
         // Volume binds
         if !self.config.volumes.is_empty() {
