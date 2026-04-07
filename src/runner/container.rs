@@ -344,9 +344,10 @@ impl ContainerManager {
         let exec_opts = CreateExecOptions {
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            // Allocate a pseudo-TTY so installers that check for a TTY
-            // (rustup, ubs/ast-grep, ohmyzsh) work correctly.
-            tty: Some(true),
+            // NOTE: We do NOT set tty on exec. The container itself has tty:true
+            // which makes /dev/tty available to installers that check for it.
+            // But tty on exec merges stdout/stderr into one stream, which breaks
+            // our CHECKSUM_MISMATCH stderr detection and error classification.
             cmd: Some(command.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         };
