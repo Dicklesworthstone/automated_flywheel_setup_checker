@@ -242,13 +242,13 @@ fi
         // Use a separate 120s timeout so a slow apt mirror doesn't consume the test timeout.
         debug!(container_id = %container_id, "Installing prerequisites in container");
         let prereq_install_result = timeout(
-            Duration::from_secs(120),
+            Duration::from_secs(180),
             manager.exec_in_container(
                 &container_id,
                 &["bash", "-c", "apt-get update -qq && apt-get install -y -qq \
                     curl ca-certificates git unzip xz-utils tar jq \
                     build-essential sudo gnupg libssl-dev pkg-config \
-                    zsh >/dev/null 2>&1"],
+                    python3 rsync zsh >/dev/null 2>&1"],
             ),
         )
         .await;
@@ -260,7 +260,7 @@ fi
                 warn!(container_id = %container_id, error = %e, "Failed to install prerequisites in container");
             }
             Err(_) => {
-                warn!(container_id = %container_id, "Prerequisite installation timed out after 120s");
+                warn!(container_id = %container_id, "Prerequisite installation timed out after 180s");
             }
             _ => {
                 debug!(container_id = %container_id, "Prerequisites installed successfully");
