@@ -85,32 +85,41 @@ impl ContainerManager {
     }
 
     /// Pull the Docker image if required by the pull policy
+    /// The tag used for the pre-built ACFS base image.
+    const AFSC_BASE_IMAGE: &'static str = "afsc-base:latest";
+
+    /// Ensure the configured image is available locally.
+    ///
+    /// If the image is `afsc-base:latest` and doesn't exist, build it from
+    /// the Dockerfile shipped with this project. For other images, pull
+    /// from a registry according to the pull policy.
     async fn ensure_image(&self) -> Result<()> {
         let image = &self.config.image;
 
-        match self.pull_policy {
-            PullPolicy::Never => {
-                debug!(image = %image, "Pull policy is Never, skipping pull");
+        // Fast path: already present?
+        if self.pull_policy != PullPolicy::Always {
+            if self.docker.inspect_image(image).await.is_ok() {
+                debug!(image = %image, "Image already present locally");
                 return Ok(());
-            }
-            PullPolicy::IfNotPresent => {
-                // Check if image exists locally
-                match self.docker.inspect_image(image).await {
-                    Ok(_) => {
-                        debug!(image = %image, "Image already present locally");
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        info!(image = %image, "Image not found locally, pulling");
-                    }
-                }
-            }
-            PullPolicy::Always => {
-                info!(image = %image, "Pull policy is Always, pulling image");
             }
         }
 
-        // Split image into repo and tag
+        if self.pull_policy == PullPolicy::Never {
+            // Even with Never, try building afsc-base if it's the configured image.
+            if image == Self::AFSC_BASE_IMAGE {
+                return self.build_base_image().await;
+            }
+            anyhow::bail!("Image {} not found and pull policy is Never", image);
+        }
+
+        // For the built-in ACFS base image, build instead of pulling.
+        if image == Self::AFSC_BASE_IMAGE {
+            return self.build_base_image().await;
+        }
+
+        // Otherwise, pull from registry.
+        info!(image = %image, "Pulling image");
+
         let (repo, tag) = if let Some(pos) = image.rfind(':') {
             (&image[..pos], &image[pos + 1..])
         } else {
@@ -137,6 +146,78 @@ impl ContainerManager {
         Ok(())
     }
 
+    /// Build the afsc-base image from the embedded Dockerfile.
+    ///
+    /// The Dockerfile sets up a non-root user with Rust, Node, and all
+    /// system packages that ACFS install.sh pre-installs. Building takes
+    /// ~2 minutes but only happens once — subsequent runs reuse the cached
+    /// image.
+    async fn build_base_image(&self) -> Result<()> {
+        // Check if already built
+        if self.docker.inspect_image(Self::AFSC_BASE_IMAGE).await.is_ok() {
+            debug!("afsc-base image already built");
+            return Ok(());
+        }
+
+        info!("Building afsc-base image (first run — this takes ~2 minutes)...");
+
+        // Find the Dockerfile
+        let dockerfile_path = Self::find_dockerfile()?;
+        let context_dir = dockerfile_path
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine build context from Dockerfile path"))?;
+
+        // Build using docker CLI (simpler than Bollard's build API which needs tar contexts)
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "build",
+                "-t",
+                Self::AFSC_BASE_IMAGE,
+                "-f",
+                &dockerfile_path.to_string_lossy(),
+                &context_dir.to_string_lossy(),
+            ])
+            .output()
+            .await
+            .context("Failed to run docker build")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "Failed to build afsc-base image:\n{}",
+                stderr.chars().take(1000).collect::<String>()
+            );
+        }
+
+        info!("afsc-base image built successfully");
+        Ok(())
+    }
+
+    /// Locate the Dockerfile.base shipped with this project.
+    fn find_dockerfile() -> Result<std::path::PathBuf> {
+        // Try relative to the binary location
+        let candidates = [
+            std::path::PathBuf::from("docker/Dockerfile.base"),
+            std::path::PathBuf::from("/data/projects/automated_flywheel_setup_checker/docker/Dockerfile.base"),
+        ];
+
+        // Also check CARGO_MANIFEST_DIR at compile time
+        let manifest_candidate = option_env!("CARGO_MANIFEST_DIR")
+            .map(|d| std::path::PathBuf::from(d).join("docker/Dockerfile.base"));
+
+        for path in candidates.iter().chain(manifest_candidate.iter()) {
+            if path.exists() {
+                return Ok(path.clone());
+            }
+        }
+
+        anyhow::bail!(
+            "Cannot find docker/Dockerfile.base. Looked in: {:?}",
+            candidates
+        )
+    }
+
     /// Create and start a container for testing
     ///
     /// Returns the container ID string from Docker.
@@ -150,11 +231,22 @@ impl ContainerManager {
         let random_suffix: u16 = rand::random();
         let container_name = format!("afsc-{}-{}-{:04x}", name, timestamp, random_suffix);
 
+        // Determine if we're using the pre-built base image (non-root user)
+        let using_base_image = self.config.image == Self::AFSC_BASE_IMAGE;
+        let (user, home, working_dir) = if using_base_image {
+            ("afsc-user", "/home/afsc-user", "/home/afsc-user")
+        } else {
+            ("root", "/root", "/root")
+        };
+
         // Build environment variables
         let mut env: Vec<String> = vec![
             "DEBIAN_FRONTEND=noninteractive".to_string(),
-            "HOME=/root".to_string(),
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+            format!("HOME={}", home),
+            format!(
+                "PATH={}/.cargo/bin:{}/.local/bin:{}/.nvm/versions/node/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                home, home, home
+            ),
             "CI=true".to_string(),
             "NONINTERACTIVE=1".to_string(),
             "RUSTUP_INIT_SKIP_PATH_CHECK=yes".to_string(),
@@ -202,7 +294,9 @@ impl ContainerManager {
             host_config: Some(host_config),
             // Keep container alive with a long sleep so we can exec into it
             cmd: Some(vec!["sleep".to_string(), "86400".to_string()]),
-            working_dir: Some("/root".to_string()),
+            working_dir: Some(working_dir.to_string()),
+            user: if using_base_image { Some(user.to_string()) } else { None },
+            tty: Some(true),
             ..Default::default()
         };
 
@@ -250,6 +344,9 @@ impl ContainerManager {
         let exec_opts = CreateExecOptions {
             attach_stdout: Some(true),
             attach_stderr: Some(true),
+            // Allocate a pseudo-TTY so installers that check for a TTY
+            // (rustup, ubs/ast-grep, ohmyzsh) work correctly.
+            tty: Some(true),
             cmd: Some(command.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         };

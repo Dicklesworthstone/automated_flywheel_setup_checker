@@ -1,0 +1,54 @@
+# ACFS Test Base Image
+#
+# Pre-installs all prerequisites that ACFS's install.sh sets up before running
+# individual installer scripts. This mirrors a real VPS mid-install state so
+# installer tests produce accurate results.
+#
+# Build:  docker build -t afsc-base:latest -f docker/Dockerfile.base .
+# Use:    automated_flywheel_setup_checker check (auto-builds if missing)
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CI=true \
+    NONINTERACTIVE=1 \
+    RUSTUP_INIT_SKIP_PATH_CHECK=yes \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Core packages that ACFS install.sh pre-installs (line 3346 + 3836)
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        curl ca-certificates git unzip xz-utils tar jq \
+        build-essential sudo gnupg libssl-dev pkg-config \
+        python3 rsync zsh \
+        ripgrep tmux fzf direnv git-lfs lsof \
+        dnsutils netcat-openbsd strace zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user matching real VPS usage.
+# ACFS runs as the logged-in user, not root. Many installers (srps, etc.)
+# refuse to run as root or behave differently.
+RUN useradd -m -s /bin/bash -G sudo afsc-user && \
+    echo "afsc-user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/afsc-user
+
+# Install Rust as non-root (installers like sbh expect cargo)
+USER afsc-user
+WORKDIR /home/afsc-user
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+    echo 'source "$HOME/.cargo/env"' >> ~/.bashrc
+ENV PATH="/home/afsc-user/.cargo/bin:${PATH}"
+
+# Install Node via nvm (installers like gemini_patch expect node)
+RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && \
+    bash -c 'source ~/.nvm/nvm.sh && nvm install --lts && nvm alias default node'
+ENV NVM_DIR="/home/afsc-user/.nvm"
+
+# Set up PATH — must hardcode the node version path since Docker ENV doesn't expand $(...)
+# We use a symlink to avoid hardcoding the version number.
+RUN ln -sf "$(ls -d ~/.nvm/versions/node/v* | head -1)" ~/.nvm/versions/node/default
+
+# Set up local bin directory and final PATH
+RUN mkdir -p ~/.local/bin
+ENV PATH="/home/afsc-user/.local/bin:/home/afsc-user/.cargo/bin:/home/afsc-user/.nvm/versions/node/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOME="/home/afsc-user"

@@ -236,35 +236,39 @@ fi
         let mut guard = ContainerGuard::new(container_id.clone(), manager.docker_arc());
         result = result.with_container_id(&container_id);
 
-        // Install prerequisite packages that ACFS installers expect.
-        // The ACFS install.sh pre-installs these before running individual installer scripts.
-        // Without them, installers fail with missing dependency errors (unzip, git, xz, etc.).
-        // Use a separate 120s timeout so a slow apt mirror doesn't consume the test timeout.
-        debug!(container_id = %container_id, "Installing prerequisites in container");
-        let prereq_install_result = timeout(
-            Duration::from_secs(180),
-            manager.exec_in_container(
-                &container_id,
-                &["bash", "-c", "apt-get update -qq && apt-get install -y -qq \
-                    curl ca-certificates git unzip xz-utils tar jq \
-                    build-essential sudo gnupg libssl-dev pkg-config \
-                    python3 rsync zsh >/dev/null 2>&1"],
-            ),
-        )
-        .await;
-        match prereq_install_result {
-            Ok(Ok((code, _, _))) if code != 0 => {
-                warn!(container_id = %container_id, exit_code = code, "Prerequisite installation exited non-zero");
+        // Install prerequisite packages if NOT using the pre-built base image.
+        // The afsc-base:latest image already has everything pre-installed (Rust, Node,
+        // git, unzip, etc.) so we skip this 20-30s step entirely.
+        let using_base_image = container_config.image == "afsc-base:latest";
+        if !using_base_image {
+            debug!(container_id = %container_id, "Installing prerequisites in container (not using base image)");
+            let prereq_install_result = timeout(
+                Duration::from_secs(180),
+                manager.exec_in_container(
+                    &container_id,
+                    &["bash", "-c", "apt-get update -qq && apt-get install -y -qq \
+                        curl ca-certificates git unzip xz-utils tar jq \
+                        build-essential sudo gnupg libssl-dev pkg-config \
+                        python3 rsync zsh >/dev/null 2>&1"],
+                ),
+            )
+            .await;
+            match prereq_install_result {
+                Ok(Ok((code, _, _))) if code != 0 => {
+                    warn!(container_id = %container_id, exit_code = code, "Prerequisite installation exited non-zero");
+                }
+                Ok(Err(e)) => {
+                    warn!(container_id = %container_id, error = %e, "Failed to install prerequisites in container");
+                }
+                Err(_) => {
+                    warn!(container_id = %container_id, "Prerequisite installation timed out after 180s");
+                }
+                _ => {
+                    debug!(container_id = %container_id, "Prerequisites installed successfully");
+                }
             }
-            Ok(Err(e)) => {
-                warn!(container_id = %container_id, error = %e, "Failed to install prerequisites in container");
-            }
-            Err(_) => {
-                warn!(container_id = %container_id, "Prerequisite installation timed out after 180s");
-            }
-            _ => {
-                debug!(container_id = %container_id, "Prerequisites installed successfully");
-            }
+        } else {
+            debug!(container_id = %container_id, "Using pre-built base image — skipping prerequisite installation");
         }
 
         // Build the verified install script (download → checksum → execute)

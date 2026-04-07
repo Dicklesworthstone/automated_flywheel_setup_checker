@@ -90,7 +90,7 @@ pub struct DockerConfig {
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            image: "ubuntu:22.04".to_string(),
+            image: "afsc-base:latest".to_string(),
             memory_limit: "2G".to_string(),
             cpu_quota: 1.0,
             timeout_seconds: 300,
