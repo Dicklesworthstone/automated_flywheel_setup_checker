@@ -18,7 +18,7 @@
 
 **The Problem:** ACFS ships 41 installer scripts that download, verify, and configure tools on fresh Ubuntu VPS instances. Any upstream URL change, checksum drift, or dependency issue silently breaks the installer for all users. Manual testing across all tools is tedious and error-prone.
 
-**The Solution:** This tool runs each installer inside an isolated Docker container, classifies any failures automatically, retries transient errors with exponential backoff, and can optionally ask Claude to suggest fixes — all in parallel.
+**The Solution:** This tool runs each installer inside an isolated Docker container, classifies any failures automatically, retries transient errors with exponential backoff, can optionally ask Claude to suggest fixes, and can expose the latest persisted health and metrics snapshot for monitoring.
 
 ### Why Use This?
 
@@ -414,7 +414,7 @@ Yes. The E2E workflow already demonstrates this. You need a runner with Docker a
 ## Development
 
 ```bash
-# Run Rust tests (370 total; 6 Docker-dependent E2E cases ignored by default)
+# Run Rust tests (366 total; 6 Docker-dependent E2E cases are ignored by default)
 cargo test
 
 # Run with verbose logging
