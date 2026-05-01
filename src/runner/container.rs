@@ -12,7 +12,6 @@ use bollard::image::CreateImageOptions;
 use bollard::Docker;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -162,10 +161,9 @@ impl ContainerManager {
 
         // Find the Dockerfile
         let dockerfile_path = Self::find_dockerfile()?;
-        let context_dir = dockerfile_path
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow::anyhow!("Cannot determine build context from Dockerfile path"))?;
+        let context_dir = dockerfile_path.parent().and_then(|p| p.parent()).ok_or_else(|| {
+            anyhow::anyhow!("Cannot determine build context from Dockerfile path")
+        })?;
 
         // Build using docker CLI (simpler than Bollard's build API which needs tar contexts)
         let output = tokio::process::Command::new("docker")
@@ -198,7 +196,9 @@ impl ContainerManager {
         // Try relative to the binary location
         let candidates = [
             std::path::PathBuf::from("docker/Dockerfile.base"),
-            std::path::PathBuf::from("/data/projects/automated_flywheel_setup_checker/docker/Dockerfile.base"),
+            std::path::PathBuf::from(
+                "/data/projects/automated_flywheel_setup_checker/docker/Dockerfile.base",
+            ),
         ];
 
         // Also check CARGO_MANIFEST_DIR at compile time
@@ -211,10 +211,7 @@ impl ContainerManager {
             }
         }
 
-        anyhow::bail!(
-            "Cannot find docker/Dockerfile.base. Looked in: {:?}",
-            candidates
-        )
+        anyhow::bail!("Cannot find docker/Dockerfile.base. Looked in: {:?}", candidates)
     }
 
     /// Create and start a container for testing

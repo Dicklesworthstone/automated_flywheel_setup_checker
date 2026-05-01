@@ -421,7 +421,6 @@ impl ClaudeRemediation {
         }
 
         // Execute with retries
-        let mut last_error = None;
         let start_time = Instant::now();
 
         for attempt in 0..self.retry_config.max_retries {
@@ -439,14 +438,13 @@ impl ClaudeRemediation {
                 }
                 Err(e) => {
                     tracing::warn!("Claude request failed (attempt {}): {}", attempt + 1, e);
-                    last_error = Some(e);
 
                     // Only record circuit breaker failure for certain error types
                     if matches!(
-                        &last_error,
-                        Some(RemediationError::ClaudeUnavailable(_))
-                            | Some(RemediationError::Timeout)
-                            | Some(RemediationError::ApiError(_))
+                        &e,
+                        RemediationError::ClaudeUnavailable(_)
+                            | RemediationError::Timeout
+                            | RemediationError::ApiError(_)
                     ) {
                         self.circuit_breaker.record_failure().await;
                     }

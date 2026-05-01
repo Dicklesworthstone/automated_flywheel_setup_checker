@@ -249,10 +249,14 @@ set +e
                 Duration::from_secs(180),
                 manager.exec_in_container(
                     &container_id,
-                    &["bash", "-c", "apt-get update -qq && apt-get install -y -qq \
+                    &[
+                        "bash",
+                        "-c",
+                        "apt-get update -qq && apt-get install -y -qq \
                         curl ca-certificates git unzip xz-utils tar jq \
                         build-essential sudo gnupg libssl-dev pkg-config \
-                        python3 rsync zsh >/dev/null 2>&1"],
+                        python3 rsync zsh >/dev/null 2>&1",
+                    ],
                 ),
             )
             .await;
@@ -481,10 +485,7 @@ set +e
         let curl_bash_script = if test.expected_sha256.is_some() {
             let script_file = temp_path.join(format!("installer_{}.sh", test.name));
             let dry_run_flag = if self.config.dry_run { " --dry-run" } else { "" };
-            format!(
-                "{} -s --{} < '{}'",
-                self.config.bash_path, dry_run_flag, script_file.display()
-            )
+            format!("{} -s --{} < '{}'", self.config.bash_path, dry_run_flag, script_file.display())
         } else {
             self.build_verified_install_script(&test.url, &test.name, None)
         };
