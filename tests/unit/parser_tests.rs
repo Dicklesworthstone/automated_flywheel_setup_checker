@@ -100,6 +100,31 @@ fn test_classify_wget_failed() {
     assert_eq!(result.severity, ErrorSeverity::Transient);
 }
 
+#[test]
+fn test_classify_github_api_rate_limit() {
+    let stderr = r#"Could not determine latest version. The response was: {"message":"API rate limit exceeded for 173.56.62.32"}"#;
+    let result = classify_error(stderr, 1);
+    assert_eq!(result.severity, ErrorSeverity::Transient);
+    assert_eq!(result.category, "network");
+    assert!(result.retryable);
+}
+
+#[test]
+fn test_classify_github_release_info_fetch_failure() {
+    let result = classify_error("Could not fetch release info from GitHub", 1);
+    assert_eq!(result.severity, ErrorSeverity::Transient);
+    assert!(result.retryable);
+}
+
+#[test]
+fn test_classify_apt_fetch_archives_failure() {
+    let stderr =
+        "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?";
+    let result = classify_error(stderr, 100);
+    assert_eq!(result.severity, ErrorSeverity::Transient);
+    assert!(result.retryable);
+}
+
 // ============================================================================
 // Permission Error Classification Tests
 // ============================================================================
