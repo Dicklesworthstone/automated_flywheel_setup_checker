@@ -7,9 +7,9 @@
 //! - Summary generation from test results
 
 use automated_flywheel_setup_checker::reporting::{
-    JsonlReporter, JsonlWriter, LogEntry, LogLevel, ResultPersister, RunSummary, SummaryGenerator,
+    JsonlReporter, JsonlWriter, LogEntry, LogLevel, ResultPersister, SummaryGenerator,
 };
-use automated_flywheel_setup_checker::runner::{TestResult, TestStatus};
+use automated_flywheel_setup_checker::runner::TestResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;

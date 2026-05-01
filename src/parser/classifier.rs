@@ -67,6 +67,17 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         };
     }
 
+    // Broken dpkg/apt state needs explicit repair before retrying ACFS.
+    if is_apt_repair_error(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Dependency,
+            category: "apt_repair_failed".to_string(),
+            suggestion: Some("Repair dpkg/apt package state before retrying ACFS".to_string()),
+            retryable: false,
+            confidence: 0.9,
+        };
+    }
+
     // Command not found (exit code 127 is definitive)
     if exit_code == 127 {
         return ErrorClassification {
@@ -187,6 +198,21 @@ fn is_network_error(stderr: &str) -> bool {
         r"(?i)unable to acquire.*lock",
         r"(?i)dpkg.*lock",
         r"(?i)apt.*lock",
+    ];
+
+    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+}
+
+fn is_apt_repair_error(stderr: &str) -> bool {
+    let patterns = [
+        r"(?i)dpkg\s+--configure\s+-a\s+failed",
+        r"(?i)apt-get\s+-f\s+install\s+failed",
+        r"(?i)apt\s+repair.*failed",
+        r"(?i)dpkg\s+repair.*failed",
+        r"(?i)unmet dependencies",
+        r"(?i)held broken packages",
+        r"(?i)try ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
+        r"(?i)you might want to run ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
     ];
 
     patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))

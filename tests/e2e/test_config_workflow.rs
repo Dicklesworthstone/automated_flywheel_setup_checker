@@ -203,7 +203,7 @@ max_attempts = 3
         );
 
         let (_dir, path) = create_temp_config(&toml_content);
-        let config = load_config(Some(&path)).expect(&format!("Should parse {} level", level));
+        let config = load_config(Some(&path)).expect("Should parse configured log level");
         assert_eq!(config.general.log_level, level);
     }
 }

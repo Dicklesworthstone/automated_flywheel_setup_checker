@@ -189,10 +189,6 @@ impl RateLimiter {
             }
         }
     }
-
-    pub fn available_tokens(&self) -> u64 {
-        self.tokens.load(Ordering::SeqCst)
-    }
 }
 
 /// Retry configuration with exponential backoff

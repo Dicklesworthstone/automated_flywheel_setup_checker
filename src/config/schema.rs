@@ -21,7 +21,7 @@ fn default_watchdog_interval() -> u64 {
 }
 
 /// Root configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     #[serde(default)]
@@ -38,20 +38,6 @@ pub struct Config {
     pub monitoring: MonitoringConfig,
     #[serde(default)]
     pub watchdog: WatchdogConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            docker: DockerConfig::default(),
-            execution: ExecutionConfig::default(),
-            remediation: RemediationConfig::default(),
-            notifications: NotificationsConfig::default(),
-            monitoring: MonitoringConfig::default(),
-            watchdog: WatchdogConfig::default(),
-        }
-    }
 }
 
 /// General configuration settings

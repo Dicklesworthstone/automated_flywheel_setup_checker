@@ -12,7 +12,7 @@
 
 use automated_flywheel_setup_checker::remediation::{
     is_command_safe, ChangeType, CircuitState, ClaudeRemediation, ClaudeRemediationConfig,
-    FallbackSuggestion, FileChange, RemediationMethod, RemediationResult, RetryConfig, SafetyCheck,
+    FallbackSuggestion, FileChange, RemediationMethod, RemediationResult, RetryConfig,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -227,8 +227,7 @@ fn test_claude_remediation_cost_tracking() {
 
 #[test]
 fn test_claude_remediation_is_enabled() {
-    let mut config = ClaudeRemediationConfig::default();
-    config.enabled = true;
+    let config = ClaudeRemediationConfig { enabled: true, ..Default::default() };
     let remediation = ClaudeRemediation::new(PathBuf::from("/tmp"), config);
     assert!(remediation.is_enabled());
 }
@@ -308,7 +307,7 @@ fn test_retry_config_with_jitter() {
     // All delays should be around 10s +/- 2s (20% of 10s)
     for delay in delays {
         let secs = delay.as_secs_f64();
-        assert!(secs >= 8.0 && secs <= 12.0, "Delay {} not in expected range", secs);
+        assert!((8.0..=12.0).contains(&secs), "Delay {} not in expected range", secs);
     }
 }
 

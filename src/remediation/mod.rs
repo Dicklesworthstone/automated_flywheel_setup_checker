@@ -10,6 +10,6 @@ pub use claude::{
     ClaudeRemediationConfig, FileChange, RateLimitError, RemediationError, RemediationHealth,
     RemediationMethod, RemediationResult, RetryConfig, VerificationResult,
 };
-pub use fallback::FallbackSuggestion;
+pub use fallback::{generate_suggestions, FallbackSuggestion};
 pub use prompts::{generate_dry_run_report, generate_prompt};
 pub use safety::{is_command_safe, SafetyCheck};

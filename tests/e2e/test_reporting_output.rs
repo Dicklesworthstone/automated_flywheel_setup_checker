@@ -104,9 +104,9 @@ fn test_jsonl_reporter_filtering() {
 #[test]
 fn test_summary_generator_creation() {
     let generator = SummaryGenerator::new("test-run-001");
-    // Just verify it can be created
-    assert!(true);
-    drop(generator);
+    let summary = generator.generate(&[]);
+    assert_eq!(summary.run_id, "test-run-001");
+    assert_eq!(summary.total_tests, 0);
 }
 
 #[test]

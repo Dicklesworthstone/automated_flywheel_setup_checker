@@ -16,6 +16,9 @@ use tracing::{debug, info, warn};
 use super::container::{ContainerConfig, ContainerGuard, ContainerManager, PullPolicy};
 use super::installer::{ChecksumResult, InstallerTest, TestResult, TestStatus};
 
+const CURL_BIN: &str = "curl";
+const BASH_BIN: &str = "bash";
+
 /// Execution backend selection
 #[derive(Debug, Clone)]
 pub enum ExecutionBackend {
@@ -41,10 +44,6 @@ pub struct RunnerConfig {
     pub default_timeout: Duration,
     /// Whether to run in dry-run mode (--dry-run flag passed to installer)
     pub dry_run: bool,
-    /// Path to curl binary (used in both backends)
-    pub curl_path: String,
-    /// Path to bash binary (used in both backends)
-    pub bash_path: String,
     /// Additional environment variables to set
     pub extra_env: Vec<(String, String)>,
     /// Execution backend
@@ -56,8 +55,6 @@ impl Default for RunnerConfig {
         Self {
             default_timeout: Duration::from_secs(300),
             dry_run: false,
-            curl_path: "curl".to_string(),
-            bash_path: "bash".to_string(),
             extra_env: Vec::new(),
             backend: ExecutionBackend::Docker {
                 container_config: ContainerConfig::default(),
@@ -113,20 +110,17 @@ if [ "$ACTUAL" != "{expected}" ]; then
 fi
 set +e
 {bash} -s --{flags} < '{path}'"#,
-                    curl = self.config.curl_path,
+                    curl = CURL_BIN,
                     url = url,
                     path = script_path,
                     expected = expected,
-                    bash = self.config.bash_path,
+                    bash = BASH_BIN,
                     flags = dry_run_flag,
                 )
             }
             None => {
                 // No checksum — use curl|bash directly
-                format!(
-                    "{} -fsSL '{}' | {} -s --{}",
-                    self.config.curl_path, url, self.config.bash_path, dry_run_flag
-                )
+                format!("{CURL_BIN} -fsSL '{url}' | {BASH_BIN} -s --{dry_run_flag}")
             }
         }
     }
@@ -413,7 +407,7 @@ set +e
             let download_start = Instant::now();
 
             // Download the script
-            let dl_output = Command::new(&self.config.curl_path)
+            let dl_output = Command::new(CURL_BIN)
                 .args(["-fsSL", &test.url, "-o"])
                 .arg(&script_file)
                 .output()
@@ -485,7 +479,7 @@ set +e
         let curl_bash_script = if test.expected_sha256.is_some() {
             let script_file = temp_path.join(format!("installer_{}.sh", test.name));
             let dry_run_flag = if self.config.dry_run { " --dry-run" } else { "" };
-            format!("{} -s --{} < '{}'", self.config.bash_path, dry_run_flag, script_file.display())
+            format!("{BASH_BIN} -s --{dry_run_flag} < '{}'", script_file.display())
         } else {
             self.build_verified_install_script(&test.url, &test.name, None)
         };
@@ -493,7 +487,7 @@ set +e
         debug!(script = %curl_bash_script, "Executing installer script locally");
 
         // Create the command
-        let mut cmd = Command::new(&self.config.bash_path);
+        let mut cmd = Command::new(BASH_BIN);
         cmd.arg("-c")
             .arg(&curl_bash_script)
             .current_dir(&temp_path)
@@ -657,8 +651,6 @@ mod tests {
         let config = RunnerConfig::default();
         assert_eq!(config.default_timeout, Duration::from_secs(300));
         assert!(!config.dry_run);
-        assert_eq!(config.curl_path, "curl");
-        assert_eq!(config.bash_path, "bash");
         assert!(matches!(config.backend, ExecutionBackend::Docker { .. }));
     }
 
@@ -674,10 +666,10 @@ mod tests {
         let runner = InstallerTestRunner::new(config);
 
         let backoff1 = runner.calculate_backoff(1);
-        assert!(backoff1 >= 2000 && backoff1 <= 3000);
+        assert!((2000..=3000).contains(&backoff1));
 
         let backoff2 = runner.calculate_backoff(2);
-        assert!(backoff2 >= 4000 && backoff2 <= 6000);
+        assert!((4000..=6000).contains(&backoff2));
     }
 
     #[test]

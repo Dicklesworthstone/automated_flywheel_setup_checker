@@ -160,7 +160,7 @@ impl MetricsExporter {
     /// Record a histogram value
     pub fn observe_histogram(&mut self, name: &str, value: f64) {
         let key = format!("{}_{}", self.prefix, name);
-        self.metrics.histograms.entry(key).or_insert_with(Vec::new).push(value);
+        self.metrics.histograms.entry(key).or_default().push(value);
     }
 
     /// Export metrics in Prometheus text format

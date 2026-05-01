@@ -152,6 +152,17 @@ enum ConfigCmd {
     Validate,
 }
 
+struct CheckOptions {
+    installers: Vec<String>,
+    parallel: usize,
+    timeout: u64,
+    dry_run: bool,
+    remediate: bool,
+    fail_fast: bool,
+    local: bool,
+    format: OutputFormat,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -206,14 +217,16 @@ async fn run_command(
             }
             cmd_check(
                 config,
-                installers.clone(),
-                *parallel,
-                *timeout,
-                *dry_run,
-                *remediate,
-                *fail_fast,
-                *local,
-                cli.format,
+                CheckOptions {
+                    installers: installers.clone(),
+                    parallel: *parallel,
+                    timeout: *timeout,
+                    dry_run: *dry_run,
+                    remediate: *remediate,
+                    fail_fast: *fail_fast,
+                    local: *local,
+                    format: cli.format,
+                },
             )
             .await?;
         }
@@ -266,14 +279,7 @@ async fn cmd_serve(
 
 async fn cmd_check(
     config: &automated_flywheel_setup_checker::Config,
-    installers: Vec<String>,
-    parallel: usize,
-    timeout: u64,
-    dry_run: bool,
-    remediate: bool,
-    fail_fast: bool,
-    local: bool,
-    format: OutputFormat,
+    options: CheckOptions,
 ) -> Result<()> {
     use std::time::Duration;
 
@@ -289,20 +295,20 @@ async fn cmd_check(
         .installers
         .iter()
         .filter(|(name, entry)| {
-            entry.enabled && (installers.is_empty() || installers.contains(name))
+            entry.enabled && (options.installers.is_empty() || options.installers.contains(name))
         })
         .collect();
 
-    if dry_run {
-        match format {
+    if options.dry_run {
+        match options.format {
             OutputFormat::Human => {
                 println!(
                     "Would check {} installer(s) with {} parallel workers:",
                     enabled.len(),
-                    parallel
+                    options.parallel
                 );
-                println!("Timeout: {}s per installer", timeout);
-                println!("Backend: {}", if local { "local" } else { "docker" });
+                println!("Timeout: {}s per installer", options.timeout);
+                println!("Backend: {}", if options.local { "local" } else { "docker" });
                 println!();
                 for (name, entry) in &enabled {
                     if let Some(ver) = &entry.version {
@@ -316,9 +322,9 @@ async fn cmd_check(
                 let output = serde_json::json!({
                     "dry_run": true,
                     "installers": enabled.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-                    "parallel": parallel,
-                    "timeout": timeout,
-                    "backend": if local { "local" } else { "docker" },
+                    "parallel": options.parallel,
+                    "timeout": options.timeout,
+                    "backend": if options.local { "local" } else { "docker" },
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
@@ -327,14 +333,14 @@ async fn cmd_check(
     }
 
     // Select execution backend
-    let backend = if local {
+    let backend = if options.local {
         ExecutionBackend::Local
     } else {
         let container_config = ContainerConfig {
             image: config.docker.image.clone(),
             memory_limit: parse_memory_limit(&config.docker.memory_limit),
             cpu_quota: Some(config.docker.cpu_quota),
-            timeout_seconds: timeout,
+            timeout_seconds: options.timeout,
             volumes: Vec::new(),
             environment: Vec::new(),
         };
@@ -346,7 +352,7 @@ async fn cmd_check(
 
     // Set up the runner with configuration
     let runner_config = RunnerConfig {
-        default_timeout: Duration::from_secs(timeout),
+        default_timeout: Duration::from_secs(options.timeout),
         dry_run: false,
         backend,
         ..Default::default()
@@ -359,8 +365,8 @@ async fn cmd_check(
         .filter_map(|(name, entry)| {
             // Skip entries without URLs
             let url = entry.url.as_ref()?;
-            let mut test =
-                InstallerTest::new(name.as_str(), url).with_timeout(Duration::from_secs(timeout));
+            let mut test = InstallerTest::new(name.as_str(), url)
+                .with_timeout(Duration::from_secs(options.timeout));
 
             // Add checksum if available
             if let Some(sha256) = &entry.sha256 {
@@ -372,9 +378,10 @@ async fn cmd_check(
         .collect();
 
     // Run tests — use parallel runner when parallel > 1
-    let results = if parallel > 1 {
+    let results = if options.parallel > 1 {
         use automated_flywheel_setup_checker::runner::ParallelRunner;
-        let pool = ParallelRunner::new(parallel, runner_config.clone()).with_fail_fast(fail_fast);
+        let pool = ParallelRunner::new(options.parallel, runner_config.clone())
+            .with_fail_fast(options.fail_fast);
         pool.run_all(tests).await?
     } else {
         // Sequential execution
@@ -382,7 +389,7 @@ async fn cmd_check(
         for test in &tests {
             let result = runner.run_test_with_retry(test).await?;
             sequential_results.push(result);
-            if fail_fast && sequential_results.last().map(|r| !r.success).unwrap_or(false) {
+            if options.fail_fast && sequential_results.last().map(|r| !r.success).unwrap_or(false) {
                 break;
             }
         }
@@ -393,7 +400,7 @@ async fn cmd_check(
 
     // Print per-result output
     for result in &results {
-        match format {
+        match options.format {
             OutputFormat::Human => {
                 let status_icon = if result.success { "\u{2713}" } else { "\u{2717}" };
                 println!(
@@ -414,7 +421,7 @@ async fn cmd_check(
     }
 
     // Summary output
-    match format {
+    match options.format {
         OutputFormat::Human => {
             let passed = results.iter().filter(|r| r.success).count();
             let failed = results.len() - passed;
@@ -443,12 +450,12 @@ async fn cmd_check(
     }
 
     // Remediation for failures (when --remediate is enabled)
-    if remediate && any_failed {
+    if options.remediate && any_failed {
         use automated_flywheel_setup_checker::remediation::{
             generate_prompt, ClaudeRemediation, ClaudeRemediationConfig as RemConfig,
         };
 
-        if matches!(format, OutputFormat::Human) {
+        if matches!(options.format, OutputFormat::Human) {
             println!("\nAttempting auto-remediation for failures...");
         }
 
@@ -473,7 +480,7 @@ async fn cmd_check(
 
             match remediation.execute_with_resilience(&prompt).await {
                 Ok(rem_result) => {
-                    if matches!(format, OutputFormat::Human) {
+                    if matches!(options.format, OutputFormat::Human) {
                         let status = if rem_result.success { "succeeded" } else { "partial" };
                         println!(
                             "\n  Remediation {} for {} (method: {:?}, cost: ${:.4})",
@@ -504,7 +511,7 @@ async fn cmd_check(
                     }
                 }
                 Err(e) => {
-                    if matches!(format, OutputFormat::Human) {
+                    if matches!(options.format, OutputFormat::Human) {
                         println!("  Remediation failed for {}: {}", result.installer_name, e);
                     }
                 }
@@ -518,7 +525,7 @@ async fn cmd_check(
     let persister = automated_flywheel_setup_checker::reporting::ResultPersister::default_dir();
     match persister.persist(&results, &run_id, started_at) {
         Ok(path) => {
-            if matches!(format, OutputFormat::Human) {
+            if matches!(options.format, OutputFormat::Human) {
                 println!("Results saved to: {}", path.display());
             }
         }
@@ -527,7 +534,7 @@ async fn cmd_check(
         }
     }
 
-    match persist_metrics_snapshot(&results, remediate && any_failed, started_at) {
+    match persist_metrics_snapshot(&results, options.remediate && any_failed, started_at) {
         Ok(path) => {
             tracing::debug!(path = %path.display(), "Metrics snapshot updated");
         }

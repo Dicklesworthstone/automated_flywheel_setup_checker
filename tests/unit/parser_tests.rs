@@ -15,7 +15,7 @@ use std::fs;
 // Helper to load fixtures
 fn load_error_fixture(name: &str) -> String {
     let path = format!("tests/unit/fixtures/error_outputs/{}", name);
-    fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to load fixture: {}", path))
+    fs::read_to_string(&path).expect("error fixture should be readable")
 }
 
 // ============================================================================
@@ -123,6 +123,34 @@ fn test_classify_apt_fetch_archives_failure() {
     let result = classify_error(stderr, 100);
     assert_eq!(result.severity, ErrorSeverity::Transient);
     assert!(result.retryable);
+}
+
+#[test]
+fn test_classify_dpkg_repair_failure() {
+    let stderr = "[fail] dpkg repair\n       dpkg --configure -a failed (exit 27)";
+    let result = classify_error(stderr, 1);
+    assert_eq!(result.severity, ErrorSeverity::Dependency);
+    assert_eq!(result.category, "apt_repair_failed");
+    assert!(!result.retryable);
+    assert!(result.confidence >= 0.85);
+}
+
+#[test]
+fn test_classify_apt_fix_install_failure() {
+    let stderr = "[fail] apt repair\n       apt-get -f install failed (exit 100)";
+    let result = classify_error(stderr, 100);
+    assert_eq!(result.severity, ErrorSeverity::Dependency);
+    assert_eq!(result.category, "apt_repair_failed");
+    assert!(!result.retryable);
+}
+
+#[test]
+fn test_classify_unmet_dependencies_as_apt_repair() {
+    let stderr = "E: Unmet dependencies. Try 'apt --fix-broken install' with no packages.";
+    let result = classify_error(stderr, 100);
+    assert_eq!(result.severity, ErrorSeverity::Dependency);
+    assert_eq!(result.category, "apt_repair_failed");
+    assert!(!result.retryable);
 }
 
 // ============================================================================

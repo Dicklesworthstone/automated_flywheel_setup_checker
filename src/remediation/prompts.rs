@@ -112,6 +112,25 @@ Fix this by:
 Workspace: {workspace_str}"#
         ),
 
+        "apt_repair_failed" => format!(
+            r#"ACFS installer failed because dpkg/apt repair did not complete:
+
+{stderr}
+
+This is not a normal transient network failure. The package database needs to be repaired before ACFS can safely continue.
+
+Fix this by:
+1. Check whether another package manager is active: sudo fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock
+2. If no package manager is active, repair interrupted packages: sudo dpkg --configure -a
+3. Repair broken dependencies: sudo apt-get -f install -y
+4. Refresh package metadata: sudo apt-get update
+5. Retry ACFS update after these commands complete successfully
+
+Workspace: {workspace_str}
+
+Do not remove apt or dpkg lock files. If a lock is held, wait for the owning process or inspect it first."#
+        ),
+
         "permission" => format!(
             r#"ACFS installer failed due to permission issues:
 
@@ -276,6 +295,21 @@ mod tests {
 
         assert!(prompt.contains("command is not installed"));
         assert!(prompt.contains("apt"));
+    }
+
+    #[test]
+    fn test_apt_repair_failed_prompt() {
+        let classification = test_classification("apt_repair_failed", ErrorSeverity::Dependency);
+        let prompt = generate_prompt(
+            &classification,
+            "apt-get -f install failed (exit 100)",
+            &PathBuf::from("/tmp"),
+        );
+
+        assert!(prompt.contains("dpkg/apt repair"));
+        assert!(prompt.contains("sudo dpkg --configure -a"));
+        assert!(prompt.contains("sudo apt-get -f install -y"));
+        assert!(prompt.contains("Do not remove apt or dpkg lock files"));
     }
 
     #[test]

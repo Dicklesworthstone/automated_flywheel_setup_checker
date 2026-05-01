@@ -95,11 +95,10 @@ impl ContainerManager {
         let image = &self.config.image;
 
         // Fast path: already present?
-        if self.pull_policy != PullPolicy::Always {
-            if self.docker.inspect_image(image).await.is_ok() {
-                debug!(image = %image, "Image already present locally");
-                return Ok(());
-            }
+        if self.pull_policy != PullPolicy::Always && self.docker.inspect_image(image).await.is_ok()
+        {
+            debug!(image = %image, "Image already present locally");
+            return Ok(());
         }
 
         if self.pull_policy == PullPolicy::Never {
