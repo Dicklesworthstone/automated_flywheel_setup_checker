@@ -27,9 +27,13 @@ Fix this by:
 2. Verify with: bun run generate --diff
 3. If new tools were added, check checksums.yaml has entries for them
 4. If checksums.yaml is missing entries, add to KNOWN_INSTALLERS in scripts/lib/security.sh
-5. Run: ./scripts/lib/security.sh --update-checksums > checksums.yaml 2>/dev/null
-6. Regenerate again: bun run generate
-7. Commit all changes with message: "fix: regenerate scripts after manifest change"
+5. Generate a candidate checksum file:
+   candidate="/tmp/acfs-checksums.$$.candidate.yaml"
+   ./scripts/lib/security.sh --update-checksums > "$candidate"
+6. Review the diff: diff -u checksums.yaml "$candidate" || [[ $? -eq 1 ]]
+7. Replace checksums.yaml only if the diff is limited to the timestamp header and the intended tool entries
+8. Regenerate again: bun run generate
+9. Commit all changes with message: "fix: regenerate scripts after manifest change"
 
 Workspace: {workspace_str}
 
@@ -46,10 +50,13 @@ This means an upstream installer was updated but checksums.yaml has the old hash
 Fix this by:
 1. Identify which tool's installer changed from the error message
 2. Download the new installer and verify it's legitimate
-3. Update checksums.yaml with the new SHA256 hash
+3. Generate a candidate checksum file:
+   candidate="/tmp/acfs-checksums.$$.candidate.yaml"
+   ./scripts/lib/security.sh --update-checksums > "$candidate"
 4. If this is a new tool, add it to KNOWN_INSTALLERS in scripts/lib/security.sh
-5. Run: ./scripts/lib/security.sh --update-checksums > checksums.yaml 2>/dev/null
-6. Commit with message: "fix: update <tool> installer checksum"
+5. Review the diff: diff -u checksums.yaml "$candidate" || [[ $? -eq 1 ]]
+6. Replace checksums.yaml only if the diff is limited to the timestamp header and the intended tool entry
+7. Commit with message: "fix: update <tool> installer checksum"
 
 Workspace: {workspace_str}
 
@@ -230,6 +237,9 @@ mod tests {
         assert!(prompt.contains("Bootstrap mismatch"));
         assert!(prompt.contains("bun run generate"));
         assert!(prompt.contains("manifest_index.sh"));
+        assert!(prompt.contains("candidate=\"/tmp/acfs-checksums.$$.candidate.yaml\""));
+        assert!(prompt.contains("diff -u checksums.yaml \"$candidate\""));
+        assert!(!prompt.contains("> checksums.yaml 2>/dev/null"));
     }
 
     #[test]
@@ -244,6 +254,9 @@ mod tests {
         assert!(prompt.contains("Checksum mismatch"));
         assert!(prompt.contains("checksums.yaml"));
         assert!(prompt.contains("KNOWN_INSTALLERS"));
+        assert!(prompt.contains("candidate=\"/tmp/acfs-checksums.$$.candidate.yaml\""));
+        assert!(prompt.contains("intended tool entry"));
+        assert!(!prompt.contains("> checksums.yaml 2>/dev/null"));
     }
 
     #[test]
