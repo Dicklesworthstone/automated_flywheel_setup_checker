@@ -433,17 +433,18 @@ fn test_url_check_result_network_error() {
 }
 
 #[test]
-fn test_url_check_result_redirect() {
+fn test_url_check_result_redirect_target_reachable() {
     let result = UrlCheckResult {
         name: "redirect".to_string(),
         url: "https://example.com/old-path".to_string(),
-        status: Some(301),
+        status: Some(200),
         response_time_ms: 80,
-        reachable: false,
-        error: Some("Redirect (301)".to_string()),
+        reachable: true,
+        error: None,
     };
-    assert!(!result.reachable);
-    assert_eq!(result.status, Some(301));
+    assert!(result.reachable);
+    assert_eq!(result.status, Some(200));
+    assert!(result.error.is_none());
 }
 
 #[test]
@@ -487,6 +488,83 @@ async fn test_check_urls_disabled_skipped() {
     let checksums = ChecksumsFile { installers };
     let results = check_urls(&checksums).await;
     assert!(results.is_empty(), "Disabled installers should be skipped");
+}
+
+#[tokio::test]
+async fn test_check_urls_follows_redirects() {
+    use automated_flywheel_setup_checker::checksums::check_urls;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/install.sh"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/download/install.sh", server.uri())),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(path("/download/install.sh"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut installers = HashMap::new();
+    installers.insert(
+        "redirecting-tool".to_string(),
+        InstallerEntry {
+            url: Some(format!("{}/install.sh", server.uri())),
+            sha256: None,
+            version: None,
+            enabled: true,
+            tags: vec![],
+            extra: HashMap::new(),
+        },
+    );
+
+    let checksums = ChecksumsFile { installers };
+    let results = check_urls(&checksums).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].reachable, "redirecting installer URL should be reachable");
+    assert_eq!(results[0].status, Some(200));
+    assert!(results[0].error.is_none());
+}
+
+#[tokio::test]
+async fn test_check_urls_reports_unfollowed_redirect() {
+    use automated_flywheel_setup_checker::checksums::check_urls;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/install.sh"))
+        .respond_with(ResponseTemplate::new(302))
+        .mount(&server)
+        .await;
+
+    let mut installers = HashMap::new();
+    installers.insert(
+        "broken-redirect-tool".to_string(),
+        InstallerEntry {
+            url: Some(format!("{}/install.sh", server.uri())),
+            sha256: None,
+            version: None,
+            enabled: true,
+            tags: vec![],
+            extra: HashMap::new(),
+        },
+    );
+
+    let checksums = ChecksumsFile { installers };
+    let results = check_urls(&checksums).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].reachable);
+    assert_eq!(results[0].status, Some(302));
+    assert_eq!(results[0].error.as_deref(), Some("Redirect (302)"));
 }
 
 // ============================================================================

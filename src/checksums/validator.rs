@@ -93,6 +93,9 @@ pub struct UrlCheckResult {
 /// Check all URLs in a checksums file concurrently
 ///
 /// Makes HTTP HEAD requests to each installer URL with a concurrency limit.
+/// Redirects are followed because installer URLs are meant to behave like
+/// curl-style fetches, where GitHub and vendor-hosted endpoints commonly
+/// redirect to a stable download target.
 pub async fn check_urls(checksums: &ChecksumsFile) -> Vec<UrlCheckResult> {
     use std::sync::Arc;
     use std::time::Instant;
@@ -101,7 +104,7 @@ pub async fn check_urls(checksums: &ChecksumsFile) -> Vec<UrlCheckResult> {
     let semaphore = Arc::new(Semaphore::new(10)); // 10 concurrent requests
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none()) // Don't follow redirects, report them
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
