@@ -163,6 +163,19 @@ struct CheckOptions {
     format: OutputFormat,
 }
 
+const HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS: u64 = 900;
+
+fn base_image_timeout_seconds(requested: u64) -> u64 {
+    requested.max(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS)
+}
+
+fn installer_timeout_seconds(installer_name: &str, requested: u64) -> u64 {
+    match installer_name {
+        "mdwb" => requested.max(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS),
+        _ => requested,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -308,6 +321,10 @@ async fn cmd_check(
                     options.parallel
                 );
                 println!("Timeout: {}s per installer", options.timeout);
+                println!(
+                    "Heavy setup floor: {}s for Docker base image and known slow installers",
+                    HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS
+                );
                 println!("Backend: {}", if options.local { "local" } else { "docker" });
                 println!();
                 for (name, entry) in &enabled {
@@ -324,6 +341,7 @@ async fn cmd_check(
                     "installers": enabled.iter().map(|(n, _)| n).collect::<Vec<_>>(),
                     "parallel": options.parallel,
                     "timeout": options.timeout,
+                    "heavy_setup_timeout_floor": HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS,
                     "backend": if options.local { "local" } else { "docker" },
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
@@ -340,7 +358,7 @@ async fn cmd_check(
             image: config.docker.image.clone(),
             memory_limit: parse_memory_limit(&config.docker.memory_limit),
             cpu_quota: Some(config.docker.cpu_quota),
-            timeout_seconds: options.timeout,
+            timeout_seconds: base_image_timeout_seconds(options.timeout),
             volumes: Vec::new(),
             environment: Vec::new(),
         };
@@ -365,8 +383,9 @@ async fn cmd_check(
         .filter_map(|(name, entry)| {
             // Skip entries without URLs
             let url = entry.url.as_ref()?;
-            let mut test = InstallerTest::new(name.as_str(), url)
-                .with_timeout(Duration::from_secs(options.timeout));
+            let timeout = installer_timeout_seconds(name.as_str(), options.timeout);
+            let mut test =
+                InstallerTest::new(name.as_str(), url).with_timeout(Duration::from_secs(timeout));
 
             // Add checksum if available
             if let Some(sha256) = &entry.sha256 {
@@ -1013,4 +1032,26 @@ fn build_notification_summary(
     }
 
     (title, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_image_timeout_has_heavy_setup_floor() {
+        assert_eq!(base_image_timeout_seconds(60), HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
+        assert_eq!(base_image_timeout_seconds(1_200), 1_200);
+    }
+
+    #[test]
+    fn mdwb_timeout_has_heavy_setup_floor() {
+        assert_eq!(installer_timeout_seconds("mdwb", 300), HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
+        assert_eq!(installer_timeout_seconds("mdwb", 1_200), 1_200);
+    }
+
+    #[test]
+    fn ordinary_installer_timeout_is_unchanged() {
+        assert_eq!(installer_timeout_seconds("dcg", 300), 300);
+    }
 }
