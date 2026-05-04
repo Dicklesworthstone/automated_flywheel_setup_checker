@@ -159,7 +159,9 @@ impl ContainerManager {
         info!("Building afsc-base image (first run — this takes ~2 minutes)...");
 
         // Find the Dockerfile
-        let dockerfile_path = Self::find_dockerfile()?;
+        let dockerfile_path = Self::find_dockerfile()?
+            .canonicalize()
+            .context("Failed to canonicalize Dockerfile.base path")?;
         let context_dir = dockerfile_path.parent().and_then(|p| p.parent()).ok_or_else(|| {
             anyhow::anyhow!("Cannot determine build context from Dockerfile path")
         })?;
