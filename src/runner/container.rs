@@ -12,7 +12,8 @@ use bollard::image::CreateImageOptions;
 use bollard::Docker;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for Docker containers
@@ -86,6 +87,11 @@ impl ContainerManager {
     /// The tag used for the pre-built ACFS base image.
     pub const AFSC_BASE_IMAGE: &'static str = "afsc-base:latest";
 
+    fn base_image_build_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// Ensure the configured image is available locally.
     ///
     /// If the image is `afsc-base:latest` and doesn't exist, build it from
@@ -150,6 +156,8 @@ impl ContainerManager {
     /// ~2 minutes but only happens once — subsequent runs reuse the cached
     /// image.
     async fn build_base_image(&self) -> Result<()> {
+        let _build_guard = Self::base_image_build_lock().lock().await;
+
         // Check if already built
         if self.docker.inspect_image(Self::AFSC_BASE_IMAGE).await.is_ok() {
             debug!("afsc-base image already built");
@@ -166,8 +174,9 @@ impl ContainerManager {
             anyhow::anyhow!("Cannot determine build context from Dockerfile path")
         })?;
 
-        // Build using docker CLI (simpler than Bollard's build API which needs tar contexts)
-        let output = tokio::process::Command::new("docker")
+        let build_timeout = Duration::from_secs(self.config.timeout_seconds.max(60));
+        let mut command = tokio::process::Command::new("docker");
+        command
             .args([
                 "build",
                 "-t",
@@ -176,9 +185,19 @@ impl ContainerManager {
                 &dockerfile_path.to_string_lossy(),
                 &context_dir.to_string_lossy(),
             ])
-            .output()
-            .await
-            .context("Failed to run docker build")?;
+            .kill_on_drop(true);
+
+        // Build using docker CLI (simpler than Bollard's build API which needs tar contexts)
+        let output = match tokio::time::timeout(build_timeout, command.output()).await {
+            Ok(result) => result.context("Failed to run docker build")?,
+            Err(_) => {
+                anyhow::bail!(
+                    "Timed out after {}s building {}",
+                    build_timeout.as_secs(),
+                    Self::AFSC_BASE_IMAGE
+                );
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

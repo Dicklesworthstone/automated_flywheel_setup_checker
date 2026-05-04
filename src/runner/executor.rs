@@ -13,6 +13,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use crate::parser::classify_error;
+
 use super::container::{ContainerConfig, ContainerGuard, ContainerManager, PullPolicy};
 use super::installer::{ChecksumResult, InstallerTest, TestResult, TestStatus};
 
@@ -88,7 +90,7 @@ impl InstallerTestRunner {
         installer_name: &str,
         expected_sha256: Option<&str>,
     ) -> String {
-        let dry_run_flag = if self.config.dry_run { " --dry-run" } else { "" };
+        let flags = self.installer_flags(installer_name);
 
         match expected_sha256 {
             Some(expected) => {
@@ -115,13 +117,30 @@ set +e
                     path = script_path,
                     expected = expected,
                     bash = BASH_BIN,
-                    flags = dry_run_flag,
+                    flags = flags,
                 )
             }
             None => {
                 // No checksum — use curl|bash directly
-                format!("{CURL_BIN} -fsSL '{url}' | {BASH_BIN} -s --{dry_run_flag}")
+                format!("{CURL_BIN} -fsSL '{url}' | {BASH_BIN} -s --{flags}")
             }
+        }
+    }
+
+    fn installer_args(installer_name: &str) -> &'static str {
+        match installer_name {
+            "rust" => "-y --no-modify-path",
+            _ => "",
+        }
+    }
+
+    fn installer_flags(&self, installer_name: &str) -> String {
+        let installer_args = Self::installer_args(installer_name);
+        match (self.config.dry_run, installer_args.is_empty()) {
+            (true, true) => " --dry-run".to_string(),
+            (true, false) => format!(" --dry-run {installer_args}"),
+            (false, true) => String::new(),
+            (false, false) => format!(" {installer_args}"),
         }
     }
 
@@ -478,8 +497,8 @@ set +e
         // Using `bash -s -- < file` matches the curl|bash pipe behavior.
         let curl_bash_script = if test.expected_sha256.is_some() {
             let script_file = temp_path.join(format!("installer_{}.sh", test.name));
-            let dry_run_flag = if self.config.dry_run { " --dry-run" } else { "" };
-            format!("{BASH_BIN} -s --{dry_run_flag} < '{}'", script_file.display())
+            let flags = self.installer_flags(&test.name);
+            format!("{BASH_BIN} -s --{flags} < '{}'", script_file.display())
         } else {
             self.build_verified_install_script(&test.url, &test.name, None)
         };
@@ -607,7 +626,7 @@ set +e
         let mut result = self.run_test(test).await?;
         let mut attempts = 1;
 
-        while !result.success && attempts < test.retry_count {
+        while attempts < test.retry_count && Self::should_retry_result(&result) {
             let wait_ms = self.calculate_backoff(attempts);
             info!(
                 installer = %test.name,
@@ -626,6 +645,24 @@ set +e
 
         result.max_attempts = test.retry_count;
         Ok(result)
+    }
+
+    fn should_retry_result(result: &TestResult) -> bool {
+        if result.success {
+            return false;
+        }
+
+        if result.status == TestStatus::TimedOut {
+            return false;
+        }
+
+        if let Some(checksum_result) = &result.checksum_result {
+            if !checksum_result.matches {
+                return false;
+            }
+        }
+
+        classify_error(&result.stderr, result.exit_code.unwrap_or(-1)).retryable
     }
 
     /// Calculate exponential backoff with jitter
@@ -744,6 +781,53 @@ mod tests {
         // Without checksum, should use curl|bash directly
         assert!(cmd.contains("| bash"));
         assert!(!cmd.contains("sha256sum"));
+    }
+
+    #[test]
+    fn test_rust_installer_runs_noninteractively() {
+        let config =
+            RunnerConfig { dry_run: false, backend: ExecutionBackend::Local, ..Default::default() };
+        let runner = InstallerTestRunner::new(config);
+        let cmd =
+            runner.build_verified_install_script("https://sh.rustup.rs", "rust", Some("abc123"));
+        assert!(cmd.contains("bash -s -- -y --no-modify-path"));
+    }
+
+    #[test]
+    fn test_rust_installer_flags_apply_to_verified_local_script() {
+        let config =
+            RunnerConfig { dry_run: false, backend: ExecutionBackend::Local, ..Default::default() };
+        let runner = InstallerTestRunner::new(config);
+        let flags = runner.installer_flags("rust");
+        assert_eq!(flags, " -y --no-modify-path");
+    }
+
+    #[test]
+    fn test_retry_policy_retries_network_failures() {
+        let result = TestResult::new("network")
+            .failed(6, "curl: (6) Could not resolve host: raw.githubusercontent.com");
+        assert!(InstallerTestRunner::should_retry_result(&result));
+    }
+
+    #[test]
+    fn test_retry_policy_does_not_retry_checksum_mismatch() {
+        let result = TestResult::new("checksum")
+            .failed(99, "CHECKSUM_MISMATCH: expected=abc actual=def")
+            .with_checksum_result(ChecksumResult {
+                matches: false,
+                expected: "abc".to_string(),
+                actual: "def".to_string(),
+                url: "https://example.com/install.sh".to_string(),
+                download_ms: 10,
+                size_bytes: 0,
+            });
+        assert!(!InstallerTestRunner::should_retry_result(&result));
+    }
+
+    #[test]
+    fn test_retry_policy_does_not_retry_timeout() {
+        let result = TestResult::new("timeout").timed_out();
+        assert!(!InstallerTestRunner::should_retry_result(&result));
     }
 
     #[tokio::test]
