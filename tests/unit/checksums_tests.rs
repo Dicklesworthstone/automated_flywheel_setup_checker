@@ -8,8 +8,8 @@
 //! - Error handling for malformed input
 
 use automated_flywheel_setup_checker::checksums::{
-    parse_checksums, validate_checksums, ChecksumsFile, InstallerEntry, UrlCheckResult,
-    ValidationResult,
+    parse_checksums, validate_checksums, ChecksumsFile, HashCheckResult, InstallerEntry,
+    UrlCheckResult, ValidationResult,
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -462,6 +462,22 @@ fn test_url_check_result_serializable() {
     assert!(json.contains("\"response_time_ms\":100"));
 }
 
+#[test]
+fn test_hash_check_result_serializable() {
+    let result = HashCheckResult {
+        name: "test".to_string(),
+        url: "https://example.com".to_string(),
+        expected: Some("abc".to_string()),
+        actual: Some("def".to_string()),
+        response_time_ms: 100,
+        matches: false,
+        error: Some("checksum mismatch".to_string()),
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(json.contains("\"matches\":false"));
+    assert!(json.contains("\"actual\":\"def\""));
+}
+
 #[tokio::test]
 async fn test_check_urls_empty_checksums() {
     use automated_flywheel_setup_checker::checksums::check_urls;
@@ -565,6 +581,108 @@ async fn test_check_urls_reports_unfollowed_redirect() {
     assert!(!results[0].reachable);
     assert_eq!(results[0].status, Some(302));
     assert_eq!(results[0].error.as_deref(), Some("Redirect (302)"));
+}
+
+#[tokio::test]
+async fn test_check_hashes_matches_downloaded_bytes() {
+    use automated_flywheel_setup_checker::checksums::check_hashes;
+    use sha2::{Digest, Sha256};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = "#!/usr/bin/env bash\necho ok\n";
+    let expected = hex::encode(Sha256::digest(body.as_bytes()));
+    Mock::given(method("GET"))
+        .and(path("/install.sh"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let mut installers = HashMap::new();
+    installers.insert(
+        "matching-tool".to_string(),
+        InstallerEntry {
+            url: Some(format!("{}/install.sh", server.uri())),
+            sha256: Some(expected.clone()),
+            version: None,
+            enabled: true,
+            tags: vec![],
+            extra: HashMap::new(),
+        },
+    );
+
+    let checksums = ChecksumsFile { installers };
+    let results = check_hashes(&checksums).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].matches);
+    assert_eq!(results[0].expected.as_deref(), Some(expected.as_str()));
+    assert_eq!(results[0].actual.as_deref(), Some(expected.as_str()));
+    assert!(results[0].error.is_none());
+}
+
+#[tokio::test]
+async fn test_check_hashes_reports_stale_pin() {
+    use automated_flywheel_setup_checker::checksums::check_hashes;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/install.sh"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("changed installer bytes\n"))
+        .mount(&server)
+        .await;
+
+    let mut installers = HashMap::new();
+    installers.insert(
+        "stale-tool".to_string(),
+        InstallerEntry {
+            url: Some(format!("{}/install.sh", server.uri())),
+            sha256: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+            version: None,
+            enabled: true,
+            tags: vec![],
+            extra: HashMap::new(),
+        },
+    );
+
+    let checksums = ChecksumsFile { installers };
+    let results = check_hashes(&checksums).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].matches);
+    assert_eq!(results[0].error.as_deref(), Some("checksum mismatch"));
+    assert_ne!(results[0].actual.as_deref(), results[0].expected.as_deref());
+}
+
+#[tokio::test]
+async fn test_check_hashes_requires_sha_for_enabled_installers() {
+    use automated_flywheel_setup_checker::checksums::check_hashes;
+
+    let mut installers = HashMap::new();
+    installers.insert(
+        "missing-sha-tool".to_string(),
+        InstallerEntry {
+            url: Some("https://example.com/install.sh".to_string()),
+            sha256: None,
+            version: None,
+            enabled: true,
+            tags: vec![],
+            extra: HashMap::new(),
+        },
+    );
+
+    let checksums = ChecksumsFile { installers };
+    let results = check_hashes(&checksums).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].matches);
+    assert_eq!(results[0].error.as_deref(), Some("missing sha256 checksum"));
+    assert!(results[0].actual.is_none());
 }
 
 // ============================================================================

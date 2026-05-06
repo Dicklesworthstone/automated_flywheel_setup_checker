@@ -121,6 +121,10 @@ enum Commands {
         /// Also check URLs are accessible
         #[arg(long)]
         check_urls: bool,
+
+        /// Also download installer bytes and verify pinned SHA-256 values
+        #[arg(long)]
+        check_hashes: bool,
     },
 
     /// Classify an error message (for testing)
@@ -256,8 +260,8 @@ async fn run_command(
             cmd_status(*detailed, cli.format)?;
         }
 
-        Commands::Validate { path, check_urls } => {
-            cmd_validate(config, path.clone(), *check_urls, cli.format).await?;
+        Commands::Validate { path, check_urls, check_hashes } => {
+            cmd_validate(config, path.clone(), *check_urls, *check_hashes, cli.format).await?;
         }
 
         Commands::ClassifyError { stderr, exit_code } => {
@@ -779,9 +783,10 @@ async fn cmd_validate(
     config: &automated_flywheel_setup_checker::Config,
     path: Option<PathBuf>,
     check_urls_flag: bool,
+    check_hashes_flag: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    use automated_flywheel_setup_checker::checksums::check_urls;
+    use automated_flywheel_setup_checker::checksums::{check_hashes, check_urls};
 
     let checksums_path = path.unwrap_or_else(|| config.general.acfs_repo.join("checksums.yaml"));
 
@@ -876,6 +881,64 @@ async fn cmd_validate(
         }
 
         if broken > 0 {
+            std::process::exit(1);
+        }
+    }
+
+    // Hash checking (async)
+    if check_hashes_flag {
+        if matches!(format, OutputFormat::Human) {
+            println!();
+            println!("Checking hashes...");
+        }
+        let hash_results = check_hashes(&checksums).await;
+
+        let matched = hash_results.iter().filter(|r| r.matches).count();
+        let mismatched = hash_results.len() - matched;
+
+        match format {
+            OutputFormat::Human => {
+                for r in &hash_results {
+                    let icon = if r.matches { "\u{2713}" } else { "\u{2717}" };
+                    let error_str =
+                        r.error.as_ref().map(|e| format!(" ({})", e)).unwrap_or_default();
+                    println!("  {} {} - {}ms{}", icon, r.name, r.response_time_ms, error_str);
+                    if !r.matches {
+                        if let Some(expected) = &r.expected {
+                            println!("      expected: {}", expected);
+                        }
+                        if let Some(actual) = &r.actual {
+                            println!("      actual:   {}", actual);
+                        }
+                    }
+                }
+                println!();
+                println!(
+                    "Hash check: {} matched, {} mismatched out of {} total",
+                    matched,
+                    mismatched,
+                    hash_results.len()
+                );
+            }
+            OutputFormat::Json => {
+                let output = serde_json::json!({
+                    "hash_checks": hash_results,
+                    "summary": {
+                        "total": hash_results.len(),
+                        "matched": matched,
+                        "mismatched": mismatched,
+                    }
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            OutputFormat::Jsonl | OutputFormat::Prometheus => {
+                for r in &hash_results {
+                    println!("{}", serde_json::to_string(r)?);
+                }
+            }
+        }
+
+        if mismatched > 0 {
             std::process::exit(1);
         }
     }

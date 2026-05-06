@@ -33,7 +33,7 @@
 | **Monitoring Server** | `serve` exposes `/health` and `/metrics` from the persisted metrics snapshot |
 | **Prometheus Status Export** | `status --format prometheus` emits scrape-friendly metrics to stdout for one-shot export workflows |
 | **Systemd Watchdog** | Optional readiness, status, and watchdog notifications for long-running `check` and `serve` processes |
-| **Checksum Validation** | Verifies checksums.yaml integrity and URL accessibility |
+| **Checksum Validation** | Verifies checksums.yaml integrity, URL accessibility, and current installer hashes |
 
 ---
 
@@ -43,8 +43,8 @@
 # List all 41 ACFS installers
 automated_flywheel_setup_checker list
 
-# Validate checksums.yaml format and check all URLs are live
-automated_flywheel_setup_checker validate --check-urls
+# Validate checksums.yaml format, URL reachability, and pinned hashes
+automated_flywheel_setup_checker validate --check-urls --check-hashes
 
 # Dry run locally — see what would be tested without starting Docker containers
 automated_flywheel_setup_checker check --dry-run --local
@@ -161,6 +161,7 @@ automated_flywheel_setup_checker list --format json         # Machine-readable
 ```bash
 automated_flywheel_setup_checker validate                   # Format validation
 automated_flywheel_setup_checker validate --check-urls      # Also verify URLs are live
+automated_flywheel_setup_checker validate --check-hashes    # Also verify URL bytes match pinned SHA-256
 automated_flywheel_setup_checker validate --path /custom/path/checksums.yaml
 ```
 
