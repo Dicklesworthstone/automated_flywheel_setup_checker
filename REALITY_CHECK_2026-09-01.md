@@ -978,7 +978,7 @@ executing).
 | # | Goal | Evidence | Status |
 |---|------|----------|--------|
 | 1 | Docker isolation, any base, non-root | local proof run (afsc-user, prepared image); Docker suite on hz4: image derivation for ubuntu:24.04, caching, non-root alias, run_as_root (a real bug: the prepared image's USER overrode `run_as_root` — fixed) | proven |
-| 2 | Checksum gate | `checksum_mismatch.sh` (exit 99, never executed); real uv drift refused; Docker suite `real_run_verifies_checksum_and_refuses_mismatch` | proven |
+| 2 | Checksum gate | `checksum_mismatch.sh` (exit 99, never executed); 12 real upstream drifts refused in the full baseline; Docker suite `real_run_verifies_checksum_and_refuses_mismatch` green | proven |
 | 3 | Classification | CLI category tests, `error_classification.sh`, golden corpus (20 cases, 5 gaps found and fixed) | proven |
 | 4 | Parallel | `check_runs_in_parallel_from_config`, `parallel_execution.sh` | proven |
 | 5 | Retry | flaky-fixture attempts with waits; `network_failure.sh` | proven |
@@ -986,23 +986,23 @@ executing).
 | 7 | JSON/JSONL purity | stdout-purity tests with `-vvv`; `jsonl_output.sh` | proven |
 | 8 | Persistence/status | same-second runs, `--run`, retention, history/diff | proven |
 | 9, 10 | Monitoring | `tests/cli/serve.rs`: per-installer gauges, stale 503, deterministic prometheus | proven |
-| 11, 12 | systemd | templates parse via clap, `install-systemd.sh --dry-run` test, `systemd_integration.sh`; manual `systemctl start` on a host not performed (needs sudo) | partial |
+| 11, 12 | systemd | templates parse via clap, `install-systemd.sh --dry-run` test, `systemd_integration.sh`; manual `systemctl start` on a host not performed (needs sudo) | partial (manual step only) |
 | 13 | Validation | cross-check, `--profile`, exit 4, file:// hashes, drift persisted | proven |
 | 14 | Config | precedence matrix, `config show --resolved`, `config_override.sh` | proven |
 | 15 | Notifications | wiremock create → comment → close, modes, digest, secret hygiene | proven |
 | 16 | list | spec-aware, `--runnable`, no dead flags | proven |
 | 17 | Docs | README subcommand + config-section drift tests, CHANGELOG test | proven |
-| 18 | CI/release | workflows written (ci, e2e-tests with host Docker, nightly canary, PR gate); GitHub runs not observable from this host; no v0.1.0 release yet (M13) | partial |
-| 19 | Tests | CLI suite 60 tests; Docker suite blocking in CI; bash suite real | proven |
+| 18 | CI/release | workflows written (ci with a stable job, e2e-tests with host Docker, nightly canary, PR gate, tag-driven release with `cargo install --git` smoke); GitHub runs not observable from this host; first tag is the owner's call | partial (GitHub-side only) |
+| 19 | Tests | CLI suite 60 tests; Docker suite 9/9 (local daemon, binary built on a worker); bash suite drives the binary; classifier corpus | proven |
 | 20 | Fidelity | doctor cross-check 0 drift against the real ACFS checkout; drift tests wired in CI; full 48-installer baseline run on this host (`docs/baseline/2026-09-02.md`: 35 passed, 12 refused for upstream checksum drift, 1 real failure — fsfs ships a binary needing glibc 2.38+ which ubuntu:22.04 lacks); `remediate checksums` re-hashed and container-verified the drifted pins | proven |
-| 21 | Lifecycle | SIGTERM test (exit 143, cancelled results), reaper tests, no leaked containers in bash Docker scenarios | proven |
+| 21 | Lifecycle | SIGTERM test (exit 143, cancelled results), Docker suite cancellation/timeout/reaper tests, no `afsc.managed` containers left after the suite or the full baseline | proven |
 | 22 | Infra UX | `DOCKER_HOST=unix:///nope` exits 3 with the documented message | proven |
 
 ### Still open
 
 - `C12c` Claude propose/apply (P3, owner sign-off); checksum propose/apply exists and is tested.
-- `M13` stable toolchain baseline and v0.1.0 release; `C14b` major dependency bumps behind the Docker suite.
-- `m4` dead library code (SummaryGenerator, FileChange/ChangeType, health_check, remediate_and_verify — tested but unused; low value).
+- `C14b` major dependency bumps (bollard 0.21, reqwest 0.13, hyper 1.11, clap 4.6) — now unblocked by the green Docker suite.
+- Cutting the first `v0.1.0` tag (the release workflow is in place).
 - Findings from the full baseline worth acting on in ACFS: 12 pins drifted upstream (atuin, bv, caam, casr, cass, ee, grok, mcp_agent_mail, pi, rust, ubs, uv); fsfs's prebuilt binary needs glibc 2.38+/GLIBCXX 3.4.31 and cannot run on Ubuntu 22.04.
 
 ### Operational notes
