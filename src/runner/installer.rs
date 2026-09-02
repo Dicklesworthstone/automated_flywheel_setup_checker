@@ -132,6 +132,9 @@ pub struct TestResult {
     pub checksum_state: ChecksumState,
     /// Classification, always present when the test did not pass
     pub error: Option<ErrorClassification>,
+    /// First line of `version_cmd` output after a passing install
+    #[serde(default)]
+    pub installed_version: Option<String>,
 }
 
 impl TestResult {
@@ -157,6 +160,7 @@ impl TestResult {
             checksum_result: None,
             checksum_state: ChecksumState::NotChecked,
             error: None,
+            installed_version: None,
         }
     }
 
@@ -271,6 +275,34 @@ pub struct InstallerTest {
     pub retry_count: u32,
     pub tags: Vec<String>,
     pub environment: Vec<(String, String)>,
+    /// Shell that runs the staged script (`bash` or `sh`)
+    #[serde(default = "default_interpreter")]
+    pub interpreter: String,
+    /// Arguments passed to the installer script
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Binary that must be on PATH after a passing install
+    #[serde(default)]
+    pub expect_binary: Option<String>,
+    /// Command run after a passing install; non-zero exit fails the test (`post_install`)
+    #[serde(default)]
+    pub verify_cmd: Option<String>,
+    /// Command whose first output line is recorded as `installed_version`
+    #[serde(default)]
+    pub version_cmd: Option<String>,
+    /// Per-installer container memory limit in bytes
+    #[serde(default)]
+    pub memory_limit: Option<u64>,
+    /// Per-installer container network mode (`bridge` or `none`)
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Run as root inside the container
+    #[serde(default)]
+    pub run_as_root: Option<bool>,
+}
+
+fn default_interpreter() -> String {
+    "bash".to_string()
 }
 
 impl InstallerTest {
@@ -285,7 +317,55 @@ impl InstallerTest {
             retry_count: 3,
             tags: Vec::new(),
             environment: Vec::new(),
+            interpreter: default_interpreter(),
+            args: Vec::new(),
+            expect_binary: None,
+            verify_cmd: None,
+            version_cmd: None,
+            memory_limit: None,
+            network: None,
+            run_as_root: None,
         }
+    }
+
+    pub fn with_interpreter(mut self, interpreter: impl Into<String>) -> Self {
+        self.interpreter = interpreter.into();
+        self
+    }
+
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    pub fn with_expect_binary(mut self, binary: impl Into<String>) -> Self {
+        self.expect_binary = Some(binary.into());
+        self
+    }
+
+    pub fn with_verify_cmd(mut self, cmd: impl Into<String>) -> Self {
+        self.verify_cmd = Some(cmd.into());
+        self
+    }
+
+    pub fn with_version_cmd(mut self, cmd: impl Into<String>) -> Self {
+        self.version_cmd = Some(cmd.into());
+        self
+    }
+
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = Some(bytes);
+        self
+    }
+
+    pub fn with_network(mut self, mode: impl Into<String>) -> Self {
+        self.network = Some(mode.into());
+        self
+    }
+
+    pub fn with_run_as_root(mut self, root: bool) -> Self {
+        self.run_as_root = Some(root);
+        self
     }
 
     pub fn with_script_path(mut self, path: impl Into<String>) -> Self {
@@ -319,6 +399,24 @@ impl InstallerTest {
         self.environment.push((key.into(), value.into()));
         self
     }
+}
+
+/// Default cap on captured stdout/stderr bytes per attempt (4 MiB).
+pub const DEFAULT_MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Convert captured bytes to a string bounded by `max_bytes`: when exceeded, keep the first
+/// quarter and the last three quarters with a truncation marker in between, so both the
+/// installer's banner and its final error survive.
+pub fn bound_capture(buf: &[u8], max_bytes: usize) -> String {
+    if max_bytes == 0 || buf.len() <= max_bytes {
+        return String::from_utf8_lossy(buf).to_string();
+    }
+    let head_len = max_bytes / 4;
+    let tail_len = max_bytes - head_len;
+    let dropped = buf.len() - head_len - tail_len;
+    let head = String::from_utf8_lossy(&buf[..head_len]);
+    let tail_part = String::from_utf8_lossy(&buf[buf.len() - tail_len..]);
+    format!("{head}\n[afsc: truncated {dropped} bytes of output]\n{tail_part}")
 }
 
 /// Return the last `max_bytes` of `text` on a char boundary.
@@ -407,6 +505,17 @@ mod tests {
         assert!(s.ends_with(&t));
         assert!(t.len() <= 5);
         assert_eq!(tail("abc", 10), "abc");
+    }
+
+    #[test]
+    fn test_bound_capture_keeps_head_and_tail() {
+        let data: Vec<u8> = (0..10_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let bounded = bound_capture(&data, 1_000);
+        assert!(bounded.contains("[afsc: truncated 9000 bytes of output]"));
+        assert!(bounded.starts_with(&String::from_utf8_lossy(&data[..250]).to_string()));
+        assert!(bounded.ends_with(&String::from_utf8_lossy(&data[data.len() - 750..]).to_string()));
+        assert_eq!(bound_capture(b"small", 1_000), "small");
+        assert_eq!(bound_capture(b"unbounded", 0), "unbounded");
     }
 
     #[test]

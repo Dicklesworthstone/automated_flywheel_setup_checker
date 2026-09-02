@@ -1,12 +1,18 @@
 //! Installer test runner module
 
+pub mod acfs_profile;
 mod container;
 mod executor;
 mod installer;
 mod parallel;
 mod retry;
+pub mod spec;
 
-pub use container::{ContainerConfig, ContainerGuard, ContainerManager, PullPolicy};
+pub use acfs_profile::{profile, Interpreter, Profile};
+pub use container::{
+    parse_memory_limit, ContainerConfig, ContainerGuard, ContainerManager, OrphanInfo, PullPolicy,
+};
+pub use spec::{resolve_spec, FieldSource, GlobalDefaults, InstallerSpec};
 pub use executor::{
     classify_result, finalize_failure, ExecutionBackend, InstallerTestRunner, RunnerConfig,
 };

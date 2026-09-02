@@ -43,20 +43,115 @@ pub struct ContainerConfig {
     /// Extra labels applied to every container (the `afsc.*` set is always added)
     #[serde(default)]
     pub labels: Vec<(String, String)>,
+    /// Docker network mode (`bridge` default, `none` for offline installers)
+    #[serde(default)]
+    pub network_mode: Option<String>,
+    /// Run as root even on the non-root base image
+    #[serde(default)]
+    pub run_as_root: bool,
+    /// Derive a prepared image (ACFS prerequisites + non-root `afsc-user`) from `image`.
+    /// When false, `image` is used as-is and containers run as root with no prerequisites.
+    #[serde(default = "default_prepare")]
+    pub prepare: bool,
+    /// Timeout for building the prepared image
+    #[serde(default = "default_build_timeout")]
+    pub build_timeout_seconds: u64,
+    /// Rebuild the prepared image even when a cached one exists
+    #[serde(default)]
+    pub rebuild: bool,
+}
+
+fn default_prepare() -> bool {
+    true
+}
+
+fn default_build_timeout() -> u64 {
+    900
 }
 
 impl Default for ContainerConfig {
     fn default() -> Self {
         Self {
-            image: "ubuntu:22.04".to_string(),
+            image: ContainerManager::AFSC_BASE_IMAGE.to_string(),
             memory_limit: Some(2 * 1024 * 1024 * 1024), // 2GB
             cpu_quota: Some(1.0),
             timeout_seconds: 300,
             volumes: Vec::new(),
             environment: Vec::new(),
             labels: Vec::new(),
+            network_mode: None,
+            run_as_root: false,
+            prepare: true,
+            build_timeout_seconds: 900,
+            rebuild: false,
         }
     }
+}
+
+/// Canonical base for the default prepared image.
+pub const CANONICAL_BASE: &str = "ubuntu:22.04";
+
+/// Sanitize an image reference for use inside a tag (`ubuntu:24.04` → `ubuntu-24.04`).
+fn sanitize_for_tag(image: &str) -> String {
+    image
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Tag of the prepared image derived from `base` with the given Dockerfile template hash.
+///
+/// The canonical base keeps the `afsc-base` repository (with `afsc-base:latest` as an alias);
+/// other bases get `afsc-prepared:<base>-<hash>`. Because the hash covers the template and the
+/// base reference, editing the Dockerfile or switching bases produces a new tag and a rebuild.
+pub fn prepared_image_tag(base: &str, template_hash: &str) -> String {
+    let short = &template_hash[..template_hash.len().min(12)];
+    if base == CANONICAL_BASE {
+        format!("afsc-base:{short}")
+    } else {
+        format!("afsc-prepared:{}-{short}", sanitize_for_tag(base))
+    }
+}
+
+/// Hash of the Dockerfile template plus the base reference.
+pub fn template_hash(template: &[u8], base: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(template);
+    h.update(b"\nBASE=");
+    h.update(base.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Resolved image plan for a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePlan {
+    /// Base image the prepared image derives from (or the raw image when not preparing)
+    pub base: String,
+    /// Image that containers actually run
+    pub run_image: String,
+    /// Whether `run_image` is an afsc-prepared image (non-root user available)
+    pub prepared: bool,
+}
+
+/// Parse a human-readable memory limit string (e.g., "2G", "512M", "1024") into bytes.
+pub fn parse_memory_limit(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len() - 1], 1024 * 1024 * 1024u64)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len() - 1], 1024 * 1024u64)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len() - 1], 1024u64)
+    } else {
+        (s, 1u64)
+    };
+    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
 }
 
 /// Image pull policy
@@ -154,7 +249,7 @@ impl ContainerManager {
         })
     }
 
-    /// The tag used for the pre-built ACFS base image.
+    /// The tag used for the pre-built ACFS base image (alias of the canonical prepared image).
     pub const AFSC_BASE_IMAGE: &'static str = "afsc-base:latest";
 
     fn base_image_build_lock() -> &'static tokio::sync::Mutex<()> {
@@ -162,45 +257,75 @@ impl ContainerManager {
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
-    /// Ensure the configured image is available locally.
-    ///
-    /// If the image is `afsc-base:latest` and doesn't exist, build it from
-    /// the Dockerfile shipped with this project. For other images, pull
-    /// from a registry according to the pull policy.
-    async fn ensure_image(&self) -> Result<()> {
-        let image = &self.config.image;
-
-        // Fast path: already present?
-        if self.pull_policy != PullPolicy::Always && self.docker.inspect_image(image).await.is_ok()
+    /// Work out which image containers run: the raw image when `prepare` is off, otherwise the
+    /// prepared image derived from the configured base (`afsc-base:latest` means the canonical
+    /// `ubuntu:22.04` base).
+    pub fn image_plan(&self) -> Result<ImagePlan> {
+        if !self.config.prepare {
+            return Ok(ImagePlan {
+                base: self.config.image.clone(),
+                run_image: self.config.image.clone(),
+                prepared: false,
+            });
+        }
+        let base = if self.config.image == Self::AFSC_BASE_IMAGE
+            || self.config.image.starts_with("afsc-base:")
+            || self.config.image.starts_with("afsc-prepared:")
         {
+            CANONICAL_BASE.to_string()
+        } else {
+            self.config.image.clone()
+        };
+        let template = std::fs::read(Self::find_dockerfile()?)
+            .context("Failed to read docker/Dockerfile.base")?;
+        let tag = prepared_image_tag(&base, &template_hash(&template, &base));
+        Ok(ImagePlan { base, run_image: tag, prepared: true })
+    }
+
+    /// Ensure the image containers will run is available locally, building the prepared image
+    /// when its hash tag is missing (or `rebuild` is set) and pulling raw images per policy.
+    async fn ensure_image(&self) -> Result<ImagePlan> {
+        let plan = self.image_plan()?;
+
+        if !plan.prepared {
+            self.ensure_pulled(&plan.run_image).await?;
+            return Ok(plan);
+        }
+
+        let _build_guard = Self::base_image_build_lock().lock().await;
+        let present = self.docker.inspect_image(&plan.run_image).await.is_ok();
+        if present && !self.config.rebuild {
+            debug!(image = %plan.run_image, "Prepared image already present");
+        } else {
+            self.build_prepared_image(&plan).await?;
+        }
+        // Keep the human-friendly alias pointing at the current canonical build.
+        if plan.base == CANONICAL_BASE {
+            let (repo, tag) = Self::AFSC_BASE_IMAGE.split_once(':').unwrap_or((Self::AFSC_BASE_IMAGE, "latest"));
+            let opts = bollard::image::TagImageOptions { repo, tag };
+            if let Err(e) = self.docker.tag_image(&plan.run_image, Some(opts)).await {
+                warn!(error = %e, "Failed to update the afsc-base:latest alias");
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Pull a raw image according to the pull policy.
+    async fn ensure_pulled(&self, image: &str) -> Result<()> {
+        if self.pull_policy != PullPolicy::Always && self.docker.inspect_image(image).await.is_ok() {
             debug!(image = %image, "Image already present locally");
             return Ok(());
         }
-
         if self.pull_policy == PullPolicy::Never {
-            // Even with Never, try building afsc-base if it's the configured image.
-            if image == Self::AFSC_BASE_IMAGE {
-                return self.build_base_image().await;
-            }
             anyhow::bail!("Image {} not found and pull policy is Never", image);
         }
-
-        // For the built-in ACFS base image, build instead of pulling.
-        if image == Self::AFSC_BASE_IMAGE {
-            return self.build_base_image().await;
-        }
-
-        // Otherwise, pull from registry.
         info!(image = %image, "Pulling image");
-
         let (repo, tag) = if let Some(pos) = image.rfind(':') {
             (&image[..pos], &image[pos + 1..])
         } else {
-            (image.as_str(), "latest")
+            (image, "latest")
         };
-
         let opts = CreateImageOptions { from_image: repo, tag, ..Default::default() };
-
         let mut stream = self.docker.create_image(Some(opts), None, None);
         while let Some(result) = stream.next().await {
             match result {
@@ -209,34 +334,21 @@ impl ContainerManager {
                         debug!(status = %status, "Pull progress");
                     }
                 }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to pull image {}: {}", image, e));
-                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to pull image {}: {}", image, e)),
             }
         }
-
         info!(image = %image, "Image pulled successfully");
         Ok(())
     }
 
-    /// Build the afsc-base image from the embedded Dockerfile.
+    /// Build the prepared image from `docker/Dockerfile.base` with `--build-arg BASE=<base>`.
     ///
-    /// The Dockerfile sets up a non-root user with Rust, Node, and all
-    /// system packages that ACFS install.sh pre-installs. Building takes
-    /// ~2 minutes but only happens once — subsequent runs reuse the cached
-    /// image.
-    async fn build_base_image(&self) -> Result<()> {
-        let _build_guard = Self::base_image_build_lock().lock().await;
+    /// The Dockerfile installs the packages ACFS's `install_base.sh` installs, plus Rust and Node
+    /// for installers that expect them, and creates the non-root `afsc-user`. Building takes a
+    /// few minutes once per (template, base) pair; the hash tag makes later runs instant.
+    async fn build_prepared_image(&self, plan: &ImagePlan) -> Result<()> {
+        info!(image = %plan.run_image, base = %plan.base, "Building prepared image (this takes a few minutes the first time)");
 
-        // Check if already built
-        if self.docker.inspect_image(Self::AFSC_BASE_IMAGE).await.is_ok() {
-            debug!("afsc-base image already built");
-            return Ok(());
-        }
-
-        info!("Building afsc-base image (first run — this takes ~2 minutes)...");
-
-        // Find the Dockerfile
         let dockerfile_path = Self::find_dockerfile()?
             .canonicalize()
             .context("Failed to canonicalize Dockerfile.base path")?;
@@ -244,40 +356,50 @@ impl ContainerManager {
             anyhow::anyhow!("Cannot determine build context from Dockerfile path")
         })?;
 
-        let build_timeout = Duration::from_secs(self.config.timeout_seconds.max(60));
+        let build_timeout = Duration::from_secs(self.config.build_timeout_seconds.max(60));
         let mut command = tokio::process::Command::new("docker");
+        command.arg("build");
+        if self.config.rebuild || self.pull_policy == PullPolicy::Always {
+            command.arg("--pull");
+        }
+        if self.config.rebuild {
+            command.arg("--no-cache");
+        }
         command
-            .args([
-                "build",
-                "-t",
-                Self::AFSC_BASE_IMAGE,
-                "-f",
-                &dockerfile_path.to_string_lossy(),
-                &context_dir.to_string_lossy(),
-            ])
+            .args(["--build-arg", &format!("BASE={}", plan.base)])
+            .args(["-t", &plan.run_image])
+            .args(["-f", &dockerfile_path.to_string_lossy()])
+            .arg(&*context_dir.to_string_lossy())
             .kill_on_drop(true);
 
-        // Build using docker CLI (simpler than Bollard's build API which needs tar contexts)
+        // Build using the docker CLI (Bollard's build API needs a tar context).
         let output = match tokio::time::timeout(build_timeout, command.output()).await {
-            Ok(result) => result.context("Failed to run docker build")?,
+            Ok(result) => result.context("Failed to run docker build (is the docker CLI installed?)")?,
             Err(_) => {
                 anyhow::bail!(
-                    "Timed out after {}s building {}",
+                    "Timed out after {}s building {} (raise [docker].build_timeout_seconds)",
                     build_timeout.as_secs(),
-                    Self::AFSC_BASE_IMAGE
+                    plan.run_image
                 );
             }
         };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // Drop the legacy-builder deprecation banner so the real error is visible first.
+            let relevant: Vec<&str> = stderr
+                .lines()
+                .filter(|l| !l.contains("DEPRECATED") && !l.contains("buildx") && !l.trim().is_empty())
+                .collect();
             anyhow::bail!(
-                "Failed to build afsc-base image:\n{}",
-                stderr.chars().take(1000).collect::<String>()
+                "Failed to build {} from {}:\n{}",
+                plan.run_image,
+                plan.base,
+                relevant.join("\n").chars().take(1500).collect::<String>()
             );
         }
 
-        info!("afsc-base image built successfully");
+        info!(image = %plan.run_image, "Prepared image built");
         Ok(())
     }
 
@@ -323,8 +445,8 @@ impl ContainerManager {
     ///
     /// Returns the container ID string from Docker.
     pub async fn create_container(&self, name: &str) -> Result<String> {
-        // Ensure image is available
-        self.ensure_image().await.context("Failed to ensure Docker image")?;
+        // Ensure image is available (prepared images are built on demand)
+        let plan = self.ensure_image().await.context("Failed to ensure Docker image")?;
 
         // Build container name: afsc-INSTALLERNAME-TIMESTAMP-RANDOM
         // Include milliseconds and random suffix to avoid collisions in parallel mode
@@ -332,8 +454,8 @@ impl ContainerManager {
         let random_suffix: u16 = rand::random();
         let container_name = format!("afsc-{}-{}-{:04x}", name, timestamp, random_suffix);
 
-        // Determine if we're using the pre-built base image (non-root user)
-        let using_base_image = self.config.image == Self::AFSC_BASE_IMAGE;
+        // Prepared images carry the non-root afsc-user; raw images run as root.
+        let using_base_image = plan.prepared && !self.config.run_as_root;
         let (user, home, working_dir) = if using_base_image {
             ("afsc-user", "/home/afsc-user", "/home/afsc-user")
         } else {
@@ -377,6 +499,13 @@ impl ContainerManager {
         // Installers like rustup download binaries to /tmp and need exec permission.
         // The container is ephemeral anyway, so a real /tmp is fine.
 
+        // Network mode (`none` isolates offline-capable installers)
+        if let Some(mode) = &self.config.network_mode {
+            if !mode.trim().is_empty() {
+                host_config.network_mode = Some(mode.trim().to_string());
+            }
+        }
+
         // Volume binds
         if !self.config.volumes.is_empty() {
             let binds: Vec<String> = self
@@ -390,7 +519,7 @@ impl ContainerManager {
 
         // Create container config
         let container_config = Config {
-            image: Some(self.config.image.clone()),
+            image: Some(plan.run_image.clone()),
             env: Some(env),
             host_config: Some(host_config),
             labels: Some(self.labels_for(name)),
@@ -414,7 +543,8 @@ impl ContainerManager {
         info!(
             container_id = %container_id,
             container_name = %container_name,
-            image = %self.config.image,
+            image = %plan.run_image,
+            user = %user,
             "Container created"
         );
 
@@ -754,6 +884,49 @@ mod tests {
         assert_eq!(labels[LABEL_PID], std::process::id().to_string());
         assert_eq!(labels[LABEL_RUN_ID], "run-1");
         assert!(chrono::DateTime::parse_from_rfc3339(&labels[LABEL_CREATED_AT]).is_ok());
+    }
+
+    #[test]
+    fn prepared_image_tags_are_deterministic_and_base_specific() {
+        let h1 = template_hash(b"FROM x", "ubuntu:22.04");
+        let h2 = template_hash(b"FROM x", "ubuntu:24.04");
+        let h3 = template_hash(b"FROM y", "ubuntu:22.04");
+        assert_ne!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_eq!(h1, template_hash(b"FROM x", "ubuntu:22.04"));
+        assert_eq!(prepared_image_tag("ubuntu:22.04", &h1), format!("afsc-base:{}", &h1[..12]));
+        assert_eq!(prepared_image_tag("ubuntu:24.04", &h2), format!("afsc-prepared:ubuntu-24.04-{}", &h2[..12]));
+        assert_eq!(prepared_image_tag("ghcr.io/org/img:1.0", &h2), format!("afsc-prepared:ghcr.io-org-img-1.0-{}", &h2[..12]));
+    }
+
+    #[test]
+    fn image_plan_derives_from_base_or_uses_raw_image() {
+        let mgr = ContainerManager::new(ContainerConfig::default());
+        let plan = mgr.image_plan().unwrap();
+        assert!(plan.prepared);
+        assert_eq!(plan.base, CANONICAL_BASE);
+        assert!(plan.run_image.starts_with("afsc-base:"));
+        assert_ne!(plan.run_image, ContainerManager::AFSC_BASE_IMAGE, "hash tag, not the alias");
+
+        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:24.04".into(), ..Default::default() });
+        let plan = mgr.image_plan().unwrap();
+        assert_eq!(plan.base, "ubuntu:24.04");
+        assert!(plan.run_image.starts_with("afsc-prepared:ubuntu-24.04-"));
+
+        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:24.04".into(), prepare: false, ..Default::default() });
+        let plan = mgr.image_plan().unwrap();
+        assert!(!plan.prepared);
+        assert_eq!(plan.run_image, "ubuntu:24.04");
+    }
+
+    #[test]
+    fn memory_limit_parsing() {
+        assert_eq!(parse_memory_limit("2G"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("512m"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("64K"), Some(65536));
+        assert_eq!(parse_memory_limit("1024"), Some(1024));
+        assert_eq!(parse_memory_limit(""), None);
+        assert_eq!(parse_memory_limit("lots"), None);
     }
 
     #[test]

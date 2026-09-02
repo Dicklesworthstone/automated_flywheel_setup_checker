@@ -294,7 +294,8 @@ fn test_retry_strategy_default() {
 #[test]
 fn test_container_config_default() {
     let config = ContainerConfig::default();
-    assert_eq!(config.image, "ubuntu:22.04");
+    assert_eq!(config.image, "afsc-base:latest", "prepared image is the default");
+    assert!(config.prepare);
     assert_eq!(config.memory_limit, Some(2 * 1024 * 1024 * 1024)); // 2GB
     assert_eq!(config.cpu_quota, Some(1.0));
     assert_eq!(config.timeout_seconds, 300);
