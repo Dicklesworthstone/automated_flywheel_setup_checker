@@ -127,6 +127,17 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
     }
 
     // Network/transient errors
+    // A held apt/dpkg lock (unattended-upgrades, another installer) clears itself; retry later.
+    if is_apt_lock_held(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Transient,
+            category: "dependency".to_string(),
+            suggestion: Some("Another apt/dpkg process holds the lock; wait for it (unattended-upgrades) and retry".to_string()),
+            retryable: true,
+            confidence: 0.9,
+        };
+    }
+
     if is_network_error(stderr) {
         return ErrorClassification {
             severity: ErrorSeverity::Transient,
@@ -342,6 +353,10 @@ static NETWORK_PATTERNS: Patterns = Patterns::new(&[
     r"(?i)\b5(00|02|03)\b",
     r"(?i)curl.*failed",
     r"(?i)wget.*failed",
+    r"(?i)curl: \(\d+\)",
+    r"(?i)ssl_connect|ssl handshake|ssl certificate problem|certificate verify failed",
+    r"(?i)connection reset by peer",
+    r"(?i)tls handshake",
     r"(?i)unable to fetch some archives",
     r"(?i)could not fetch release info",
     r"(?i)ssl certificate problem",
@@ -357,6 +372,8 @@ static APT_REPAIR_PATTERNS: Patterns = Patterns::new(&[
     r"(?i)dpkg\s+repair.*failed",
     r"(?i)unmet dependencies",
     r"(?i)held broken packages",
+    r"(?i)dpkg was interrupted",
+    r"(?i)dpkg --configure -a",
     r"(?i)try ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
     r"(?i)you might want to run ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
 ]);
@@ -407,6 +424,16 @@ fn is_checksum_mismatch(stderr: &str) -> bool {
 
 fn is_network_error(stderr: &str) -> bool {
     matches(&NETWORK_PATTERNS, stderr)
+}
+
+static APT_LOCK_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)could not get lock /var/lib/(dpkg|apt)",
+    r"(?i)unable to acquire the dpkg frontend lock",
+    r"(?i)unable to lock the administration directory",
+]);
+
+fn is_apt_lock_held(stderr: &str) -> bool {
+    matches(&APT_LOCK_PATTERNS, stderr)
 }
 
 fn is_apt_repair_error(stderr: &str) -> bool {

@@ -464,7 +464,9 @@ set +e
             "Executing installer in container"
         );
 
-        // Execute with timeout and cancellation
+        // Execute with timeout and cancellation, sampling resource usage meanwhile.
+        let telemetry_stop = CancellationToken::new();
+        let telemetry = manager.spawn_telemetry(container_id.clone(), telemetry_stop.clone());
         let exec_result = timeout(
             test_timeout,
             manager.exec_in_container_cancellable(
@@ -474,6 +476,12 @@ set +e
             ),
         )
         .await;
+        telemetry_stop.cancel();
+        if let Ok(t) = telemetry.await {
+            if t.samples > 0 {
+                result.telemetry = Some(t);
+            }
+        }
 
         match exec_result {
             Ok(Ok((exit_code, stdout, stderr))) => {

@@ -506,3 +506,40 @@ fn test_error_severity_variants() {
         }
     }
 }
+
+/// Golden corpus of real and synthetic installer failures (`tests/fixtures/classifier_corpus.jsonl`).
+/// Every entry must classify to its expected category with the expected retryability; the
+/// per-category precision report is printed (run with `--nocapture`).
+#[test]
+fn classifier_golden_corpus_is_fully_correct() {
+    use automated_flywheel_setup_checker::parser::classify_error;
+    use std::collections::BTreeMap;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/classifier_corpus.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut per_category: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut total = 0;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let case: serde_json::Value = serde_json::from_str(line).unwrap();
+        total += 1;
+        let name = case["name"].as_str().unwrap();
+        let expected = case["expected"].as_str().unwrap();
+        let got = classify_error(case["stderr"].as_str().unwrap(), case["exit_code"].as_i64().unwrap() as i32);
+        let entry = per_category.entry(expected.to_string()).or_insert((0, 0));
+        entry.1 += 1;
+        if got.category == expected && got.retryable == case["retryable"].as_bool().unwrap() {
+            entry.0 += 1;
+        } else {
+            failures.push(format!(
+                "{name}: expected {expected} (retryable={}) got {} (retryable={}, confidence {:.2})",
+                case["retryable"], got.category, got.retryable, got.confidence
+            ));
+        }
+    }
+    println!("classifier corpus: {total} cases");
+    for (cat, (ok, n)) in &per_category {
+        println!("  {cat:<20} {ok}/{n} correct");
+    }
+    assert!(total >= 15, "corpus should keep growing with real failures");
+    assert!(failures.is_empty(), "misclassified:\n  {}", failures.join("\n  "));
+}

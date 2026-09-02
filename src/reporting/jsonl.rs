@@ -407,6 +407,12 @@ pub struct ResultEntry {
     /// First line of `version_cmd` output after a passing install
     #[serde(default)]
     pub installed_version: Option<String>,
+    /// Remediation outcome for this result, when remediation ran
+    #[serde(default)]
+    pub remediation: Option<crate::remediation::RemediationOutcome>,
+    /// Container resource usage of the final attempt (Docker backend)
+    #[serde(default)]
+    pub telemetry: Option<crate::runner::Telemetry>,
 }
 
 /// Persisted view of one execution attempt
@@ -618,6 +624,8 @@ impl ResultPersister {
             stderr_tail: tail(&result.stderr, PERSISTED_TAIL_BYTES),
             container_id: result.container_id.clone(),
             installed_version: result.installed_version.clone(),
+            remediation: result.remediation.clone(),
+            telemetry: result.telemetry.clone(),
             last_attempt_ms: result.last_attempt_ms,
             attempts: result
                 .attempts

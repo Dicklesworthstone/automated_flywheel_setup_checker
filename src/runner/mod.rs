@@ -17,7 +17,7 @@ pub use executor::{
     classify_result, finalize_failure, ExecutionBackend, InstallerTestRunner, RunnerConfig,
 };
 pub use installer::{
-    tail, AttemptRecord, ChecksumResult, ChecksumState, InstallerTest, RetryInfo, TestResult,
+    tail, AttemptRecord, ChecksumResult, ChecksumState, InstallerTest, RetryInfo, Telemetry, TestResult,
     TestStatus,
 };
 pub use parallel::ParallelRunner;

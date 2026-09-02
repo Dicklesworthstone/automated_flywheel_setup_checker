@@ -201,6 +201,8 @@ pub struct MetricsReport {
     pub failed_tests_24h: u64,
     pub success_rate_24h: f64,
     pub total_remediations_24h: u64,
+    pub remediations_verified_24h: u64,
+    pub remediations_cost_usd_24h: f64,
     pub checksum_drift_total: Option<u64>,
     pub validated_at: Option<DateTime<Utc>>,
     pub installers: BTreeMap<String, InstallerMetric>,
@@ -231,8 +233,20 @@ impl MetricsReport {
                 }
             }
         }
+        let mut remediations = 0u64;
+        let mut remediations_verified = 0u64;
+        let mut remediations_cost = 0.0f64;
         for run in &window {
             for e in &run.entries {
+                if let Some(r) = &e.remediation {
+                    if r.attempted() {
+                        remediations += 1;
+                        remediations_cost += r.cost_usd();
+                    }
+                    if r.succeeded() {
+                        remediations_verified += 1;
+                    }
+                }
                 if e.status == "skipped" {
                     continue;
                 }
@@ -289,7 +303,11 @@ impl MetricsReport {
             successful_tests_24h: successful,
             failed_tests_24h: failed,
             success_rate_24h: if total > 0 { successful as f64 / total as f64 } else { 0.0 },
-            total_remediations_24h: remediations_24h,
+            // Outcomes persisted on results are authoritative; the legacy snapshot counter covers
+            // runs recorded before outcomes existed.
+            total_remediations_24h: remediations.max(remediations_24h),
+            remediations_verified_24h: remediations_verified,
+            remediations_cost_usd_24h: remediations_cost,
             checksum_drift_total: validation.map(|v| v.drift_total()),
             validated_at: validation.and_then(|v| v.checked_at),
             installers,
@@ -342,6 +360,8 @@ impl MetricsReport {
             "failed_tests_24h": self.failed_tests_24h,
             "success_rate_24h": self.success_rate_24h,
             "total_remediations_24h": self.total_remediations_24h,
+            "remediations_verified_24h": self.remediations_verified_24h,
+            "remediations_cost_usd_24h": self.remediations_cost_usd_24h,
             "checksum_drift_total": self.checksum_drift_total,
             "validated_at": self.validated_at,
             "computed_at": self.computed_at,
@@ -357,6 +377,8 @@ impl MetricsReport {
         x.set_gauge("success_rate_24h", self.success_rate_24h);
         x.set_gauge("runs_24h", self.runs_24h as f64);
         x.set_gauge("remediations_total_24h", self.total_remediations_24h as f64);
+        x.set_gauge("remediations_verified_24h", self.remediations_verified_24h as f64);
+        x.set_gauge("remediations_cost_usd_24h", self.remediations_cost_usd_24h);
         x.set_gauge(
             "health",
             match self.health {
@@ -514,6 +536,10 @@ fn metric_help(name: &str) -> &'static str {
         "Runs started in the last 24 hours"
     } else if name.ends_with("remediations_total_24h") {
         "Remediation attempts in the last 24 hours"
+    } else if name.ends_with("remediations_verified_24h") {
+        "Remediations verified or applied in the last 24 hours"
+    } else if name.ends_with("remediations_cost_usd_24h") {
+        "Claude spend attributed to remediation in the last 24 hours"
     } else if name.ends_with("uptime_seconds") {
         "Most recent command runtime in seconds"
     } else if name.ends_with("health") {
@@ -572,6 +598,8 @@ mod tests {
             last_attempt_ms: 1500,
             attempts: Vec::new(),
             installed_version: None,
+            remediation: None,
+            telemetry: None,
         }
     }
 

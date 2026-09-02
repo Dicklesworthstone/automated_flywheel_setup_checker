@@ -186,6 +186,8 @@ fn test_claude_config_custom() {
         max_attempts: 5,
         timeout_seconds: 600,
         cost_limit_usd: 25.0,
+        max_turns: 8,
+        claude_bin: None,
     };
 
     assert!(config.enabled);
@@ -487,6 +489,7 @@ fn test_remediation_result_success() {
         claude_output: "Fixed the issue".to_string(),
         estimated_cost_usd: 0.05,
         verification_passed: true,
+        envelope: None,
     };
 
     assert!(result.success);
@@ -509,6 +512,7 @@ fn test_remediation_result_manual() {
         claude_output: "Manual intervention required".to_string(),
         estimated_cost_usd: 0.0,
         verification_passed: false,
+        envelope: None,
     };
 
     assert!(!result.success);
@@ -529,6 +533,7 @@ fn test_remediation_result_skipped() {
         claude_output: "Skipped due to config".to_string(),
         estimated_cost_usd: 0.0,
         verification_passed: false,
+        envelope: None,
     };
 
     assert!(matches!(result.method, RemediationMethod::Skipped));
@@ -657,6 +662,7 @@ fn test_remediation_result_serializable() {
         claude_output: String::new(),
         estimated_cost_usd: 0.0,
         verification_passed: false,
+        envelope: None,
     };
 
     let json = serde_json::to_string(&result).unwrap();

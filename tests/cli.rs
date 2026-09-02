@@ -28,3 +28,6 @@ mod notify;
 
 #[path = "cli/doctor.rs"]
 mod doctor;
+
+#[path = "cli/remediate.rs"]
+mod remediate;

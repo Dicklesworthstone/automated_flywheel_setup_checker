@@ -64,6 +64,19 @@ pub struct AttemptRecord {
     pub waited_before_ms: u64,
 }
 
+/// Container resource usage sampled while an attempt ran (Docker backend only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Telemetry {
+    /// Highest memory usage observed (bytes)
+    pub peak_memory_bytes: u64,
+    /// CPU time consumed by the container over the attempt (seconds)
+    pub cpu_seconds: f64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+    /// Number of samples the numbers are based on (1 s cadence)
+    pub samples: u32,
+}
+
 /// Checksum verification state of an installer test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +150,12 @@ pub struct TestResult {
     /// First line of `version_cmd` output after a passing install
     #[serde(default)]
     pub installed_version: Option<String>,
+    /// What remediation did for this result (None when remediation was not requested)
+    #[serde(default)]
+    pub remediation: Option<crate::remediation::RemediationOutcome>,
+    /// Resource usage of the final attempt (Docker backend)
+    #[serde(default)]
+    pub telemetry: Option<Telemetry>,
 }
 
 impl TestResult {
@@ -163,6 +182,8 @@ impl TestResult {
             checksum_state: ChecksumState::NotChecked,
             error: None,
             installed_version: None,
+            remediation: None,
+            telemetry: None,
         }
     }
 

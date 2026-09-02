@@ -283,7 +283,7 @@ impl History {
     }
 
     pub fn from_runs(mut runs: Vec<LoadedRun>) -> Self {
-        runs.sort_by(|a, b| b.started_at().cmp(&a.started_at()));
+        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at()));
         Self { runs }
     }
 
@@ -349,7 +349,7 @@ impl History {
                 })
             })
             .collect();
-        out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        out.sort_by_key(|e| e.started_at);
         out
     }
 
@@ -431,6 +431,8 @@ mod tests {
             last_attempt_ms: duration,
             attempts: Vec::new(),
             installed_version: None,
+            remediation: None,
+            telemetry: None,
         }
     }
 

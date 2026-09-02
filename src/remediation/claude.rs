@@ -271,7 +271,7 @@ pub enum RemediationError {
 }
 
 /// Method used for remediation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemediationMethod {
     /// Claude fixed it automatically
     ClaudeAuto,
@@ -312,6 +312,66 @@ pub struct RemediationResult {
     pub claude_output: String,
     pub estimated_cost_usd: f32,
     pub verification_passed: bool,
+    /// Parsed `claude --print --output-format json` envelope (None for fallbacks)
+    #[serde(default)]
+    pub envelope: Option<ClaudeEnvelope>,
+}
+
+/// The `claude --print --output-format json` envelope (fields we rely on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ClaudeEnvelope {
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub total_cost_usd: f64,
+    #[serde(default)]
+    pub num_turns: u32,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub subtype: Option<String>,
+}
+
+impl ClaudeEnvelope {
+    /// Parse stdout; tolerates leading log lines and a plain-text result (treated as `result`).
+    pub fn parse(stdout: &str) -> Self {
+        let trimmed = stdout.trim();
+        if let Ok(env) = serde_json::from_str::<ClaudeEnvelope>(trimmed) {
+            return env;
+        }
+        // Stream-json or noisy output: take the last line that parses as an envelope.
+        for line in trimmed.lines().rev() {
+            if let Ok(env) = serde_json::from_str::<ClaudeEnvelope>(line.trim()) {
+                if !env.result.is_empty() || env.is_error {
+                    return env;
+                }
+            }
+        }
+        ClaudeEnvelope { result: trimmed.to_string(), ..Default::default() }
+    }
+}
+
+/// Arguments for a read-only advisory run. Never includes `--dangerously-skip-permissions`.
+pub fn advisory_args(max_turns: u32, max_budget_usd: f32, prompt: &str) -> Vec<String> {
+    vec![
+        "--print".into(),
+        "--output-format".into(),
+        "json".into(),
+        "--permission-mode".into(),
+        "plan".into(),
+        "--tools".into(),
+        "Read,Grep,Glob".into(),
+        "--max-turns".into(),
+        max_turns.max(1).to_string(),
+        "--max-budget-usd".into(),
+        format!("{max_budget_usd:.2}"),
+        "-p".into(),
+        prompt.to_string(),
+    ]
 }
 
 /// Health status of the remediation system
@@ -335,6 +395,10 @@ pub struct ClaudeRemediationConfig {
     pub max_attempts: u32,
     pub timeout_seconds: u64,
     pub cost_limit_usd: f32,
+    /// Agent turns per invocation
+    pub max_turns: u32,
+    /// Binary to invoke (None = `claude` on PATH); tests point this at a fake
+    pub claude_bin: Option<String>,
 }
 
 impl Default for ClaudeRemediationConfig {
@@ -347,6 +411,8 @@ impl Default for ClaudeRemediationConfig {
             max_attempts: 3,
             timeout_seconds: 300,
             cost_limit_usd: 10.0,
+            max_turns: 8,
+            claude_bin: None,
         }
     }
 }
@@ -453,7 +519,8 @@ impl ClaudeRemediation {
         Ok(self.fallback_manual_instructions(prompt))
     }
 
-    /// Execute Claude CLI (internal)
+    /// Execute Claude CLI (internal): read-only advisory invocation. Never grants edit
+    /// permissions; the envelope is the source of truth for cost and errors.
     async fn execute_claude_cli(
         &self,
         prompt: &str,
@@ -462,16 +529,14 @@ impl ClaudeRemediation {
         use tokio::time::timeout;
 
         self.request_count.fetch_add(1, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let bin = self.config.claude_bin.clone().unwrap_or_else(|| "claude".to_string());
+        let remaining_budget = (self.config.cost_limit_usd - self.get_total_cost_usd()).max(0.01);
 
         let output = timeout(
             Duration::from_secs(self.config.timeout_seconds),
-            Command::new("claude")
-                .arg("--print")
-                .arg("--dangerously-skip-permissions")
-                .arg("--output-format")
-                .arg("json")
-                .arg("-p")
-                .arg(prompt)
+            Command::new(&bin)
+                .args(advisory_args(self.config.max_turns, remaining_budget, prompt))
                 .current_dir(&self.workspace)
                 .output(),
         )
@@ -481,36 +546,37 @@ impl ClaudeRemediation {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // Check for specific error types
             if stderr.contains("rate limit") || stderr.contains("429") {
                 return Err(RemediationError::ApiError("Rate limited by Anthropic API".into()));
             }
             if stderr.contains("authentication") || stderr.contains("401") {
                 return Err(RemediationError::ClaudeUnavailable("Authentication failed".into()));
             }
-
-            return Err(RemediationError::ClaudeError(stderr.to_string()));
+            return Err(RemediationError::ClaudeError(stderr.trim().to_string()));
         }
 
-        // Parse output and estimate cost
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let estimated_cost = self.estimate_cost(&stdout);
-        self.add_cost(estimated_cost);
-
-        // Parse changes from output
-        let changes = self.parse_changes(&stdout)?;
+        let envelope = ClaudeEnvelope::parse(&stdout);
+        self.add_cost(envelope.total_cost_usd as f32);
+        if envelope.is_error {
+            return Err(RemediationError::ClaudeError(if envelope.result.is_empty() {
+                "claude reported is_error=true".into()
+            } else {
+                envelope.result.clone()
+            }));
+        }
 
         Ok(RemediationResult {
             success: true,
             method: RemediationMethod::ClaudeAuto,
-            changes_made: changes,
+            changes_made: vec![],
             commit_sha: None,
             pr_url: None,
-            duration_ms: 0, // Set by caller
-            claude_output: stdout.to_string(),
-            estimated_cost_usd: estimated_cost,
-            verification_passed: false, // Set after verification
+            duration_ms: started.elapsed().as_millis() as u64,
+            claude_output: envelope.result.clone(),
+            estimated_cost_usd: envelope.total_cost_usd as f32,
+            verification_passed: false,
+            envelope: Some(envelope),
         })
     }
 
@@ -531,15 +597,8 @@ impl ClaudeRemediation {
             claude_output: instructions,
             estimated_cost_usd: 0.0,
             verification_passed: false,
+            envelope: None,
         }
-    }
-
-    fn estimate_cost(&self, output: &str) -> f32 {
-        // Rough estimation based on token count
-        let char_count = output.len();
-        let estimated_tokens = char_count / 4; // ~4 chars per token
-        let cost_per_1k_tokens = 0.015; // Claude Opus output pricing
-        (estimated_tokens as f32 / 1000.0) * cost_per_1k_tokens
     }
 
     fn add_cost(&self, cost: f32) {
@@ -551,41 +610,6 @@ impl ClaudeRemediation {
         self.total_cost_usd.load(Ordering::SeqCst) as f32 / 1_000_000.0
     }
 
-    fn parse_changes(
-        &self,
-        output: &str,
-    ) -> std::result::Result<Vec<FileChange>, RemediationError> {
-        // Try to parse Claude's JSON response for structured suggestions
-        // Expected format: {"suggestions": [{"type": "fix", "description": "...",
-        //   "files": [{"path": "...", "content": "..."}]}]}
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
-            if let Some(suggestions) = parsed.get("suggestions").and_then(|s| s.as_array()) {
-                let mut changes = Vec::new();
-                for suggestion in suggestions {
-                    if let Some(files) = suggestion.get("files").and_then(|f| f.as_array()) {
-                        for file in files {
-                            let path =
-                                file.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                            let diff =
-                                file.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
-                            if !path.is_empty() {
-                                changes.push(FileChange {
-                                    path: PathBuf::from(path),
-                                    change_type: ChangeType::Modified,
-                                    diff,
-                                    size_bytes: 0,
-                                });
-                            }
-                        }
-                    }
-                }
-                return Ok(changes);
-            }
-        }
-
-        // If not valid JSON or no suggestions, return empty (fall through to fallback)
-        Ok(vec![])
-    }
 
     /// Get health status of the remediation system
     pub async fn health_check(&self) -> RemediationHealth {

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Fake `claude` CLI for tests. Records argv and cwd, honors --version, and returns a
+# `claude --print --output-format json` envelope per $AFSC_FAKE_CLAUDE:
+#   success          benign suggestion, total_cost_usd 0.12
+#   unsafe           suggestion containing `rm -rf /` and `sudo chmod -R 777 /`
+#   error            is_error: true (exit 0, like the real CLI)
+#   rate_limit       exit 1 with "rate limit" on stderr
+#   timeout          sleeps 30 s (longer than any test timeout)
+#   edits_in_policy  writes checksums.yaml in cwd (for propose-mode tests) then success
+#   edits_out_of_policy  writes README.md in cwd then success
+# Envelope shape pinned from `claude --print --output-format json` (Claude Code 2.1.x):
+# {"type":"result","subtype":"success","is_error":false,"duration_ms":..,"num_turns":..,
+#  "result":"...","session_id":"...","total_cost_usd":..}
+set -euo pipefail
+
+if [[ -n "${AFSC_FAKE_CLAUDE_LOG:-}" ]]; then
+    {
+        printf 'cwd=%s\n' "$PWD"
+        printf 'argv='
+        printf '%q ' "$@"
+        printf '\n'
+    } >> "$AFSC_FAKE_CLAUDE_LOG"
+fi
+
+for arg in "$@"; do
+    if [[ "$arg" == "--version" ]]; then
+        echo "2.1.258 (Claude Code) [fake]"
+        exit 0
+    fi
+done
+
+scenario="${AFSC_FAKE_CLAUDE:-success}"
+envelope() {
+    # $1 = result text, $2 = is_error, $3 = cost
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+print(json.dumps({
+    "type": "result",
+    "subtype": "success" if sys.argv[2] == "false" else "error_during_execution",
+    "is_error": sys.argv[2] == "true",
+    "duration_ms": 1234,
+    "num_turns": 2,
+    "result": sys.argv[1],
+    "session_id": "fake-session-0001",
+    "total_cost_usd": float(sys.argv[3]),
+}))
+PY
+}
+
+case "$scenario" in
+    success)
+        envelope $'The package name changed upstream. Suggested fix:\n\n```bash\nsudo apt-get update\nsudo apt-get install -y foo\n```\n\nThen rerun the installer.' false 0.12
+        ;;
+    unsafe)
+        envelope $'Try cleaning the environment first:\n\n```bash\nrm -rf /\nsudo chmod -R 777 /\n```\n\nand reinstall.' false 0.20
+        ;;
+    error)
+        envelope "Claude could not complete the request" true 0.05
+        ;;
+    rate_limit)
+        echo "API error: rate limit exceeded (429)" >&2
+        exit 1
+        ;;
+    timeout)
+        sleep 30
+        envelope "too late" false 0.0
+        ;;
+    edits_in_policy)
+        printf 'installers:\n  edited_by_fake: {}\n' > checksums.yaml
+        envelope "Updated checksums.yaml" false 0.30
+        ;;
+    edits_out_of_policy)
+        printf '# tampered\n' > README.md
+        envelope "Updated README.md" false 0.30
+        ;;
+    *)
+        echo "fake claude: unknown scenario $scenario" >&2
+        exit 2
+        ;;
+esac

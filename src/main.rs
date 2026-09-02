@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use automated_flywheel_setup_checker::config::RunOrder;
+use automated_flywheel_setup_checker::config::{RemediationMode, RunOrder};
 use automated_flywheel_setup_checker::reporting::RunInfo;
 use automated_flywheel_setup_checker::config::Config;
 use automated_flywheel_setup_checker::reporting::{diff_runs, render_diff, render_run, render_timeline, History};
@@ -248,6 +248,12 @@ enum Commands {
         profile: bool,
     },
 
+    /// Remediation without guessing: deterministic checksum refresh (advisory / propose / apply)
+    Remediate {
+        #[command(subcommand)]
+        what: RemediateCmd,
+    },
+
     /// Diagnose the environment (Docker, image, ACFS repo, dirs, disk, tools, last run)
     Doctor {
         /// Skip the Docker checks (for --local deployments)
@@ -290,6 +296,47 @@ enum Commands {
         /// Subcommand
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RemediateModeArg {
+    /// Print the diff and verification results; write a candidate file under the data dir
+    Advisory,
+    /// Advisory plus a git worktree branch with the candidate committed (and a PR if configured)
+    Propose,
+    /// Propose plus push the branch (never main)
+    Apply,
+}
+
+#[derive(Clone, Subcommand)]
+enum RemediateCmd {
+    /// Download every installer, find drifted SHA-256 pins, verify the new hash in a fresh
+    /// container, and produce a reviewable checksums.yaml candidate
+    Checksums {
+        /// Only the installers that failed with checksum_mismatch in the last run
+        #[arg(long, conflicts_with = "only")]
+        from_last_run: bool,
+
+        /// Restrict to these installers
+        #[arg(long, value_name = "NAME", num_args = 1..)]
+        only: Vec<String>,
+
+        /// advisory | propose | apply (default: [remediation].mode, at least advisory)
+        #[arg(long, value_enum)]
+        mode: Option<RemediateModeArg>,
+
+        /// Do not run the installers with the new hashes (candidate still written; nothing proposed)
+        #[arg(long)]
+        no_verify: bool,
+
+        /// Verify with the local backend instead of Docker
+        #[arg(long)]
+        local: bool,
+
+        /// Consent for --local when not attached to a terminal
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -570,6 +617,13 @@ async fn run_command(
 
         Commands::Doctor { local } => cmd_doctor(settings, *local, cli.format).await,
 
+        Commands::Remediate { what: RemediateCmd::Checksums { from_last_run, only, mode, no_verify, local, yes } } => {
+            if *local && !*no_verify {
+                local_consent(*yes)?;
+            }
+            cmd_remediate_checksums(settings, *from_last_run, only, *mode, !*no_verify, *local, cli.format).await
+        }
+
         Commands::Notify { last_run, run, digest } => {
             let selector = if *last_run { Some("last".to_string()) } else { run.clone() };
             cmd_notify(settings, selector.as_deref(), *digest, cli.format).await
@@ -635,6 +689,404 @@ fn summary_counts(results: &[TestResult]) -> serde_json::Value {
         "cancelled": count(TestStatus::Cancelled),
         "duration_ms": results.iter().map(|r| r.duration_ms).sum::<u64>(),
     })
+}
+
+/// Executor configuration for a run (Docker or local backend) from the resolved settings.
+fn build_runner_config(
+    config: &Config,
+    local: bool,
+    timeout: u64,
+    retries: u32,
+    rebuild_base: bool,
+    run_id: &str,
+    cancel: CancellationToken,
+) -> RunnerConfig {
+    let backend = if local {
+        ExecutionBackend::Local
+    } else {
+        let container_config = ContainerConfig {
+            image: config.docker.image.clone(),
+            memory_limit: parse_memory_limit(&config.docker.memory_limit),
+            cpu_quota: Some(config.docker.cpu_quota),
+            timeout_seconds: timeout,
+            volumes: config
+                .docker
+                .volumes
+                .iter()
+                .filter_map(|spec| {
+                    // host:container[:ro] -> (host[:ro], container)
+                    let mut parts = spec.splitn(3, ':');
+                    let host = parts.next()?.to_string();
+                    let container = parts.next()?.to_string();
+                    let mode = parts.next().map(|m| format!(":{m}")).unwrap_or_default();
+                    Some((format!("{host}{mode}"), container))
+                })
+                .collect(),
+            environment: Vec::new(),
+            labels: vec![("afsc.run_id".to_string(), run_id.to_string())],
+            prepare: config.docker.prepare,
+            build_timeout_seconds: config.docker.build_timeout_seconds,
+            rebuild: rebuild_base,
+            network_mode: if config.docker.network.trim().is_empty() || config.docker.network == "bridge" {
+                None
+            } else {
+                Some(config.docker.network.clone())
+            },
+            run_as_root: config.docker.run_as_root,
+        };
+        ExecutionBackend::Docker {
+            container_config,
+            pull_policy: PullPolicy::parse_policy(&config.docker.pull_policy),
+        }
+    };
+    RunnerConfig {
+        default_timeout: Duration::from_secs(timeout),
+        dry_run: false,
+        backend,
+        retry: RetryConfig::executor_default(retries),
+        cancel,
+        max_capture_bytes: config.execution.max_capture_bytes as usize,
+        ..Default::default()
+    }
+}
+
+/// Attach a `RemediationOutcome` to every failing result.
+async fn remediate_results(
+    settings: &Settings,
+    results: &mut [TestResult],
+    local: bool,
+    format: OutputFormat,
+    event_log: Option<&mut automated_flywheel_setup_checker::reporting::EventLog>,
+) {
+    use automated_flywheel_setup_checker::remediation::{
+        annotate_risks, generate_suggestions, ClaudeRemediation, ClaudeRemediationConfig as RemConfig, RemediationMethod, RemediationOutcome,
+    };
+
+    let config = &settings.config;
+    let mode = match config.remediation.effective_mode() {
+        RemediationMode::Off => RemediationMode::Advisory,
+        m => m,
+    };
+    if matches!(format, OutputFormat::Human) {
+        println!("\nRemediation ({mode:?})...");
+    }
+
+    // 1. Checksum drift: deterministic refresh, verified in a fresh sandbox.
+    let drifted: Vec<String> = results
+        .iter()
+        .filter(|r| is_failure(r) && r.error.as_ref().is_some_and(|e| e.category == "checksum_mismatch"))
+        .map(|r| r.installer_name.clone())
+        .collect();
+    if !drifted.is_empty() {
+        match refresh_checksums(settings, &drifted, mode, true, local).await {
+            Ok(run) => {
+                for r in results.iter_mut().filter(|r| drifted.contains(&r.installer_name)) {
+                    let outcome = match run.plan.entries.iter().find(|e| e.name == r.installer_name) {
+                        Some(e) if e.verification.as_ref().is_some_and(|v| v.passed) => {
+                            let candidate_path = run.candidate_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            match &run.proposal {
+                                Some(pr) if pr.pushed => RemediationOutcome::Applied { branch: pr.branch.clone(), sha: pr.commit.clone(), pr_url: pr.pr_url.clone(), cost_usd: 0.0 },
+                                Some(pr) => RemediationOutcome::Proposed { branch: pr.branch.clone(), commit: Some(pr.commit.clone()), pr_url: pr.pr_url.clone(), cost_usd: 0.0 },
+                                None => RemediationOutcome::Verified {
+                                    installer: e.name.clone(),
+                                    old_sha256: e.old_sha256.clone(),
+                                    new_sha256: e.new_sha256.clone(),
+                                    candidate_path,
+                                    drift_score: e.drift.as_ref().map(|d| d.score.as_str().to_string()),
+                                },
+                            }
+                        }
+                        Some(e) => RemediationOutcome::Failed {
+                            reason: format!(
+                                "installer still fails with the refreshed hash ({}{})",
+                                e.verification.as_ref().map(|v| v.status.clone()).unwrap_or_else(|| "not verified".into()),
+                                e.drift.as_ref().map(|d| format!(", drift {}", d.score.as_str())).unwrap_or_default()
+                            ),
+                            cost_usd: 0.0,
+                        },
+                        None => match run.plan.skipped.iter().find(|(n, _)| n == &r.installer_name) {
+                            Some((_, reason)) => RemediationOutcome::Failed { reason: reason.clone(), cost_usd: 0.0 },
+                            None => RemediationOutcome::Skipped { reason: "served bytes match the pin again; rerun".into() },
+                        },
+                    };
+                    r.remediation = Some(outcome);
+                }
+            }
+            Err(e) => {
+                for r in results.iter_mut().filter(|r| drifted.contains(&r.installer_name)) {
+                    r.remediation = Some(RemediationOutcome::Failed { reason: format!("checksum refresh failed: {e}"), cost_usd: 0.0 });
+                }
+            }
+        }
+    }
+
+    // 2. Everything else: read-only advice from Claude (plan mode, read tools only) with the
+    //    safety checker over any command it suggests; fallback suggestions when unavailable.
+    let rem_config = RemConfig {
+        enabled: true,
+        cost_limit_usd: config.remediation.cost_limit_usd as f32,
+        timeout_seconds: config.remediation.timeout_seconds,
+        max_attempts: config.remediation.max_attempts,
+        max_turns: config.remediation.max_turns,
+        auto_commit: false,
+        create_pr: false,
+        claude_bin: std::env::var("AFSC_CLAUDE_BIN").ok(),
+        ..Default::default()
+    };
+    let remediation = ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
+    for r in results.iter_mut().filter(|r| is_failure(r) && r.remediation.is_none()) {
+        let classification = r.error.clone().unwrap_or_else(|| {
+            automated_flywheel_setup_checker::parser::classify_error(&r.stderr, r.exit_code.unwrap_or(-1))
+        });
+        let fallback = || {
+            let suggestions = generate_suggestions(&classification);
+            let text = suggestions
+                .iter()
+                .map(|s| format!("{}: {}{}", s.title, s.description, if s.commands.is_empty() { String::new() } else { format!("\n  $ {}", s.commands.join("\n  $ ")) }))
+                .collect::<Vec<_>>()
+                .join("\n");
+            RemediationOutcome::Advised { risks: annotate_risks(&text), suggestion: text, cost_usd: 0.0, source: "fallback".into() }
+        };
+        let prompt = automated_flywheel_setup_checker::remediation::generate_prompt(&classification, &r.stderr, &config.general.acfs_repo);
+        let outcome = match remediation.execute_with_resilience(&prompt).await {
+            Ok(res) if res.method == RemediationMethod::ManualRequired => fallback(),
+            Ok(res) => {
+                let suggestion = automated_flywheel_setup_checker::reporting::redact(&res.claude_output);
+                let cost_usd = res.envelope.as_ref().map(|e| e.total_cost_usd).unwrap_or(res.estimated_cost_usd as f64);
+                RemediationOutcome::Advised { risks: annotate_risks(&suggestion), suggestion, cost_usd, source: "claude".into() }
+            }
+            Err(e) => RemediationOutcome::Failed { reason: e.to_string(), cost_usd: 0.0 },
+        };
+        r.remediation = Some(outcome);
+    }
+
+    if let Some(log) = event_log {
+        for r in results.iter().filter(|r| r.remediation.is_some()) {
+            let o = r.remediation.as_ref().unwrap();
+            log.installer_event("remediation", &r.installer_name, serde_json::json!({ "outcome": o.kind(), "cost_usd": o.cost_usd(), "detail": o.describe() }));
+        }
+        log.flush();
+    }
+}
+
+/// Everything a checksum refresh produced.
+struct RefreshRun {
+    plan: automated_flywheel_setup_checker::remediation::RefreshPlan,
+    candidate_path: Option<PathBuf>,
+    /// Unified diff between checksums.yaml and the candidate
+    diff: String,
+    proposal: Option<automated_flywheel_setup_checker::remediation::ProposalResult>,
+    verified: bool,
+}
+
+/// Deterministic checksum refresh shared by `remediate checksums` and `check --remediate`.
+async fn refresh_checksums(
+    settings: &Settings,
+    only: &[String],
+    mode: RemediationMode,
+    verify: bool,
+    local: bool,
+) -> std::result::Result<RefreshRun, AfscError> {
+    use automated_flywheel_setup_checker::checksums::Ledger;
+    use automated_flywheel_setup_checker::remediation::{candidate_path, commit_message, plan_refresh, propose, render_candidate, verify_entry};
+
+    let config = &settings.config;
+    let checksums_path = config.general.acfs_repo.join("checksums.yaml");
+    if !checksums_path.exists() {
+        return Err(AfscError::Config(format!("checksums.yaml not found at {}", checksums_path.display())));
+    }
+    let original = std::fs::read_to_string(&checksums_path).map_err(|e| AfscError::Config(format!("reading {}: {e}", checksums_path.display())))?;
+    let checksums = parse_checksums(&checksums_path)?;
+    let policy_errors = validate_url_policy(&checksums, config.general.allow_file_urls);
+    if !policy_errors.is_empty() {
+        let list: Vec<String> = policy_errors.iter().map(|e| e.to_string()).collect();
+        return Err(AfscError::Config(format!("{} installer URL(s) violate the URL policy:\n  {}", list.len(), list.join("\n  "))));
+    }
+    let data_dir = config.general.data_dir_path();
+    let ledger = Ledger::new(&data_dir);
+    let mut plan = plan_refresh(&checksums_path, &checksums, only, &ledger).await;
+
+    if verify && !plan.entries.is_empty() {
+        if !local {
+            ContainerManager::preflight_default().await.map_err(infra)?;
+        }
+        let run_id = format!("refresh-{}", uuid::Uuid::new_v4());
+        let globals = GlobalDefaults { timeout_seconds: config.docker.timeout_seconds, retries: 0 };
+        let runner_config = build_runner_config(config, local, config.docker.timeout_seconds, 0, false, &run_id, CancellationToken::new());
+        for entry in plan.entries.iter_mut() {
+            let Some(raw) = checksums.installers.get(&entry.name) else { continue };
+            let spec = resolve_spec(&entry.name, raw, config.installers.get(entry.name.as_str()), globals);
+            tracing::info!(installer = %entry.name, new_sha = %entry.new_sha256, "Verifying installer with the refreshed hash");
+            let passed = verify_entry(entry, &spec, runner_config.clone()).await;
+            if passed {
+                let _ = ledger.mark_verified(&entry.name, &entry.new_sha256, &run_id);
+            }
+        }
+    }
+
+    let mut out = RefreshRun { plan: automated_flywheel_setup_checker::remediation::RefreshPlan::default(), candidate_path: None, diff: String::new(), proposal: None, verified: verify };
+    if plan.entries.is_empty() {
+        out.plan = plan;
+        return Ok(out);
+    }
+    let candidate = render_candidate(&original, &plan, verify);
+    out.diff = similar::TextDiff::from_lines(original.as_str(), candidate.as_str())
+        .unified_diff()
+        .context_radius(2)
+        .header("checksums.yaml", "candidate")
+        .to_string();
+    let path = candidate_path(&data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AfscError::Infra(format!("creating {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&path, &candidate).map_err(|e| AfscError::Infra(format!("writing {}: {e}", path.display())))?;
+    out.candidate_path = Some(path);
+
+    let includable = if verify { plan.verified().count() } else { plan.entries.len() };
+    if matches!(mode, RemediationMode::Propose | RemediationMode::Apply) && includable > 0 {
+        let message = commit_message(&plan, verify);
+        let proposal = propose(
+            &config.general.acfs_repo,
+            &data_dir.join("worktrees"),
+            &candidate,
+            &message,
+            config.remediation.create_pr,
+            mode == RemediationMode::Apply,
+        )
+        .map_err(|e| AfscError::Infra(format!("proposing the refresh: {e:#}")))?;
+        out.proposal = Some(proposal);
+    }
+    out.plan = plan;
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_remediate_checksums(
+    settings: &Settings,
+    from_last_run: bool,
+    only: &[String],
+    mode: Option<RemediateModeArg>,
+    verify: bool,
+    local: bool,
+    format: OutputFormat,
+) -> CmdResult {
+    use automated_flywheel_setup_checker::checksums::drift_summary;
+
+    let config = &settings.config;
+    let mode = match mode {
+        Some(RemediateModeArg::Advisory) => RemediationMode::Advisory,
+        Some(RemediateModeArg::Propose) => RemediationMode::Propose,
+        Some(RemediateModeArg::Apply) => RemediationMode::Apply,
+        None => match config.remediation.effective_mode() {
+            RemediationMode::Off => RemediationMode::Advisory,
+            m => m,
+        },
+    };
+    let mut names: Vec<String> = only.to_vec();
+    if from_last_run {
+        let history = History::load(&config.general.results_dir())?;
+        let Some(run) = history.latest() else {
+            return Err(AfscError::Usage("no runs recorded yet (run `check` first)".into()));
+        };
+        names = run
+            .entries
+            .iter()
+            .filter(|e| e.error_classification.as_ref().is_some_and(|c| c.category == "checksum_mismatch") || e.checksum_state == "mismatch")
+            .map(|e| e.installer_name.clone())
+            .collect();
+        if names.is_empty() {
+            match format {
+                OutputFormat::Human => println!("Nothing to refresh: run {} had no checksum mismatches", run.run_id().chars().take(8).collect::<String>()),
+                _ => println!("{}", to_json(&serde_json::json!({"kind": "refresh", "schema_version": SCHEMA_VERSION, "status": "nothing_to_refresh", "run_id": run.run_id()}), matches!(format, OutputFormat::Json))),
+            }
+            return Ok(());
+        }
+    }
+
+    let run = refresh_checksums(settings, &names, mode, verify, local).await?;
+    let plan = &run.plan;
+    let failed_verification = plan.unverified().count();
+
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "Checked {} installer(s): {} drifted, {} skipped{}",
+                plan.checked,
+                plan.entries.len(),
+                plan.skipped.len(),
+                if verify { format!(", {} verified", plan.verified().count()) } else { String::new() }
+            );
+            for (name, reason) in &plan.skipped {
+                println!("  - {name}: skipped ({reason})");
+            }
+            for e in &plan.entries {
+                println!(
+                    "  {} {}  {}… -> {}…  drift: {}  verify: {}",
+                    if e.verification.as_ref().is_some_and(|v| v.passed) { "\u{2713}" } else if e.verification.is_some() { "\u{2717}" } else { "-" },
+                    e.name,
+                    &e.old_sha256[..12],
+                    &e.new_sha256[..12],
+                    e.drift.as_ref().map(drift_summary).unwrap_or_else(|| "no known-good baseline in the ledger".into()),
+                    e.verification.as_ref().map(|v| format!("{}{}", v.status, v.installed_version.as_ref().map(|s| format!(" ({s})")).unwrap_or_default())).unwrap_or_else(|| "not run".into())
+                );
+                if let Some(d) = &e.drift {
+                    if d.score != automated_flywheel_setup_checker::checksums::RiskScore::Routine {
+                        for line in d.unified_diff.lines().take(40) {
+                            println!("      {line}");
+                        }
+                        if d.diff_truncated || d.unified_diff.lines().count() > 40 {
+                            println!("      … (full diff in the ledger under {})", config.general.data_dir_path().join("scripts").display());
+                        }
+                    }
+                }
+            }
+            if !run.diff.is_empty() {
+                println!();
+                println!("{}", run.diff.trim_end());
+            }
+            if let Some(p) = &run.candidate_path {
+                println!("\nCandidate written to {}", p.display());
+            }
+            if let Some(pr) = &run.proposal {
+                println!("Branch {} ({}) in worktree {}{}{}", pr.branch, &pr.commit[..12], pr.worktree, if pr.pushed { ", pushed" } else { "" }, pr.pr_url.as_ref().map(|u| format!(", PR {u}")).unwrap_or_default());
+            } else if plan.entries.is_empty() {
+                println!("No drift: every pinned hash matches what is served.");
+            } else if matches!(mode, RemediationMode::Propose | RemediationMode::Apply) {
+                println!("Nothing proposed: no entry passed verification.");
+            }
+        }
+        OutputFormat::Json => {
+            let doc = serde_json::json!({
+                "kind": "refresh",
+                "schema_version": SCHEMA_VERSION,
+                "mode": format!("{mode:?}").to_lowercase(),
+                "verified": run.verified,
+                "plan": plan,
+                "candidate_path": run.candidate_path,
+                "diff": run.diff,
+                "proposal": run.proposal,
+            });
+            println!("{}", to_json(&doc, true));
+        }
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+            for e in &plan.entries {
+                println!("{}", to_json(&with_kind("refresh_entry", e)?, false));
+            }
+            let mut summary = serde_json::json!({
+                "checked": plan.checked, "drifted": plan.entries.len(), "skipped": plan.skipped,
+                "verified": plan.verified().count(), "candidate_path": run.candidate_path, "proposal": run.proposal,
+                "mode": format!("{mode:?}").to_lowercase(),
+            });
+            summary["kind"] = serde_json::json!("refresh_summary");
+            summary["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+            println!("{}", to_json(&summary, false));
+        }
+    }
+
+    if verify && failed_verification > 0 {
+        return Err(AfscError::InstallerFailures { failed: failed_verification, total: plan.entries.len() });
+    }
+    Ok(())
 }
 
 fn hostname() -> String {
@@ -1031,56 +1483,8 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         });
     }
 
-    // Select execution backend
-    let backend = if options.local {
-        ExecutionBackend::Local
-    } else {
-        let container_config = ContainerConfig {
-            image: config.docker.image.clone(),
-            memory_limit: parse_memory_limit(&config.docker.memory_limit),
-            cpu_quota: Some(config.docker.cpu_quota),
-            timeout_seconds: options.timeout,
-            volumes: config
-                .docker
-                .volumes
-                .iter()
-                .filter_map(|spec| {
-                    // host:container[:ro] -> (host[:ro], container)
-                    let mut parts = spec.splitn(3, ':');
-                    let host = parts.next()?.to_string();
-                    let container = parts.next()?.to_string();
-                    let mode = parts.next().map(|m| format!(":{m}")).unwrap_or_default();
-                    Some((format!("{host}{mode}"), container))
-                })
-                .collect(),
-            environment: Vec::new(),
-            labels: vec![("afsc.run_id".to_string(), run_id.clone())],
-            prepare: config.docker.prepare,
-            build_timeout_seconds: config.docker.build_timeout_seconds,
-            rebuild: options.rebuild_base,
-            network_mode: if config.docker.network.trim().is_empty() || config.docker.network == "bridge" {
-                None
-            } else {
-                Some(config.docker.network.clone())
-            },
-            run_as_root: config.docker.run_as_root,
-        };
-        ExecutionBackend::Docker {
-            container_config,
-            pull_policy: PullPolicy::parse_policy(&config.docker.pull_policy),
-        }
-    };
-
     // Set up the runner with configuration
-    let runner_config = RunnerConfig {
-        default_timeout: Duration::from_secs(options.timeout),
-        dry_run: false,
-        backend,
-        retry: RetryConfig::executor_default(options.retries),
-        cancel: cancel.clone(),
-        max_capture_bytes: config.execution.max_capture_bytes as usize,
-        ..Default::default()
-    };
+    let runner_config = build_runner_config(config, options.local, options.timeout, options.retries, options.rebuild_base, &run_id, cancel.clone());
     let runner = InstallerTestRunner::new(runner_config.clone());
 
     // Skipped installers produce results without running anything.
@@ -1182,6 +1586,13 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         log.flush();
     }
 
+    // Remediation (when --remediate is given and the run was not interrupted): deterministic
+    // checksum refresh for drift, read-only Claude advice (or fallback suggestions) for the rest.
+    // Outcomes land on the results so they are printed and persisted with them.
+    if options.remediate && any_failed && !interrupted {
+        remediate_results(settings, &mut results, options.local, options.format, event_log.as_mut()).await;
+    }
+
     // Print per-result output
     for result in &results {
         match options.format {
@@ -1206,6 +1617,20 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                 }
                 if !result.success {
                     print_error_line(result);
+                }
+                if let Some(outcome) = &result.remediation {
+                    println!("    remediation: {}", outcome.describe());
+                    if let automated_flywheel_setup_checker::remediation::RemediationOutcome::Advised { suggestion, risks, .. } = outcome {
+                        for line in suggestion.lines().take(12) {
+                            println!("      | {line}");
+                        }
+                        if suggestion.lines().count() > 12 {
+                            println!("      | …");
+                        }
+                        for r in risks {
+                            println!("      !! {} ({}): {}", r.risk, r.command, r.reason);
+                        }
+                    }
                 }
             }
             OutputFormat::Json => {}
@@ -1272,79 +1697,6 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             line["kind"] = serde_json::json!("summary");
             line["schema_version"] = serde_json::json!(SCHEMA_VERSION);
             println!("{}", to_json(&line, false));
-        }
-    }
-
-    // Remediation for failures (when --remediate is enabled and the run was not interrupted)
-    if options.remediate && any_failed && !interrupted {
-        use automated_flywheel_setup_checker::remediation::{
-            generate_prompt, ClaudeRemediation, ClaudeRemediationConfig as RemConfig,
-        };
-
-        if matches!(options.format, OutputFormat::Human) {
-            println!("\nAttempting auto-remediation for failures...");
-        }
-
-        let rem_config = RemConfig {
-            enabled: true,
-            cost_limit_usd: config.remediation.cost_limit_usd as f32,
-            timeout_seconds: config.remediation.timeout_seconds,
-            max_attempts: config.remediation.max_attempts,
-            auto_commit: config.remediation.auto_commit,
-            create_pr: config.remediation.create_pr,
-            ..Default::default()
-        };
-        let remediation = ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
-
-        for result in results.iter().filter(|r| is_failure(r)) {
-            // Classification is always attached to failures; fall back defensively.
-            let classification = result.error.clone().unwrap_or_else(|| {
-                automated_flywheel_setup_checker::parser::classify_error(
-                    &result.stderr,
-                    result.exit_code.unwrap_or(-1),
-                )
-            });
-            let prompt =
-                generate_prompt(&classification, &result.stderr, &config.general.acfs_repo);
-
-            match remediation.execute_with_resilience(&prompt).await {
-                Ok(rem_result) => {
-                    if matches!(options.format, OutputFormat::Human) {
-                        let status = if rem_result.success { "succeeded" } else { "partial" };
-                        println!(
-                            "\n  Remediation {} for {} (method: {:?}, cost: ${:.4})",
-                            status,
-                            result.installer_name,
-                            rem_result.method,
-                            rem_result.estimated_cost_usd
-                        );
-                        if !rem_result.changes_made.is_empty() {
-                            println!("  Files to modify:");
-                            for change in &rem_result.changes_made {
-                                println!(
-                                    "    - {} ({:?})",
-                                    change.path.display(),
-                                    change.change_type
-                                );
-                            }
-                        }
-                        if !rem_result.claude_output.is_empty() {
-                            let preview: String = rem_result
-                                .claude_output
-                                .lines()
-                                .take(5)
-                                .collect::<Vec<_>>()
-                                .join("\n    ");
-                            println!("  Output: {}", preview);
-                        }
-                    }
-                }
-                Err(e) => {
-                    if matches!(options.format, OutputFormat::Human) {
-                        println!("  Remediation failed for {}: {}", result.installer_name, e);
-                    }
-                }
-            }
         }
     }
 
@@ -1707,6 +2059,19 @@ fn cmd_status(
                     }
                     if !entry.checksum_state.is_empty() {
                         println!("      checksum: {}", entry.checksum_state);
+                    }
+                    if let Some(t) = &entry.telemetry {
+                        println!(
+                            "      resources: peak memory {:.1} MiB, cpu {:.1}s, net rx {:.1} MiB / tx {:.1} MiB ({} samples)",
+                            t.peak_memory_bytes as f64 / (1024.0 * 1024.0),
+                            t.cpu_seconds,
+                            t.network_rx_bytes as f64 / (1024.0 * 1024.0),
+                            t.network_tx_bytes as f64 / (1024.0 * 1024.0),
+                            t.samples
+                        );
+                    }
+                    if let Some(r) = &entry.remediation {
+                        println!("      remediation: {}", r.describe());
                     }
                     for attempt in &entry.attempts {
                         println!(
@@ -2623,5 +2988,52 @@ mod tests {
             assert!(Cli::try_parse_from(argv).is_ok(), "should parse: {line}");
         }
         assert!(Cli::try_parse_from(["afsc", "check", "--all", "--json"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod docs_drift_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// README command headings (`### \`name\``) must match the real subcommands, both ways.
+    #[test]
+    fn readme_documents_every_subcommand_and_nothing_else() {
+        let readme = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+        let documented: std::collections::BTreeSet<String> = readme
+            .lines()
+            .filter_map(|l| l.strip_prefix("### `"))
+            .map(|rest| rest.split('`').next().unwrap_or("").split_whitespace().next().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let real: std::collections::BTreeSet<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .filter(|n| n != "help")
+            .collect();
+        let missing: Vec<&String> = real.iter().filter(|n| !documented.contains(*n)).collect();
+        let stale: Vec<&String> = documented.iter().filter(|n| !real.contains(*n)).collect();
+        assert!(missing.is_empty(), "README lacks a `### \\`cmd\\`` section for: {missing:?}");
+        assert!(stale.is_empty(), "README documents subcommands that do not exist: {stale:?}");
+    }
+
+    /// Every top-level key in config/default.toml is mentioned in the README configuration text.
+    #[test]
+    fn readme_mentions_every_config_section() {
+        let readme = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+        let toml = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml")).unwrap();
+        let sections: Vec<&str> = toml.lines().filter_map(|l| l.strip_prefix('[')).map(|l| l.trim_end_matches(']')).collect();
+        let missing: Vec<&&str> = sections
+            .iter()
+            .filter(|s| !readme.contains(&format!("[{s}]")) && !readme.contains(&format!("[{s}.")))
+            .collect();
+        assert!(missing.is_empty(), "README does not mention config sections: {missing:?}");
+    }
+
+    /// CHANGELOG exists and has an Unreleased section (release tooling relies on it).
+    #[test]
+    fn changelog_has_unreleased_section() {
+        let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md")).unwrap();
+        assert!(text.contains("## [Unreleased]"));
     }
 }

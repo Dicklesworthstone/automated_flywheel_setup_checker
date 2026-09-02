@@ -6,9 +6,11 @@ use super::support::*;
 #[test]
 fn overrides_apply_interpreter_args_and_env() {
     let mut fx = Fixture::new();
+    // `ps -o comm=` reports the name the interpreter was invoked as (`sh`), even on hosts where
+    // /bin/sh is a symlink to bash (readlink would resolve to bash there).
     fx.add_installer(
         "echo_tool",
-        "#!/bin/sh\necho \"args=$* MYVAR=$MYVAR shell=$(readlink /proc/$$/exe)\"\nexit 0\n",
+        "#!/bin/sh\necho \"args=$* MYVAR=$MYVAR shell=$(ps -o comm= -p $$)\"\nexit 0\n",
     );
     fx.add_override(
         "echo_tool",
@@ -20,7 +22,7 @@ fn overrides_apply_interpreter_args_and_env() {
     let r = find_result(&lines, "echo_tool");
     let stdout_text = r["stdout"].as_str().unwrap();
     assert!(stdout_text.contains("args=--flag two words MYVAR=seven"), "{stdout_text}");
-    assert!(!stdout_text.contains("/bash"), "ran under sh: {stdout_text}");
+    assert!(stdout_text.contains("shell=sh"), "ran under sh: {stdout_text}");
 }
 
 #[test]

@@ -284,6 +284,70 @@ impl ContainerManager {
 
     /// Ensure the image containers will run is available locally, building the prepared image
     /// when its hash tag is missing (or `rebuild` is set) and pulling raw images per policy.
+    /// One resource sample for a running container (None when the daemon has no stats yet).
+    pub async fn sample_stats(&self, container_id: &str) -> Option<(u64, u64, u64, u64)> {
+        sample_container_stats(&self.docker, container_id).await
+    }
+
+    /// Sample a container every second until `stop` is cancelled; returns peak memory, CPU
+    /// seconds, and network bytes seen. Cheap enough to run for every attempt.
+    pub fn spawn_telemetry(
+        &self,
+        container_id: String,
+        stop: CancellationToken,
+    ) -> tokio::task::JoinHandle<crate::runner::Telemetry> {
+        let docker = self.docker_arc();
+        tokio::spawn(async move {
+            let mut t = crate::runner::Telemetry::default();
+            let mut first_cpu: Option<u64> = None;
+            let mut last_cpu: u64 = 0;
+            loop {
+                if let Some((mem, cpu, rx, tx)) = sample_container_stats(&docker, &container_id).await {
+                    t.samples += 1;
+                    t.peak_memory_bytes = t.peak_memory_bytes.max(mem);
+                    first_cpu.get_or_insert(cpu);
+                    last_cpu = cpu;
+                    t.network_rx_bytes = rx;
+                    t.network_tx_bytes = tx;
+                }
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+            }
+            // A final sample after the process ended catches short attempts.
+            if let Some((mem, cpu, rx, tx)) = sample_container_stats(&docker, &container_id).await {
+                t.samples += 1;
+                t.peak_memory_bytes = t.peak_memory_bytes.max(mem);
+                first_cpu.get_or_insert(cpu);
+                last_cpu = cpu;
+                t.network_rx_bytes = rx.max(t.network_rx_bytes);
+                t.network_tx_bytes = tx.max(t.network_tx_bytes);
+            }
+            t.cpu_seconds = last_cpu.saturating_sub(first_cpu.unwrap_or(last_cpu)) as f64 / 1e9;
+            t
+        })
+    }
+}
+
+/// One stats sample: (memory bytes, cumulative cpu ns, rx bytes, tx bytes).
+async fn sample_container_stats(docker: &Docker, container_id: &str) -> Option<(u64, u64, u64, u64)> {
+    use bollard::container::StatsOptions;
+    let mut stream = docker.stats(container_id, Some(StatsOptions { stream: false, one_shot: false }));
+    {
+        let stats = stream.next().await?.ok()?;
+        let memory = stats.memory_stats.usage.unwrap_or(0);
+        let cpu_ns = stats.cpu_stats.cpu_usage.total_usage;
+        let (rx, tx) = stats
+            .networks
+            .as_ref()
+            .map(|n| n.values().fold((0u64, 0u64), |(r, t), s| (r + s.rx_bytes, t + s.tx_bytes)))
+            .unwrap_or((0, 0));
+        Some((memory, cpu_ns, rx, tx))
+    }
+}
+
+impl ContainerManager {
     /// Id of the image containers will run (after `ensure_image`), for run headers.
     pub async fn image_id(&self) -> Option<String> {
         let plan = self.image_plan().ok()?;

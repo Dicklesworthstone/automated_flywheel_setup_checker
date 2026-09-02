@@ -206,6 +206,31 @@ automated_flywheel_setup_checker validate --path /custom/path/checksums.yaml
 Against a full ACFS checkout, `validate` also cross-checks `KNOWN_INSTALLERS` in
 `scripts/lib/security.sh`. `--check-hashes` persists its result for `serve` and `doctor`.
 
+### `remediate checksums` — Fix Drift Without Guessing
+
+Checksum drift is the most common failure and needs no model: the tool downloads each installer,
+compares the hash with the pin, diffs the served script against the last known-good copy in its
+ledger (`<data_dir>/scripts/<installer>/<sha>.sh`) and scores the change (`routine` for version
+bumps, `review` for logic changes, `suspicious` for new download hosts, `curl … | sh`, `base64 -d`,
+`rm -rf`, `chmod 777`, `eval` or opaque blobs), then runs the installer with the new hash in a
+fresh container before it will vouch for it.
+
+```bash
+automated_flywheel_setup_checker remediate checksums                  # advisory: diff + verification + candidate file
+automated_flywheel_setup_checker remediate checksums --from-last-run  # only the mismatches of the last run
+automated_flywheel_setup_checker remediate checksums --only uv bun
+automated_flywheel_setup_checker remediate checksums --mode propose   # git worktree branch afsc/checksum-refresh-<date> (+ PR if create_pr)
+automated_flywheel_setup_checker remediate checksums --mode apply     # propose + push the branch (never main)
+automated_flywheel_setup_checker check --remediate                    # same refresh for drift, read-only Claude advice for the rest
+```
+
+Entries that fail verification are excluded from proposals and reported (exit 1). `check --remediate`
+records an honest outcome on every failing result (`verified`, `advised`, `proposed`, `applied`,
+`failed`, `skipped`): the word "succeeded" only ever appears for a verified or applied fix. Claude is
+invoked read-only (`--permission-mode plan --tools Read,Grep,Glob`, budget and turn limits from
+`[remediation]`); any command it suggests is run through the safety checker and flagged, never
+executed.
+
 ### `doctor` — Diagnose the Environment
 
 ```bash
@@ -490,6 +515,11 @@ AFSC_ACFS_REPO=/path/to/acfs cargo test --test acfs_drift   # profile + base-ima
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings
 scripts/e2e/run_all_tests.sh                 # bash E2E scripts
 ```
+
+Remediation tests use the checked-in fake `claude` (`tests/fixtures/bin/claude`, scenarios via
+`AFSC_FAKE_CLAUDE=success|unsafe|error|rate_limit|timeout`). Its envelope shape was pinned from
+`claude --print --output-format json` on Claude Code 2.1.x — re-check it against a real run each
+quarter and when the CLI major version changes.
 
 ---
 
