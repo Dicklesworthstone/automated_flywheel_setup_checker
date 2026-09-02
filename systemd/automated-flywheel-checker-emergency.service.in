@@ -1,0 +1,37 @@
+[Unit]
+Description=Flywheel Checker on-demand run (more parallelism, longer deadline)
+Documentation=https://github.com/Dicklesworthstone/automated_flywheel_setup_checker
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=@USER@
+Group=@USER@
+SupplementaryGroups=docker
+WorkingDirectory=@DATA_DIR@
+WatchdogSec=300
+WatchdogSignal=SIGTERM
+
+ExecStart=@BIN@ --config @CONFIG@ --format json --watchdog check --parallel 4 --allow-concurrent
+ExecStopPost=@BIN@ --config @CONFIG@ notify --last-run
+
+Restart=no
+TimeoutStartSec=60
+TimeoutStopSec=60
+MemoryMax=8G
+CPUQuota=400%
+TasksMax=1024
+
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=@DATA_DIR@ @LOG_DIR@
+ReadOnlyPaths=@CONFIG_DIR@
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flywheel-checker-emergency

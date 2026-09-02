@@ -1,154 +1,169 @@
 #!/bin/bash
 # ============================================================
-# E2E Test Helper Functions
+# E2E helper library: every test drives the real binary against a synthetic ACFS repo
+# (checksums.yaml + mock installer scripts served via file://) in an isolated HOME.
 #
-# Provides utility functions for E2E tests.
-#
-# Related: bead bd-19y9.1.8
+# Layout per test (under $TEST_TMP):
+#   acfs/checksums.yaml   installers: {name: {url, sha256}}
+#   fixtures/<name>.sh     mock installer scripts
+#   home/                  HOME for the checker (data dir: home/.local/share/afsc)
+#   config.toml            [general] acfs_repo, allow_file_urls, [execution] ...
 # ============================================================
 
-# Get project root (lib -> e2e -> scripts -> project_root)
 E2E_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Test temporary directory (set by setup_test)
 TEST_TMP=""
 TEST_NAME=""
+CHECKER_BINARY="${CHECKER_BINARY:-${E2E_PROJECT_ROOT}/target/release/automated_flywheel_setup_checker}"
 
-# Binary path
-CHECKER_BINARY="${E2E_PROJECT_ROOT}/target/release/automated_flywheel_setup_checker"
-
-# Helper logging
 _helper_log() {
     echo -e "\033[90m[HELPER]\033[0m $*"
 }
 
-# Setup test environment
-# Usage: setup_test "test_name"
+# setup_test "name" — fresh temp tree, empty checksums.yaml, default config, cleanup trap.
 setup_test() {
     TEST_NAME="$1"
-    TEST_TMP=$(mktemp -d "/tmp/e2e-test-${TEST_NAME}-XXXXXX")
-
-    _helper_log "Setting up test: $TEST_NAME"
-    _helper_log "Temp directory: $TEST_TMP"
-
-    # Create common directories
-    mkdir -p "$TEST_TMP/fixtures"
-    mkdir -p "$TEST_TMP/output"
-    mkdir -p "$TEST_TMP/logs"
-
-    # Set up trap for cleanup on exit
+    TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/e2e-${TEST_NAME}-XXXXXX")
+    _helper_log "Setting up test: $TEST_NAME in $TEST_TMP"
+    mkdir -p "$TEST_TMP/acfs" "$TEST_TMP/fixtures" "$TEST_TMP/home" "$TEST_TMP/output"
+    printf 'installers:\n' > "$TEST_TMP/acfs/checksums.yaml"
+    write_config
     trap cleanup_test EXIT
 }
 
-# Cleanup test environment
 cleanup_test() {
-    if [[ -n "$TEST_TMP" && -d "$TEST_TMP" ]]; then
+    if [[ -n "$TEST_TMP" && -d "$TEST_TMP" && "${E2E_KEEP_TMP:-0}" != "1" ]]; then
         _helper_log "Cleaning up: $TEST_TMP"
         rm -rf "$TEST_TMP"
     fi
-
-    # Clean up any test containers
-    local containers
-    containers=$(docker ps -aq --filter "name=acfs-test-${TEST_NAME}" 2>/dev/null || echo "")
-    if [[ -n "$containers" ]]; then
-        _helper_log "Removing test containers: $containers"
-        docker rm -f $containers > /dev/null 2>&1 || true
-    fi
 }
 
-# Create a test fixture file
-# Usage: create_fixture "filename" <<< "content"
-#    or: create_fixture "filename" < file
-create_fixture() {
-    local name="$1"
-    local fixture_path="$TEST_TMP/fixtures/$name"
-    local fixture_dir
-    fixture_dir=$(dirname "$fixture_path")
-
-    mkdir -p "$fixture_dir"
-    cat > "$fixture_path"
-
-    # Make executable if it's a script
-    if [[ "$name" == *.sh ]]; then
-        chmod +x "$fixture_path"
-    fi
-
-    echo "$fixture_path"
-}
-
-# Create a mock installer script
-# Usage: create_mock_installer "name" "exit_code" "stdout" "stderr"
-create_mock_installer() {
-    local name="$1"
-    local exit_code="${2:-0}"
-    local stdout="${3:-Installation successful}"
-    local stderr="${4:-}"
-
-    create_fixture "${name}.sh" << INSTALLER
-#!/bin/bash
-echo "$stdout"
-[[ -n "$stderr" ]] && echo "$stderr" >&2
-exit $exit_code
-INSTALLER
-}
-
-# Create a mock checksums.yaml file
-# Usage: create_mock_checksums "zoxide:sha256:abc123" "rano:sha256:def456"
-create_mock_checksums() {
-    local checksums_file="$TEST_TMP/checksums.yaml"
-
+# write_config [extra toml...] — (re)write config.toml; each extra argument is appended verbatim.
+write_config() {
     {
-        echo "version: \"1.0\""
+        echo "[general]"
+        echo "acfs_repo = \"$TEST_TMP/acfs\""
+        echo "log_level = \"info\""
+        echo "allow_file_urls = true"
         echo ""
-
-        for entry in "$@"; do
-            local name sha256 url enabled
-            IFS=':' read -r name sha256 url enabled <<< "$entry"
-
-            name="${name:-test-tool}"
-            sha256="${sha256:-0000000000000000000000000000000000000000000000000000000000000000}"
-            url="${url:-https://example.com/install.sh}"
-            enabled="${enabled:-true}"
-
-            echo "$name:"
-            echo "  url: \"$url\""
-            echo "  checksum:"
-            echo "    algorithm: sha256"
-            echo "    value: \"$sha256\""
-            echo "  enabled: $enabled"
+        echo "[execution]"
+        echo "parallel = ${E2E_PARALLEL:-1}"
+        echo "retry_transient = ${E2E_RETRIES:-0}"
+        echo "fail_fast = ${E2E_FAIL_FAST:-false}"
+        echo ""
+        for extra in "$@"; do
+            printf '%s\n' "$extra"
             echo ""
         done
-    } > "$checksums_file"
-
-    echo "$checksums_file"
+    } > "$TEST_TMP/config.toml"
 }
 
-# Run the checker binary with arguments
-# Usage: run_checker [args...]
+sha256_file() {
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# add_entry name url sha — append an installer to checksums.yaml
+add_entry() {
+    local name="$1" url="$2" sha="$3"
+    printf '  %s:\n    url: "%s"\n    sha256: "%s"\n' "$name" "$url" "$sha" >> "$TEST_TMP/acfs/checksums.yaml"
+}
+
+# add_installer name — reads the script body from stdin, pins its real hash, returns the path
+add_installer() {
+    local name="$1"
+    local path="$TEST_TMP/fixtures/$name.sh"
+    cat > "$path"
+    chmod +x "$path"
+    add_entry "$name" "file://$path" "$(sha256_file "$path")"
+    echo "$path"
+}
+
+# add_installer_wrong_hash name — same, but pins a wrong hash (the checker must refuse to run it)
+add_installer_wrong_hash() {
+    local name="$1"
+    local path="$TEST_TMP/fixtures/$name.sh"
+    cat > "$path"
+    chmod +x "$path"
+    add_entry "$name" "file://$path" "0000000000000000000000000000000000000000000000000000000000000000"
+    echo "$path"
+}
+
+# Common fixtures
+add_pass() { add_installer "$1" <<'EOF'
+#!/bin/bash
+echo "mock installer ran as $(id -un) HOME=$HOME"
+exit 0
+EOF
+}
+add_dependency_failure() { add_installer "$1" <<'EOF'
+#!/bin/bash
+echo "E: Unable to locate package foo" >&2
+exit 100
+EOF
+}
+add_permission_failure() { add_installer "$1" <<'EOF'
+#!/bin/bash
+echo "Permission denied" >&2
+exit 126
+EOF
+}
+add_sleeper() { # name seconds
+    local name="$1" secs="$2"
+    add_installer "$name" <<EOF
+#!/bin/bash
+sleep $secs
+exit 0
+EOF
+}
+add_unreachable() {
+    add_entry "$1" "https://127.0.0.1:9/nope.sh" "1111111111111111111111111111111111111111111111111111111111111111"
+}
+
+# run_checker [args...] — run the binary with the test HOME/config; local runs pre-approved.
 run_checker() {
-    if [[ ! -f "$CHECKER_BINARY" ]]; then
-        echo "ERROR: Binary not found at $CHECKER_BINARY" >&2
+    if [[ ! -x "$CHECKER_BINARY" ]]; then
+        echo "ERROR: binary not found at $CHECKER_BINARY (cargo build --release)" >&2
         return 1
     fi
-
-    "$CHECKER_BINARY" "$@"
+    HOME="$TEST_TMP/home" AFSC_ALLOW_LOCAL=1 "$CHECKER_BINARY" --config "$TEST_TMP/config.toml" "$@"
 }
 
-# Run checker and capture output
-# Usage: output=$(run_checker_capture [args...])
-run_checker_capture() {
-    run_checker "$@" 2>&1
+# run_check_jsonl OUTFILE [args...] — `check --format jsonl` capturing stdout to OUTFILE,
+# stderr to OUTFILE.err; echoes the exit code (never aborts the test).
+run_check_jsonl() {
+    local out="$1"; shift
+    local code=0
+    run_checker check --format jsonl "$@" > "$out" 2> "$out.err" || code=$?
+    echo "$code"
 }
 
-# Wait for a condition with timeout
-# Usage: wait_for "condition_command" timeout_seconds
+# jsonl_result FILE installer — the result line for an installer (JSON object)
+jsonl_result() {
+    jq -c --arg n "$2" 'select(.kind == "result" and .installer_name == $n)' "$1"
+}
+
+# jsonl_summary FILE — the summary line
+jsonl_summary() {
+    jq -c 'select(.kind == "summary")' "$1"
+}
+
+# jsonl_field FILE installer .path — a field of an installer's result
+jsonl_field() {
+    jsonl_result "$1" "$2" | jq -r "$3"
+}
+
+# data_dir — where results/metrics/logs land for this test
+data_dir() {
+    echo "$TEST_TMP/home/.local/share/afsc"
+}
+
 wait_for() {
-    local condition="$1"
-    local timeout="${2:-30}"
-    local interval="${3:-1}"
-    local elapsed=0
-
+    local condition="$1" timeout="${2:-30}" interval="${3:-1}" elapsed=0
     while [[ $elapsed -lt $timeout ]]; do
         if eval "$condition" > /dev/null 2>&1; then
             return 0
@@ -156,121 +171,10 @@ wait_for() {
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
-
     return 1
 }
 
-# Wait for container to be running
-# Usage: wait_for_container "container_name" timeout_seconds
-wait_for_container() {
-    local container="$1"
-    local timeout="${2:-30}"
-
-    wait_for "docker ps --filter 'name=$container' --filter 'status=running' | grep -q '$container'" "$timeout"
-}
-
-# Wait for container to exit
-# Usage: wait_for_container_exit "container_name" timeout_seconds
-wait_for_container_exit() {
-    local container="$1"
-    local timeout="${2:-60}"
-
-    wait_for "docker ps --filter 'name=$container' --filter 'status=exited' | grep -q '$container'" "$timeout"
-}
-
-# Get container exit code
-# Usage: get_container_exit_code "container_name"
-get_container_exit_code() {
-    local container="$1"
-    docker inspect "$container" --format='{{.State.ExitCode}}' 2>/dev/null || echo "-1"
-}
-
-# Start a mock HTTP server
-# Usage: mock_server_id=$(start_mock_server port)
-start_mock_server() {
-    local port="${1:-8888}"
-    local response="${2:-HTTP/1.1 200 OK\r\n\r\nOK}"
-
-    # Use simple netcat server
-    local server_script="$TEST_TMP/mock_server.sh"
-    cat > "$server_script" << 'SERVERSCRIPT'
-#!/bin/bash
-PORT="$1"
-RESPONSE="$2"
-while true; do
-    echo -e "$RESPONSE" | nc -l -p "$PORT" -q 1 2>/dev/null || break
-done
-SERVERSCRIPT
-    chmod +x "$server_script"
-
-    "$server_script" "$port" "$response" &
-    local pid=$!
-
-    echo "$pid"
-}
-
-# Stop mock server
-# Usage: stop_mock_server "$server_pid"
-stop_mock_server() {
-    local pid="$1"
-    kill "$pid" 2>/dev/null || true
-}
-
-# Generate random string
-# Usage: random_string [length]
-random_string() {
-    local length="${1:-16}"
-    head -c "$length" /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c "$length"
-}
-
-# Calculate SHA256 of a string
-# Usage: sha256_of "content"
-sha256_of() {
-    echo -n "$1" | sha256sum | awk '{print $1}'
-}
-
-# Calculate SHA256 of a file
-# Usage: sha256_file "/path/to/file"
-sha256_file() {
-    sha256sum "$1" | awk '{print $1}'
-}
-
-# Create test Docker image
-# Usage: create_test_image "image_name" "dockerfile_content"
-create_test_image() {
-    local name="$1"
-    local dockerfile="${2:-FROM ubuntu:22.04\nRUN apt-get update}"
-
-    local build_dir="$TEST_TMP/docker-build"
-    mkdir -p "$build_dir"
-    echo -e "$dockerfile" > "$build_dir/Dockerfile"
-
-    docker build -t "$name" "$build_dir" > /dev/null 2>&1
-}
-
-# Remove test Docker image
-# Usage: remove_test_image "image_name"
-remove_test_image() {
-    local name="$1"
-    docker rmi "$name" 2>/dev/null || true
-}
-
-# Simulate network failure for container
-# Usage: simulate_network_failure "container_name"
-simulate_network_failure() {
-    local container="$1"
-    docker network disconnect bridge "$container" 2>/dev/null || true
-}
-
-# Restore network for container
-# Usage: restore_network "container_name"
-restore_network() {
-    local container="$1"
-    docker network connect bridge "$container" 2>/dev/null || true
-}
-
-# Check if Docker is available
-# Usage: require_docker
+# require_docker — skip (exit 0 with SKIP marker) when no daemon is reachable
 require_docker() {
     if ! docker info > /dev/null 2>&1; then
         echo "SKIP: Docker not available"
@@ -278,24 +182,13 @@ require_docker() {
     fi
 }
 
-# Skip test with message
-# Usage: skip_test "reason"
 skip_test() {
-    local reason="$1"
-    echo "SKIP: $reason"
+    echo "SKIP: $1"
     exit 0
 }
 
-# Mark test as expected to fail
-# Usage: expect_failure
-expect_failure() {
-    set +e
-}
-
-# Check binary exists, build if missing
-# Usage: ensure_binary
 ensure_binary() {
-    if [[ ! -f "$CHECKER_BINARY" ]]; then
+    if [[ ! -x "$CHECKER_BINARY" ]]; then
         _helper_log "Binary not found, building..."
         cargo build --release --manifest-path "$E2E_PROJECT_ROOT/Cargo.toml" 2>&1 || {
             echo "ERROR: Failed to build binary" >&2
@@ -304,18 +197,29 @@ ensure_binary() {
     fi
 }
 
-# Get config path for tests
-# Usage: test_config_path
-test_config_path() {
-    echo "$E2E_PROJECT_ROOT/config/test.toml"
+# acfs_repo_path — a real ACFS checkout for real-installer tests (AFSC_ACFS_REPO or the default path)
+acfs_repo_path() {
+    local candidate="${AFSC_ACFS_REPO:-/data/projects/agentic_coding_flywheel_setup}"
+    if [[ -f "$candidate/checksums.yaml" ]]; then
+        echo "$candidate"
+    fi
 }
 
-# Load test configuration
-# Usage: load_test_config
-load_test_config() {
-    local config_file
-    config_file=$(test_config_path)
-    if [[ -f "$config_file" ]]; then
-        source "$config_file" 2>/dev/null || true
-    fi
+# docker_fixture_config — config that runs mock installers inside containers: the fixtures dir
+# is bind-mounted read-only at /fixtures and entries use file:///fixtures/<name>.sh.
+docker_fixture_config() {
+    write_config "[docker]
+volumes = [\"$TEST_TMP/fixtures:/fixtures:ro\"]
+timeout_seconds = ${E2E_DOCKER_TIMEOUT:-120}
+$1"
+}
+
+# add_docker_installer name — like add_installer, but the URL points inside the container mount
+add_docker_installer() {
+    local name="$1"
+    local path="$TEST_TMP/fixtures/$name.sh"
+    cat > "$path"
+    chmod +x "$path"
+    add_entry "$name" "file:///fixtures/$name.sh" "$(sha256_file "$path")"
+    echo "$path"
 }

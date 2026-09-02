@@ -188,3 +188,27 @@ fn secrets_in_installer_output_are_redacted_everywhere() {
     assert!(!entry["stdout_tail"].as_str().unwrap().contains("ghp_abcdefghij"));
     assert!(!stdout(&status).contains("T0/B0/XYZ"));
 }
+
+#[test]
+fn install_systemd_dry_run_renders_units_without_touching_the_system() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/install-systemd.sh"))
+        .args(["--dry-run", "--user", "svc", "--data-dir", "/srv/afsc", "--acfs-repo", "/srv/acfs", "--out-dir"])
+        .arg(out_dir.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+    let unit = std::fs::read_to_string(out_dir.path().join("automated-flywheel-checker.service")).unwrap();
+    assert!(unit.contains("User=svc"), "{unit}");
+    assert!(unit.contains("WorkingDirectory=/srv/afsc"), "{unit}");
+    assert!(unit.contains("ExecStart=/usr/local/bin/automated_flywheel_setup_checker --config /etc/flywheel-checker/config.toml --format json --watchdog check"), "{unit}");
+    assert!(unit.contains("ExecStopPost=/usr/local/bin/automated_flywheel_setup_checker --config /etc/flywheel-checker/config.toml notify --last-run"), "{unit}");
+    assert!(!unit.contains('@'), "{unit}");
+    assert!(out_dir.path().join("automated-flywheel-checker-serve.service").exists());
+    assert!(out_dir.path().join("automated-flywheel-checker.timer").exists());
+    assert!(text.contains("[dry-run]"), "{text}");
+    assert!(text.contains("acfs_repo=/srv/acfs"), "{text}");
+}

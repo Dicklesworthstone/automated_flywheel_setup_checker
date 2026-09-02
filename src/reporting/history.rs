@@ -6,8 +6,8 @@
 //!
 //! Detectors (deterministic, unit-tested on synthetic series):
 //! - Flakiness: Beta(1,1) posterior on the pass probability over outcomes since the last script
-//!   hash change; `flaky` when the posterior mean is below 0.9 with at least 5 trials and both a
-//!   pass and a failure observed.
+//!   hash change; `flaky` when the posterior mean is below 0.9 with at least 5 trials, at least
+//!   two failures, and a pass observed after a failure (intermittent, not a trailing streak).
 //! - Change point: CUSUM with fail = +1, pass = -0.5, threshold 3; `broken since <run>` when the
 //!   statistic crosses and no pass follows the crossing.
 
@@ -113,6 +113,8 @@ fn short(run_id: &str) -> String {
 pub const FLAKY_THRESHOLD: f64 = 0.9;
 /// Minimum trials before an installer can be called flaky.
 pub const FLAKY_MIN_TRIALS: usize = 5;
+/// Minimum failures (interleaved with passes) before an installer can be called flaky.
+pub const FLAKY_MIN_FAILURES: usize = 2;
 /// CUSUM parameters.
 pub const CUSUM_FAIL: f64 = 1.0;
 pub const CUSUM_PASS: f64 = -0.5;
@@ -148,10 +150,14 @@ pub fn assess_outcomes(series: &[(String, bool)]) -> Assessment {
         series[start].0.clone()
     });
 
+    // Intermittent means a pass came after a failure; a trailing failure streak is breakage
+    // (CUSUM territory), and a single failure is noise, not flakiness.
+    let first_failure = series.iter().position(|(_, p)| !*p);
+    let interleaved = first_failure.is_some_and(|i| series[i..].iter().any(|(_, p)| *p));
     let flaky = broken_since.is_none()
         && trials >= FLAKY_MIN_TRIALS
-        && passes >= 1
-        && failures >= 1
+        && failures >= FLAKY_MIN_FAILURES
+        && interleaved
         && pass_probability < FLAKY_THRESHOLD;
 
     Assessment { trials, passes, pass_probability, flaky, broken_since, script_versions: 0 }
@@ -472,6 +478,11 @@ mod tests {
         assert!(!assess_outcomes(&series("PFPF")).flaky);
         // A single early failure in a long passing series is not flaky.
         assert!(!assess_outcomes(&series("FPPPPPPPPPPPPPPP")).flaky);
+        // Two trailing failures are not intermittent (not flaky, not yet broken).
+        let trailing = assess_outcomes(&series("PPPPPFF"));
+        assert!(!trailing.flaky && trailing.broken_since.is_none(), "{trailing:?}");
+        // Two failures with a pass in between are.
+        assert!(assess_outcomes(&series("PPPFPF")).flaky);
     }
 
     #[test]

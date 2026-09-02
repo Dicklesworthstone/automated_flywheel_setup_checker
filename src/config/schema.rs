@@ -137,6 +137,8 @@ pub struct DockerConfig {
     pub reap_orphans: bool,
     /// Container network mode: bridge or none
     pub network: String,
+    /// Extra bind mounts for every container, `host:container[:ro]` (local mirrors, fixtures)
+    pub volumes: Vec<String>,
     /// Derive a prepared image (ACFS prerequisites + non-root user) from `image`; when false the
     /// image runs as-is (root, no prerequisites)
     pub prepare: bool,
@@ -154,6 +156,7 @@ impl Default for DockerConfig {
             run_as_root: false,
             reap_orphans: true,
             network: "bridge".to_string(),
+            volumes: Vec::new(),
             prepare: true,
         }
     }
@@ -354,6 +357,13 @@ pub struct NotificationsConfig {
     pub github_token_env: String,
     /// GitHub repository for auto-creating failure issues
     pub github_issue_repo: String,
+    /// Comment on the open rolling issue instead of opening a new one per run
+    #[serde(default = "default_true")]
+    pub github_add_comments: bool,
+    /// GitHub API base URL (tests point this at a mock server)
+    pub github_api_url: String,
+    /// Title of the rolling issue; also the dedup key
+    pub github_issue_title: String,
     /// Notify Slack for failures
     #[serde(default = "default_true")]
     pub notify_on_failure: bool,
@@ -370,6 +380,9 @@ impl Default for NotificationsConfig {
             slack_channel: String::new(),
             github_token_env: String::new(),
             github_issue_repo: String::new(),
+            github_add_comments: true,
+            github_api_url: crate::reporting::DEFAULT_GITHUB_API_URL.to_string(),
+            github_issue_title: crate::reporting::DEFAULT_ISSUE_TITLE.to_string(),
             notify_on_failure: default_true(),
             notify_on_success: false,
         }
@@ -389,7 +402,17 @@ impl NotificationsConfig {
             repo: self.github_issue_repo.trim().to_string(),
             token_env: self.github_token_env.trim().to_string(),
             create_issues: true,
-            add_comments: false,
+            add_comments: self.github_add_comments,
+            api_url: if self.github_api_url.trim().is_empty() {
+                crate::reporting::DEFAULT_GITHUB_API_URL.to_string()
+            } else {
+                self.github_api_url.trim().to_string()
+            },
+            issue_title: if self.github_issue_title.trim().is_empty() {
+                crate::reporting::DEFAULT_ISSUE_TITLE.to_string()
+            } else {
+                self.github_issue_title.trim().to_string()
+            },
         });
 
         let slack = (!self.slack_webhook_env.trim().is_empty()

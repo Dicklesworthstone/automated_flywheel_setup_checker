@@ -1,24 +1,13 @@
 name: E2E Tests
 
+# Docker-backed proof. Runs on the host Docker daemon of the GitHub runner (no docker:dind).
+# No path filters: a change anywhere can break the loop, so every push/PR runs this.
+
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'scripts/e2e/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/e2e-tests.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'scripts/e2e/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/e2e-tests.yml'
   workflow_dispatch:
 
 concurrency:
@@ -33,11 +22,10 @@ permissions:
   contents: read
 
 jobs:
-  rust-e2e:
-    name: Rust E2E Tests
+  docker-suite:
+    name: Docker suite (lifecycle, image, limits, cancel, reaper)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -46,29 +34,95 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --all-features
+      - name: Restore prepared image cache
+        id: image-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/afsc-image.tar
+          key: afsc-base-${{ hashFiles('docker/Dockerfile.base') }}
 
-      - name: Run Rust E2E tests
-        run: cargo test --test e2e --all-features -- --test-threads=1
+      - name: Load cached image
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/afsc-image.tar
 
-      - name: Run Docker integration tests
-        run: cargo test --test e2e --all-features -- --ignored --test-threads=1
+      - name: Build the test binary
+        run: cargo test --test docker --no-run
+
+      - name: Run the Docker suite
+        run: cargo test --test docker -- --test-threads=1 --nocapture
         env:
-          DOCKER_TESTS: "1"
-        continue-on-error: true
+          AFSC_DOCKER_TESTS: "1"
+
+      - name: Save prepared image for the cache
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tags=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^afsc-base:[0-9a-f]{12}$' || true)
+          if [[ -n "$tags" ]]; then docker save -o /tmp/afsc-image.tar $tags; fi
+
+      - name: Leaked containers must not survive the suite
+        run: |
+          leaked=$(docker ps -a --filter label=afsc.managed=true -q | wc -l)
+          echo "afsc-managed containers left: $leaked"
+          test "$leaked" -eq 0
+
+  real-installers:
+    name: Real ACFS installers in Docker (zoxide, uv, bun)
+    runs-on: ubuntu-latest
+    needs: docker-suite
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out ACFS
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/agentic_coding_flywheel_setup
+          path: acfs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Restore prepared image cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/afsc-image.tar
+          key: afsc-base-${{ hashFiles('docker/Dockerfile.base') }}
+
+      - name: Load cached image
+        run: test -f /tmp/afsc-image.tar && docker load -i /tmp/afsc-image.tar || echo "no cached image; the run builds it"
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Doctor
+        run: ./target/release/automated_flywheel_setup_checker --acfs-repo "$PWD/acfs" --data-dir /tmp/afsc-data doctor
+
+      - name: Validate checksums against the checkout (profiles + cross-check)
+        run: ./target/release/automated_flywheel_setup_checker --acfs-repo "$PWD/acfs" validate --profile --format json | jq -e '.valid == true'
+
+      - name: Run three real installers
+        run: |
+          set -euo pipefail
+          ./target/release/automated_flywheel_setup_checker --acfs-repo "$PWD/acfs" --data-dir /tmp/afsc-data \
+            check zoxide uv bun --parallel 3 --format jsonl | tee /tmp/afsc-run.jsonl
+          jq -e 'select(.kind == "summary") | .total == 3' /tmp/afsc-run.jsonl
+          # Every installer either passed or failed for a classified reason; the loop itself must
+          # not error out. Report the outcome in the job summary.
+          ./target/release/automated_flywheel_setup_checker --data-dir /tmp/afsc-data status --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: ACFS drift tests (profiles, base image packages)
+        run: cargo test --test acfs_drift -- --nocapture
+        env:
+          AFSC_ACFS_REPO: ${{ github.workspace }}/acfs
 
   bash-e2e:
-    name: Bash E2E Tests
+    name: Bash E2E scripts
     runs-on: ubuntu-latest
-    needs: rust-e2e
+    needs: docker-suite
     timeout-minutes: 45
-
-    services:
-      docker:
-        image: docker:dind
-        options: --privileged
-
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +153,7 @@ jobs:
           name: e2e-logs
           path: target/e2e-logs/
           retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload test reports
         if: always()
@@ -107,23 +162,4 @@ jobs:
           name: e2e-reports
           path: target/e2e-reports/
           retention-days: 30
-
-  e2e-summary:
-    name: E2E Summary
-    runs-on: ubuntu-latest
-    needs: [rust-e2e, bash-e2e]
-    if: always()
-    timeout-minutes: 5
-
-    steps:
-      - name: Check E2E results
-        run: |
-          if [[ "${{ needs.rust-e2e.result }}" == "failure" ]]; then
-            echo "::error::Rust E2E tests failed"
-            exit 1
-          fi
-          if [[ "${{ needs.bash-e2e.result }}" == "failure" ]]; then
-            echo "::error::Bash E2E tests failed"
-            exit 1
-          fi
-          echo "All E2E tests passed!"
+          if-no-files-found: ignore

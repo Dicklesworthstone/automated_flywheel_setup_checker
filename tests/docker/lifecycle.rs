@@ -25,7 +25,7 @@ async fn create_exec_and_cleanup_with_labels_limits_and_env() {
     config.labels.push(("afsc.run_id".into(), "run-docker-test".into()));
     let manager = ContainerManager::try_new(config).unwrap();
 
-    let id = manager.create_container("lifecycle").await.unwrap();
+    let id = must(manager.create_container("lifecycle").await, "create_container");
     assert!(!id.is_empty());
 
     // Naming convention and labels
@@ -42,14 +42,14 @@ async fn create_exec_and_cleanup_with_labels_limits_and_env() {
     assert_eq!(docker_inspect(&id, "{{.HostConfig.Memory}}"), (256 * 1024 * 1024).to_string());
 
     // Exec: env vars, non-root user, exit codes
-    let (code, out, _) = manager.exec_in_container(&id, &["bash", "-c", "echo $TEST_VAR"]).await.unwrap();
+    let (code, out, _) = must(manager.exec_in_container(&id, &["bash", "-c", "echo $TEST_VAR"]).await, "exec_in_container");
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "test_value");
-    let (_, out, _) = manager.exec_in_container(&id, &["bash", "-c", "echo $DEBIAN_FRONTEND"]).await.unwrap();
+    let (_, out, _) = must(manager.exec_in_container(&id, &["bash", "-c", "echo $DEBIAN_FRONTEND"]).await, "exec_in_container");
     assert_eq!(out.trim(), "noninteractive");
-    let (_, out, _) = manager.exec_in_container(&id, &["id", "-un"]).await.unwrap();
+    let (_, out, _) = must(manager.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(out.trim(), "afsc-user", "default image runs as the non-root user");
-    let (code, _, _) = manager.exec_in_container(&id, &["bash", "-c", "exit 42"]).await.unwrap();
+    let (code, _, _) = must(manager.exec_in_container(&id, &["bash", "-c", "exit 42"]).await, "exec_in_container");
     assert_eq!(code, 42);
     // stdout and stderr are separated (no tty on exec)
     let (_, out, err) =
@@ -57,10 +57,10 @@ async fn create_exec_and_cleanup_with_labels_limits_and_env() {
     assert_eq!(out.trim(), "out");
     assert_eq!(err.trim(), "err");
 
-    manager.cleanup_container(&id).await.unwrap();
+    must(manager.cleanup_container(&id).await, "cleanup_container");
     // Idempotent and tolerant of unknown ids
-    manager.cleanup_container(&id).await.unwrap();
-    manager.cleanup_container("nonexistent-container-12345").await.unwrap();
+    must(manager.cleanup_container(&id).await, "cleanup_container");
+    must(manager.cleanup_container("nonexistent-container-12345").await, "cleanup_container");
     assert!(docker_ps_names("label=afsc.run_id=run-docker-test").is_empty());
 }
 
@@ -75,14 +75,14 @@ async fn real_run_verifies_checksum_and_refuses_mismatch() {
     let (bad_url, _) = fx.add_installer("bad", "#!/bin/bash\ntouch /tmp/afsc-must-not-exist\nexit 0\n");
     let runner = InstallerTestRunner::new(fx.runner_config(Duration::from_secs(120)));
 
-    let ok = runner.run_test_with_retry(&fx.test("pass", &url, &sha, Duration::from_secs(120))).await.unwrap();
+    let ok = must(runner.run_test_with_retry(&fx.test("pass", &url, &sha, Duration::from_secs(120))).await, "run_test_with_retry");
     assert_eq!(ok.status, TestStatus::Passed, "stderr: {}", ok.stderr);
     assert_eq!(ok.checksum_state, ChecksumState::Verified);
     assert!(ok.stdout.contains("ran as afsc-user"), "{}", ok.stdout);
     assert!(ok.container_id.is_some());
 
     let wrong = fx.test("bad", &bad_url, &"0".repeat(64), Duration::from_secs(120));
-    let refused = runner.run_test_with_retry(&wrong).await.unwrap();
+    let refused = must(runner.run_test_with_retry(&wrong).await, "run_test_with_retry");
     assert_eq!(refused.status, TestStatus::Failed);
     assert_eq!(refused.exit_code, Some(99));
     assert_eq!(refused.checksum_state, ChecksumState::Mismatch);
@@ -93,7 +93,7 @@ async fn real_run_verifies_checksum_and_refuses_mismatch() {
     // Verified-but-failed: checksum state stays Verified and the failure is classified.
     let (fail_url, fail_sha) =
         fx.add_installer("dep", "#!/bin/bash\necho 'E: Unable to locate package foo' >&2\nexit 100\n");
-    let failed = runner.run_test_with_retry(&fx.test("dep", &fail_url, &fail_sha, Duration::from_secs(120))).await.unwrap();
+    let failed = must(runner.run_test_with_retry(&fx.test("dep", &fail_url, &fail_sha, Duration::from_secs(120))).await, "run_test_with_retry");
     assert_eq!(failed.status, TestStatus::Failed);
     assert_eq!(failed.checksum_state, ChecksumState::Verified);
     assert_eq!(failed.error.as_ref().unwrap().category, "dependency");
@@ -109,7 +109,7 @@ async fn timeout_kills_the_installer_and_removes_the_container() {
     let (url, sha) = fx.add_installer("sleeper", "#!/bin/bash\nsleep 120\nexit 0\n");
     let runner = InstallerTestRunner::new(fx.runner_config(Duration::from_secs(5)));
     let start = Instant::now();
-    let r = runner.run_test_with_retry(&fx.test("sleeper", &url, &sha, Duration::from_secs(5))).await.unwrap();
+    let r = must(runner.run_test_with_retry(&fx.test("sleeper", &url, &sha, Duration::from_secs(5))).await, "run_test_with_retry");
     assert_eq!(r.status, TestStatus::TimedOut);
     assert_eq!(r.error.as_ref().unwrap().category, "timeout");
     assert!(start.elapsed() < Duration::from_secs(40), "{:?}", start.elapsed());
@@ -131,7 +131,7 @@ async fn cancellation_stops_the_installer_and_removes_the_container() {
         canceller.cancel();
     });
     let start = Instant::now();
-    let r = runner.run_test_with_retry(&fx.test("cancelme", &url, &sha, Duration::from_secs(300))).await.unwrap();
+    let r = must(runner.run_test_with_retry(&fx.test("cancelme", &url, &sha, Duration::from_secs(300))).await, "run_test_with_retry");
     assert_eq!(r.status, TestStatus::Cancelled, "stderr: {}", r.stderr);
     assert_eq!(r.error.as_ref().unwrap().category, "cancelled");
     assert!(start.elapsed() < Duration::from_secs(30), "{:?}", start.elapsed());
@@ -148,7 +148,7 @@ async fn reaper_removes_dead_owner_containers_and_leaves_others_alone() {
     orphan_cfg.labels.push(("afsc.pid".into(), (u32::MAX - 7).to_string()));
     orphan_cfg.labels.push(("afsc.run_id".into(), "reaper-test".into()));
     let orphan_mgr = ContainerManager::try_new(orphan_cfg).unwrap();
-    let orphan_id = orphan_mgr.create_container("orphan").await.unwrap();
+    let orphan_id = must(orphan_mgr.create_container("orphan").await, "create_container");
 
     // An unlabeled bystander that must survive.
     let bystander = format!("afsc-bystander-{}", std::process::id());
@@ -161,10 +161,10 @@ async fn reaper_removes_dead_owner_containers_and_leaves_others_alone() {
 
     // A container owned by this process must also survive.
     let mine_mgr = ContainerManager::try_new(fx.container_config()).unwrap();
-    let mine_id = mine_mgr.create_container("mine").await.unwrap();
+    let mine_id = must(mine_mgr.create_container("mine").await, "create_container");
 
     let reaper = ContainerManager::try_new(ContainerConfig::default()).unwrap();
-    let reaped = reaper.reap_orphans(Duration::from_secs(3600)).await.unwrap();
+    let reaped = must(reaper.reap_orphans(Duration::from_secs(3600)).await, "reap_orphans");
     let names: Vec<&str> = reaped.iter().map(|c| c.name.as_str()).collect();
     assert!(names.iter().any(|n| n.starts_with("afsc-orphan-")), "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("afsc-mine-")), "{names:?}");
@@ -173,11 +173,11 @@ async fn reaper_removes_dead_owner_containers_and_leaves_others_alone() {
     assert_eq!(docker_inspect(&mine_id, "{{.State.Running}}"), "true");
 
     // Age-based reaping: even a live owner loses containers older than max_age.
-    let reaped = reaper.reap_orphans(Duration::from_millis(1)).await.unwrap();
+    let reaped = must(reaper.reap_orphans(Duration::from_millis(1)).await, "reap_orphans");
     // Our own containers are never reaped by the same process; nothing else remains.
     assert!(reaped.iter().all(|c| !c.name.starts_with("afsc-mine-")));
 
-    mine_mgr.cleanup_container(&mine_id).await.unwrap();
+    must(mine_mgr.cleanup_container(&mine_id).await, "cleanup_container");
     let _ = orphan_mgr.cleanup_container(&orphan_id).await;
     docker_rm_force(&bystander);
 }

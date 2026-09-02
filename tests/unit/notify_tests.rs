@@ -73,7 +73,9 @@ fn test_notifications_config_to_internal() {
     assert_eq!(github.repo, "owner/repo");
     assert_eq!(github.token_env, "GITHUB_TOKEN");
     assert!(github.create_issues);
-    assert!(!github.add_comments);
+    assert!(github.add_comments, "comments on the rolling issue by default");
+    assert_eq!(github.api_url, "https://api.github.com");
+    assert_eq!(github.issue_title, "AFSC canary: installer failures");
 
     let slack = internal.slack.expect("expected slack provider");
     assert_eq!(slack.webhook_url_env, "SLACK_WEBHOOK_URL");
@@ -91,6 +93,8 @@ async fn test_notifier_skips_when_disabled() {
             token_env: "GITHUB_TOKEN".to_string(),
             create_issues: true,
             add_comments: false,
+            api_url: "https://api.github.com".to_string(),
+            issue_title: "AFSC canary: installer failures".to_string(),
         }),
         slack: Some(SlackConfig {
             webhook_url_env: "SLACK_WEBHOOK_URL".to_string(),
@@ -120,6 +124,8 @@ async fn test_github_skips_missing_token() {
             token_env: missing_env,
             create_issues: true,
             add_comments: false,
+            api_url: "https://api.github.com".to_string(),
+            issue_title: "AFSC canary: installer failures".to_string(),
         }),
         slack: None,
     });

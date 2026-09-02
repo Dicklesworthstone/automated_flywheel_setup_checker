@@ -19,3 +19,12 @@ mod spec;
 
 #[path = "cli/history.rs"]
 mod history;
+
+#[path = "cli/serve.rs"]
+mod serve;
+
+#[path = "cli/notify.rs"]
+mod notify;
+
+#[path = "cli/doctor.rs"]
+mod doctor;

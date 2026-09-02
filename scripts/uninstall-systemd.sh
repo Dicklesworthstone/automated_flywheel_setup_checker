@@ -1,32 +1,30 @@
-#!/bin/bash
-# Uninstall Flywheel Checker systemd units
+#!/usr/bin/env bash
+# Uninstall the Flywheel Checker systemd units (config, data and logs are preserved).
 set -euo pipefail
 
-echo "================================================================"
-echo "  Uninstalling Flywheel Checker"
-echo "================================================================"
+echo "Uninstalling Flywheel Checker systemd units"
 
-echo "[1/4] Stopping timer..."
-sudo systemctl stop automated-flywheel-checker.timer 2>/dev/null || true
-sudo systemctl stop automated-flywheel-checker.service 2>/dev/null || true
+echo "[1/3] Stopping and disabling..."
+for unit in automated-flywheel-checker.timer automated-flywheel-checker.service \
+            automated-flywheel-checker-emergency.service automated-flywheel-checker-serve.service; do
+    sudo systemctl stop "$unit" 2>/dev/null || true
+    sudo systemctl disable "$unit" 2>/dev/null || true
+done
 
-echo "[2/4] Disabling timer..."
-sudo systemctl disable automated-flywheel-checker.timer 2>/dev/null || true
+echo "[2/3] Removing units, logrotate config and the legacy notify wrapper..."
+sudo rm -f /etc/systemd/system/automated-flywheel-checker.service \
+           /etc/systemd/system/automated-flywheel-checker.timer \
+           /etc/systemd/system/automated-flywheel-checker-emergency.service \
+           /etc/systemd/system/automated-flywheel-checker-serve.service \
+           /etc/logrotate.d/flywheel-checker \
+           /usr/local/bin/notify-flywheel-failure
 
-echo "[3/4] Removing systemd units..."
-sudo rm -f /etc/systemd/system/automated-flywheel-checker.service
-sudo rm -f /etc/systemd/system/automated-flywheel-checker.timer
-sudo rm -f /etc/systemd/system/automated-flywheel-checker-emergency.service
-sudo rm -f /etc/logrotate.d/flywheel-checker
-sudo rm -f /usr/local/bin/notify-flywheel-failure
-
-echo "[4/4] Reloading systemd..."
+echo "[3/3] Reloading systemd..."
 sudo systemctl daemon-reload
 
-echo ""
-echo "================================================================"
-echo "  Uninstalled (logs and config preserved)"
-echo "================================================================"
-echo ""
-echo "To remove completely:"
-echo "  sudo rm -rf /var/log/flywheel-checker /etc/flywheel-checker /var/run/flywheel-checker"
+cat <<'EOF'
+
+Uninstalled. Preserved: /etc/flywheel-checker (config), /var/lib/flywheel-checker (results),
+/var/log/flywheel-checker (event log), /usr/local/bin/automated_flywheel_setup_checker (binary).
+Remove them yourself if you want a clean slate.
+EOF

@@ -60,12 +60,12 @@ log_debug() { [[ "$E2E_VERBOSE" == "1" ]] && echo -e "\033[90m[DEBUG]\033[0m $*"
 preflight_check() {
     log_info "Running pre-flight checks..."
 
-    # Check Docker
+    # Docker is optional: Docker-backed scripts skip themselves when no daemon is reachable.
     if ! docker info > /dev/null 2>&1; then
-        log_fail "Docker not available"
-        exit 1
+        log_warn "Docker not available: Docker-backed scenarios will be skipped"
+    else
+        log_debug "Docker: OK"
     fi
-    log_debug "Docker: OK"
 
     # Check jq
     if ! command -v jq &>/dev/null; then
@@ -326,12 +326,13 @@ main() {
         "recovery_rollback"
     )
 
-    # Edge case scenarios (4 additional tests)
+    # Docker-backed scenarios (skip without a daemon) plus real ACFS installers
     local edge_tests=(
         "container_timeout_handling"
         "out_of_memory_scenario"
         "disk_space_exhaustion"
         "network_partition_scenario"
+        "real_installer_run"
     )
 
     # Run core tests
@@ -341,7 +342,7 @@ main() {
     done
 
     # Run edge case tests
-    log_info "Running edge case tests (4 tests)..."
+    log_info "Running Docker-backed and real-installer tests (5 tests)..."
     for test in "${edge_tests[@]}"; do
         run_test "$test"
     done

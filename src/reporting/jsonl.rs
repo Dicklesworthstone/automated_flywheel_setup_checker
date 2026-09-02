@@ -350,6 +350,14 @@ pub struct RunHeader {
     pub dry_run: bool,
     /// Whether file:// installer URLs were permitted for this run
     pub allow_file_urls: bool,
+    /// Docker image id actually used (after the prepared image was ensured)
+    pub image_id: Option<String>,
+    /// Containers ran as root (`docker.run_as_root` or an unprepared image)
+    pub run_as_root: bool,
+    /// Whole-run deadline in seconds (0 = none)
+    pub deadline_seconds: u64,
+    /// Abridged environment facts (docker version/os/arch/kernel, host, tool) for reproduction
+    pub environment: Option<serde_json::Value>,
 }
 
 impl RunHeader {

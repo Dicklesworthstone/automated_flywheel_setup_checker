@@ -129,3 +129,15 @@ pub fn docker_inspect(id: &str, template: &str) -> String {
 pub fn docker_rm_force(name: &str) {
     let _ = std::process::Command::new("docker").args(["rm", "-f", name]).output();
 }
+
+/// Unwrap with the error printed to stdout first: remote test runners stream stdout but can
+/// drop panic messages, so the reason must be visible before the panic.
+pub fn must<T>(result: anyhow::Result<T>, what: &str) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            println!("DOCKER TEST ERROR [{what}]: {e:#}");
+            panic!("{what} failed: {e:#}");
+        }
+    }
+}

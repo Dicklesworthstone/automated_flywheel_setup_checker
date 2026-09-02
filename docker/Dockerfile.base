@@ -39,12 +39,12 @@ RUN useradd -m -s /bin/bash -G sudo afsc-user && \
 # Install Rust as non-root (installers like sbh expect cargo)
 USER afsc-user
 WORKDIR /home/afsc-user
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+RUN curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
     echo 'source "$HOME/.cargo/env"' >> ~/.bashrc
 ENV PATH="/home/afsc-user/.cargo/bin:${PATH}"
 
 # Install Node via nvm (installers like gemini_patch expect node)
-RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && \
+RUN curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && \
     bash -c 'source ~/.nvm/nvm.sh && nvm install --lts && nvm alias default node'
 ENV NVM_DIR="/home/afsc-user/.nvm"
 

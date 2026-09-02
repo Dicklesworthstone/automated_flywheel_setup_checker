@@ -323,6 +323,35 @@ pub async fn check_hashes(checksums: &ChecksumsFile) -> Vec<HashCheckResult> {
             };
             let start = Instant::now();
 
+            // Local mirrors and test fixtures: hash the file directly (the URL policy decides
+            // whether file:// is acceptable; here we only measure).
+            if let Some(path) = url.strip_prefix("file://").map(str::to_string) {
+                return match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let actual = hex::encode(Sha256::digest(&bytes));
+                        let matches = expected.as_deref().is_some_and(|e| hash_hex_matches(e, &actual));
+                        HashCheckResult {
+                            name,
+                            url,
+                            expected,
+                            actual: Some(actual),
+                            response_time_ms: start.elapsed().as_millis() as u64,
+                            matches,
+                            error: None,
+                        }
+                    }
+                    Err(e) => HashCheckResult {
+                        name,
+                        url,
+                        expected,
+                        actual: None,
+                        response_time_ms: start.elapsed().as_millis() as u64,
+                        matches: false,
+                        error: Some(format!("cannot read {path}: {e}")),
+                    },
+                };
+            }
+
             match client.get(&url).send().await {
                 Ok(resp) => {
                     let status = resp.status();

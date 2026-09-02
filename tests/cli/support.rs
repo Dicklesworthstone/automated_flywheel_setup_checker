@@ -193,8 +193,8 @@ impl Fixture {
         self.run_with(args, &[("AFSC_ALLOW_LOCAL", "1")], &[])
     }
 
-    /// Run with extra environment variables set and/or removed. stdin is never a terminal.
-    pub fn run_with(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> Output {
+    /// Build (without running) a command against the fixture: HOME, config, env, null stdin.
+    pub fn command(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> std::process::Command {
         let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
         let mut cmd = std::process::Command::new(bin);
         cmd.env("HOME", &self.home).env_remove("RUST_LOG").env_remove("AFSC_ALLOW_LOCAL");
@@ -205,6 +205,40 @@ impl Fixture {
             cmd.env_remove(k);
         }
         cmd.stdin(std::process::Stdio::null()).arg("--config").arg(&self.config).args(args);
+        cmd
+    }
+
+    /// Spawn a JSONL check and block until it printed its run header: at that point the run
+    /// lock is held and the signal handlers are installed. Returns the child, a reader positioned
+    /// after the header, and the header itself.
+    pub fn spawn_check_until_header(
+        &self,
+        args: &[&str],
+    ) -> (std::process::Child, std::io::BufReader<std::process::ChildStdout>, serde_json::Value) {
+        use std::io::BufRead;
+        let mut child = self
+            .command(args, &[("AFSC_ALLOW_LOCAL", "1")], &[])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn check");
+        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read header");
+        let header: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_else(|_| {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut e, &mut err);
+            }
+            panic!("expected a JSONL run header, got {line:?}; stderr:\n{err}")
+        });
+        assert_eq!(header["kind"], "run", "{header}");
+        (child, reader, header)
+    }
+
+    /// Run with extra environment variables set and/or removed. stdin is never a terminal.
+    pub fn run_with(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> Output {
+        let mut cmd = self.command(args, set, remove);
         let output = cmd.output().expect("failed to execute binary");
         eprintln!(
             "--- cli: {} ---\nexit: {:?}\nstdout:\n{}\nstderr:\n{}\n--- end ---",

@@ -204,7 +204,7 @@ jobs:
           OUT=$(HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \
             --config "$FX/config.toml" check --local --yes --format jsonl)
           echo "$OUT"
-          echo "$OUT" | grep '^{' | jq -e 'select(.installer_name == "mock_tool") | .success == true and .status == "Passed" and .checksum_result.matches == true'
+          echo "$OUT" | grep '^{' | jq -e 'select(.installer_name == "mock_tool") | .success == true and .status == "passed" and .checksum_result.matches == true'
           # The checker must also refuse a wrong checksum (exit 1, installer not executed)
           sed -i "s/$SHA/0000000000000000000000000000000000000000000000000000000000000000/" "$FX/acfs/checksums.yaml"
           if HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \

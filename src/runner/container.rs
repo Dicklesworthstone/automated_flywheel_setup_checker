@@ -284,7 +284,44 @@ impl ContainerManager {
 
     /// Ensure the image containers will run is available locally, building the prepared image
     /// when its hash tag is missing (or `rebuild` is set) and pulling raw images per policy.
-    async fn ensure_image(&self) -> Result<ImagePlan> {
+    /// Id of the image containers will run (after `ensure_image`), for run headers.
+    pub async fn image_id(&self) -> Option<String> {
+        let plan = self.image_plan().ok()?;
+        self.docker.inspect_image(&plan.run_image).await.ok().and_then(|i| i.id)
+    }
+
+    /// Classify managed containers without touching them: the ones whose owner process is dead
+    /// or that exceed `max_age` come back with a `reason`; live ones are omitted.
+    pub async fn orphans(&self, max_age: Duration) -> Result<Vec<OrphanInfo>> {
+        let my_pid = std::process::id();
+        let now = chrono::Utc::now();
+        let mut out = Vec::new();
+        for mut c in self.list_managed().await? {
+            if c.pid == Some(my_pid) {
+                continue;
+            }
+            let owner_dead = match c.pid {
+                Some(pid) => !pid_alive(pid),
+                None => false,
+            };
+            let too_old = match c.created_at {
+                Some(t) => (now - t).to_std().map(|d| d > max_age).unwrap_or(false),
+                None => false,
+            };
+            if !(owner_dead || too_old) {
+                continue;
+            }
+            c.reason = if owner_dead {
+                format!("owner pid {} is not running", c.pid.unwrap_or(0))
+            } else {
+                format!("older than {}s", max_age.as_secs())
+            };
+            out.push(c);
+        }
+        Ok(out)
+    }
+
+    pub async fn ensure_image(&self) -> Result<ImagePlan> {
         let plan = self.image_plan()?;
 
         if !plan.prepared {
@@ -508,11 +545,17 @@ impl ContainerManager {
 
         // Volume binds
         if !self.config.volumes.is_empty() {
+            // Docker wants host:container[:mode]; the host side may carry a ":ro"/":rw" suffix.
             let binds: Vec<String> = self
                 .config
                 .volumes
                 .iter()
-                .map(|(host, container)| format!("{}:{}", host, container))
+                .map(|(host, container)| match host.rsplit_once(':') {
+                    Some((h, mode)) if matches!(mode, "ro" | "rw" | "z" | "Z") => {
+                        format!("{h}:{container}:{mode}")
+                    }
+                    _ => format!("{host}:{container}"),
+                })
                 .collect();
             host_config.binds = Some(binds);
         }
@@ -745,29 +788,8 @@ impl ContainerManager {
     /// Remove managed containers whose owner process is dead or whose age exceeds `max_age`.
     /// Containers owned by the current process are never touched. Returns what was removed.
     pub async fn reap_orphans(&self, max_age: Duration) -> Result<Vec<OrphanInfo>> {
-        let my_pid = std::process::id();
-        let now = chrono::Utc::now();
         let mut reaped = Vec::new();
-        for mut c in self.list_managed().await? {
-            if c.pid == Some(my_pid) {
-                continue;
-            }
-            let owner_dead = match c.pid {
-                Some(pid) => !pid_alive(pid),
-                None => false,
-            };
-            let too_old = match c.created_at {
-                Some(t) => (now - t).to_std().map(|d| d > max_age).unwrap_or(false),
-                None => false,
-            };
-            if !(owner_dead || too_old) {
-                continue;
-            }
-            c.reason = if owner_dead {
-                format!("owner pid {} is not running", c.pid.unwrap_or(0))
-            } else {
-                format!("older than {}s", max_age.as_secs())
-            };
+        for c in self.orphans(max_age).await? {
             warn!(container = %c.name, reason = %c.reason, "Reaping orphaned container");
             let _ = self.cleanup_container(&c.id).await;
             reaped.push(c);

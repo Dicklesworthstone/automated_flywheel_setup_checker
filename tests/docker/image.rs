@@ -21,11 +21,11 @@ async fn canonical_base_runs_as_non_root_and_keeps_the_latest_alias() {
     let plan = m.image_plan().unwrap();
     assert!(plan.prepared);
     assert!(plan.run_image.starts_with("afsc-base:"));
-    let id = m.create_container("canon").await.unwrap();
-    let (_, user, _) = m.exec_in_container(&id, &["id", "-un"]).await.unwrap();
+    let id = must(m.create_container("canon").await, "create_container");
+    let (_, user, _) = must(m.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(user.trim(), "afsc-user");
     assert_eq!(docker_inspect(&id, "{{.Config.Image}}"), plan.run_image);
-    m.cleanup_container(&id).await.unwrap();
+    must(m.cleanup_container(&id).await, "cleanup_container");
     // The alias exists and points at the hash-tagged build.
     let alias = docker_inspect(ContainerManager::AFSC_BASE_IMAGE, "{{.Id}}");
     let hashed = docker_inspect(&plan.run_image, "{{.Id}}");
@@ -42,20 +42,20 @@ async fn foreign_base_is_prepared_once_and_cached() {
     assert!(plan.run_image.starts_with("afsc-prepared:ubuntu-24.04-"));
 
     // First run may build (minutes); the container must still run as the non-root user.
-    let id = m.create_container("prep1").await.unwrap();
-    let (_, user, _) = m.exec_in_container(&id, &["id", "-un"]).await.unwrap();
+    let id = must(m.create_container("prep1").await, "create_container");
+    let (_, user, _) = must(m.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(user.trim(), "afsc-user");
-    let (_, rel, _) = m.exec_in_container(&id, &["bash", "-c", "lsb_release -rs 2>/dev/null || cat /etc/os-release"]).await.unwrap();
+    let (_, rel, _) = must(m.exec_in_container(&id, &["bash", "-c", "lsb_release -rs 2>/dev/null || cat /etc/os-release"]).await, "exec_in_container");
     assert!(rel.contains("24.04"), "{rel}");
-    let (code, _, _) = m.exec_in_container(&id, &["bash", "-lc", "command -v cargo && command -v node && command -v jq"]).await.unwrap();
+    let (code, _, _) = must(m.exec_in_container(&id, &["bash", "-lc", "command -v cargo && command -v node && command -v jq"]).await, "exec_in_container");
     assert_eq!(code, 0, "prerequisites present on the derived image");
-    m.cleanup_container(&id).await.unwrap();
+    must(m.cleanup_container(&id).await, "cleanup_container");
 
     // Second run reuses the cached image.
     let start = Instant::now();
-    let id = m.create_container("prep2").await.unwrap();
+    let id = must(m.create_container("prep2").await, "create_container");
     assert!(start.elapsed().as_secs() < 20, "cached prepared image: {:?}", start.elapsed());
-    m.cleanup_container(&id).await.unwrap();
+    must(m.cleanup_container(&id).await, "cleanup_container");
 }
 
 #[tokio::test]
@@ -63,10 +63,10 @@ async fn run_as_root_and_prepare_false_run_as_root() {
     skip_unless_docker!();
     let fx = DockerFixture::new();
     let m = manager(ContainerManager::AFSC_BASE_IMAGE, true, &fx);
-    let id = m.create_container("root1").await.unwrap();
-    let (_, user, _) = m.exec_in_container(&id, &["id", "-un"]).await.unwrap();
+    let id = must(m.create_container("root1").await, "create_container");
+    let (_, user, _) = must(m.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(user.trim(), "root");
-    m.cleanup_container(&id).await.unwrap();
+    must(m.cleanup_container(&id).await, "cleanup_container");
 
     let mut cfg = fx.container_config();
     cfg.image = "ubuntu:22.04".into();
@@ -75,8 +75,8 @@ async fn run_as_root_and_prepare_false_run_as_root() {
     let plan = m.image_plan().unwrap();
     assert!(!plan.prepared);
     assert_eq!(plan.run_image, "ubuntu:22.04");
-    let id = m.create_container("raw").await.unwrap();
-    let (_, user, _) = m.exec_in_container(&id, &["id", "-un"]).await.unwrap();
+    let id = must(m.create_container("raw").await, "create_container");
+    let (_, user, _) = must(m.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(user.trim(), "root");
-    m.cleanup_container(&id).await.unwrap();
+    must(m.cleanup_container(&id).await, "cleanup_container");
 }

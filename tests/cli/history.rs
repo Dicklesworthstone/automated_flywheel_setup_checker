@@ -112,11 +112,14 @@ fn longest_first_ordering_uses_history_and_name_order_is_alphabetical() {
 #[test]
 fn run_deadline_cancels_remaining_work_without_failing_the_run() {
     let mut fx = Fixture::new();
-    fx.add_config_toml("[execution]\nrun_deadline_seconds = 2\norder = \"name\"");
     fx.add_pass("a_quick_tool");
     fx.add_sleeper("b_slow_tool", 15);
     let start = std::time::Instant::now();
-    let out = fx.run(&["check", "--local", "--format", "jsonl"]);
+    let out = fx.run_with(
+        &["check", "--local", "--format", "jsonl"],
+        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_EXECUTION_RUN_DEADLINE_SECONDS", "2"), ("AFSC_EXECUTION_ORDER", "name")],
+        &[],
+    );
     assert!(start.elapsed().as_secs() < 12, "deadline stopped the sleeper: {:?}", start.elapsed());
     assert_eq!(out.status.code(), Some(0), "deadline is not an installer failure: {}", stderr(&out));
     let lines = jsonl_lines(&out);

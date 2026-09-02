@@ -1,0 +1,69 @@
+[Unit]
+Description=Automated Flywheel Setup Checker (nightly installer verification)
+Documentation=https://github.com/Dicklesworthstone/automated_flywheel_setup_checker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=@USER@
+Group=@USER@
+SupplementaryGroups=docker
+WorkingDirectory=@DATA_DIR@
+
+# The checker pings the watchdog while installers run; 300 s covers the image build.
+WatchdogSec=300
+WatchdogSignal=SIGTERM
+
+# One nightly run: results under @DATA_DIR@/results, event log under @LOG_DIR@.
+ExecStart=@BIN@ --config @CONFIG@ --format json --watchdog check
+# Re-send notifications for the persisted run when the service is stopped or killed
+# (the normal path already notified; this covers watchdog/timeout kills).
+ExecStopPost=@BIN@ --config @CONFIG@ notify --last-run
+
+# A failing installer exits 1 on purpose; do not restart-loop on it.
+Restart=no
+TimeoutStartSec=60
+TimeoutStopSec=60
+TimeoutAbortSec=30
+KillMode=mixed
+
+# Resource limits (cgroup v2)
+MemoryMax=4G
+MemoryHigh=3G
+CPUQuota=200%
+TasksMax=512
+LimitNOFILE=65536
+
+# Hardening that still permits the Docker socket (AF_UNIX) and the data/log dirs.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=@DATA_DIR@ @LOG_DIR@
+ReadOnlyPaths=@CONFIG_DIR@
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flywheel-checker
+Environment=RUST_BACKTRACE=1
+
+OOMPolicy=stop
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=multi-user.target

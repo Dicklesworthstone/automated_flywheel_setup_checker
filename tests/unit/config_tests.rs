@@ -301,7 +301,7 @@ fn test_notifications_to_internal_enabled_uses_configured_channels() {
     assert_eq!(github.repo, "owner/repo");
     assert_eq!(github.token_env, "GITHUB_TOKEN");
     assert!(github.create_issues);
-    assert!(!github.add_comments);
+    assert!(github.add_comments, "comments on the rolling issue by default");
 
     assert_eq!(slack.webhook_url_env, "SLACK_WEBHOOK_URL");
     assert_eq!(slack.channel, "#alerts");

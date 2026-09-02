@@ -5,6 +5,7 @@
 
 pub mod checksums;
 pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod lock;
 pub mod logging;

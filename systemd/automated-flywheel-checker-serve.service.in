@@ -1,0 +1,43 @@
+[Unit]
+Description=Flywheel Checker health and metrics endpoints
+Documentation=https://github.com/Dicklesworthstone/automated_flywheel_setup_checker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@DATA_DIR@
+
+# /health and /metrics are recomputed from @DATA_DIR@ on every request.
+ExecStart=@BIN@ --config @CONFIG@ serve
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+MemoryMax=256M
+TasksMax=64
+
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadOnlyPaths=@CONFIG_DIR@ @DATA_DIR@
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flywheel-checker-serve
+
+[Install]
+WantedBy=multi-user.target

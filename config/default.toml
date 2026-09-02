@@ -42,6 +42,8 @@ reap_orphans = true
 network = "bridge"
 # Derive a prepared image (ACFS prerequisites + non-root afsc-user) from `image`; false runs it as-is (root)
 prepare = true
+# Extra bind mounts for every container: "host:container[:ro]" (local mirrors, fixtures)
+volumes = []
 
 [execution]
 # Number of parallel installer tests: an integer or "auto" (= max(1, min(4, cores / 2)))
@@ -88,6 +90,12 @@ slack_channel = ""
 github_token_env = ""
 # GitHub repo for auto-creating issues on failure (e.g., "owner/repo")
 github_issue_repo = ""
+# Comment on the open rolling issue instead of opening a new one per run
+github_add_comments = true
+# GitHub API base URL
+github_api_url = "https://api.github.com"
+# Title of the rolling issue (also the dedup key)
+github_issue_title = "AFSC canary: installer failures"
 notify_on_failure = true
 notify_on_success = false
 

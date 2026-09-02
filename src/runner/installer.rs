@@ -10,8 +10,10 @@ use std::time::Duration;
 
 use crate::parser::ErrorClassification;
 
-/// Status of a test execution
+/// Status of a test execution (serialized lowercase: `passed`, `timedout`, ... — the same
+/// spelling as persisted result entries and `as_str()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TestStatus {
     Pending,
     Running,

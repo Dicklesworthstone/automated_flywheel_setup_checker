@@ -227,7 +227,7 @@ impl InstallerTestRunner {
                 r#"set -e
 rm -f '{path}'
 {curl} -fsSL '{url}' -o '{path}'
-ACTUAL=$(sha256sum '{path}' | cut -d' ' -f1)
+ACTUAL=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum '{path}' || shasum -a 256 '{path}') | cut -d' ' -f1)
 if [ "$ACTUAL" != "{expected}" ]; then
   echo "CHECKSUM_MISMATCH: expected={expected} actual=$ACTUAL url={url}" >&2
   exit 99

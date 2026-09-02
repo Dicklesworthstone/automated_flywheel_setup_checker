@@ -19,7 +19,13 @@ pub use jsonl::{
     LogRotation, ResultEntry, ResultPersister, RunFile, RunHeader, RunInfo, RunSummaryEntry,
 };
 pub use markdown::{render_diff, render_run, render_timeline};
-pub use metrics::{MetricsExporter, MetricsSnapshot};
-pub use notify::{GitHubConfig, NotificationConfig, Notifier, SlackConfig};
+pub use metrics::{
+    HealthState, InstallerMetric, MetricsExporter, MetricsReport, MetricsSnapshot, ValidationReport,
+    WINDOW,
+};
+pub use notify::{
+    slack_payload, FailureLine, GitHubConfig, Notification, NotificationConfig, Notifier,
+    NotifyOutcome, SlackConfig, DEFAULT_GITHUB_API_URL, DEFAULT_ISSUE_TITLE, ISSUE_LABEL,
+};
 pub use redact::{contains_secret, redact};
 pub use summary::{FailureSummary, RunSummary, SummaryGenerator};

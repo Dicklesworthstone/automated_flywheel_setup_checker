@@ -51,7 +51,7 @@ fn skip_override_is_reported_without_failing_the_run() {
     assert_eq!(out.status.code(), Some(0), "a skipped installer must not fail the run");
     let lines = jsonl_lines(&out);
     let s = find_result(&lines, "broken_upstream");
-    assert_eq!(s["status"], "Skipped");
+    assert_eq!(s["status"], "skipped");
     assert!(s["stderr"].as_str().unwrap().contains("upstream installer removed"));
     let summary = lines.last().unwrap();
     assert_eq!(summary["passed"], 1);
@@ -84,13 +84,13 @@ fn expect_binary_verify_cmd_and_version_cmd_run_after_install() {
     assert_eq!(out.status.code(), Some(1));
     let lines = jsonl_lines(&out);
     let ok = find_result(&lines, "tool_ok");
-    assert_eq!(ok["status"], "Passed");
+    assert_eq!(ok["status"], "passed");
     assert_eq!(ok["installed_version"], "mytool 1.2.3");
     let missing = find_result(&lines, "tool_missing_bin");
-    assert_eq!(missing["status"], "Failed");
+    assert_eq!(missing["status"], "failed");
     assert_eq!(missing["error"]["category"], "post_install");
     let vf = find_result(&lines, "tool_verify_fails");
-    assert_eq!(vf["status"], "Failed");
+    assert_eq!(vf["status"], "failed");
     assert_eq!(vf["error"]["category"], "post_install");
 
     let status = json_doc(&fx.run(&["status", "--format", "json"]));

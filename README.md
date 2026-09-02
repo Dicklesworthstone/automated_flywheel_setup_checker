@@ -126,81 +126,128 @@ cargo install --git https://github.com/Dicklesworthstone/automated_flywheel_setu
 Global flags available on all commands:
 
 ```bash
---format human|json|jsonl|prometheus   # prometheus is supported by `status`
+--format human|json|jsonl|prometheus|markdown   # prometheus and markdown: `status` only
 --config PATH                # Config file path (or set ACFS_CONFIG env)
--v / -vv / -vvv              # Verbosity level
---watchdog                   # Enable systemd watchdog integration
+--acfs-repo DIR              # Override [general].acfs_repo
+--data-dir DIR               # Override [general].data_dir (results, metrics, locks, logs)
+--image NAME                 # Override [docker].image
+--allow-file-urls            # Permit file:// installer URLs (tests, local mirrors)
+-v / -vv / -vvv, --quiet     # Log verbosity (logs go to stderr; stdout is data only)
+--log-format text|json       # stderr log line format
+--watchdog                   # systemd sd_notify + watchdog integration
 ```
+
+Every `AFSC_<SECTION>_<KEY>` environment variable overrides the matching config key
+(`AFSC_EXECUTION_PARALLEL=4`, `AFSC_DOCKER_IMAGE=ubuntu:24.04`); CLI flags override both.
+
+Exit codes: `0` success · `1` installer failures · `2` usage/config error (including an invalid
+`checksums.yaml`) · `3` infrastructure error (Docker unreachable, lock held) · `4` validation drift ·
+`130`/`143` interrupted by SIGINT/SIGTERM.
 
 ### `check` — Run Installer Tests
 
-Executes installers inside Docker containers and reports results.
+Downloads each installer, verifies its pinned SHA-256, runs it inside a fresh container (or, with
+`--local`, in an isolated temporary HOME on this host) and classifies every failure.
 
 ```bash
 automated_flywheel_setup_checker check                     # All enabled installers
 automated_flywheel_setup_checker check rust nodejs bun      # Specific installers
-automated_flywheel_setup_checker check --parallel 4         # 4 concurrent workers
-automated_flywheel_setup_checker check --timeout 600        # 10min timeout per installer
-automated_flywheel_setup_checker check --remediate          # Enable Claude auto-fix
+automated_flywheel_setup_checker check --parallel 4         # 4 concurrent workers ("auto" = CPUs)
+automated_flywheel_setup_checker check --timeout 600        # 10 min timeout per installer
 automated_flywheel_setup_checker check --fail-fast          # Stop on first failure
-automated_flywheel_setup_checker check --dry-run            # Preview without executing
-automated_flywheel_setup_checker check --local              # Run locally (no Docker)
+automated_flywheel_setup_checker check --dry-run            # Resolved specs, order, commands; runs nothing
+automated_flywheel_setup_checker check --failed-from last   # Rerun only what failed in a run (id prefix or "last")
+automated_flywheel_setup_checker check --rebuild-base       # Rebuild the prepared image (pull base, no cache)
+automated_flywheel_setup_checker check --reap               # Only remove leaked afsc containers
+automated_flywheel_setup_checker check --local --yes        # Run on this host (consent required when not a TTY)
+automated_flywheel_setup_checker check --remediate          # Claude remediation per [remediation].mode
 ```
 
-### `list` — Show Available Installers
+Installers run longest-first (by historical median duration) unless `[execution].order` says
+otherwise; `[execution].run_deadline_seconds` cancels whatever is still running at the deadline
+(reported as `cancelled`, exit 0 unless something actually failed). Only one `check` runs per data
+dir at a time (`--allow-concurrent` to override).
+
+### `status` — Results, History, Diffs
 
 ```bash
-automated_flywheel_setup_checker list                       # All installers
-automated_flywheel_setup_checker list --enabled-only        # Only enabled ones
-automated_flywheel_setup_checker list --tag essential        # Filter by tag
-automated_flywheel_setup_checker list --format json         # Machine-readable
+automated_flywheel_setup_checker status                     # Last run (flaky / broken-since labels)
+automated_flywheel_setup_checker status --detailed          # Attempts, categories, checksum state
+automated_flywheel_setup_checker status --list              # Recent runs
+automated_flywheel_setup_checker status --run 3f2a          # A run by id prefix
+automated_flywheel_setup_checker status --history rust      # One installer across runs + assessment
+automated_flywheel_setup_checker status --diff 3f2a last    # Installers whose status changed
+automated_flywheel_setup_checker status --format markdown   # Tables for issues / PR comments
+automated_flywheel_setup_checker status --format prometheus # Same numbers `serve` exposes
+```
+
+Flakiness uses a Beta(1,1) posterior over outcomes since the installer's script hash last changed
+(flaky below a 90 % pass probability with intermittent failures); a CUSUM change point marks
+`broken since <run>`.
+
+### `list` — Show Installers
+
+```bash
+automated_flywheel_setup_checker list                       # Resolved specs (profile, overrides, skips)
+automated_flywheel_setup_checker list --runnable            # Excludes [installers.<name>].skip = true
+automated_flywheel_setup_checker list --format json
 ```
 
 ### `validate` — Check checksums.yaml
 
 ```bash
-automated_flywheel_setup_checker validate                   # Format validation
-automated_flywheel_setup_checker validate --check-urls      # Also verify URLs are live
-automated_flywheel_setup_checker validate --check-hashes    # Also verify URL bytes match pinned SHA-256
+automated_flywheel_setup_checker validate                   # Format validation (exit 2 on errors)
+automated_flywheel_setup_checker validate --check-urls      # URLs reachable (HEAD, GET fallback)
+automated_flywheel_setup_checker validate --check-hashes    # Download and compare pinned SHA-256 (exit 4 on drift)
+automated_flywheel_setup_checker validate --profile         # Built-in ACFS execution profiles vs the checkout
 automated_flywheel_setup_checker validate --path /custom/path/checksums.yaml
+```
+
+Against a full ACFS checkout, `validate` also cross-checks `KNOWN_INSTALLERS` in
+`scripts/lib/security.sh`. `--check-hashes` persists its result for `serve` and `doctor`.
+
+### `doctor` — Diagnose the Environment
+
+```bash
+automated_flywheel_setup_checker doctor                     # Docker, image, ACFS repo, dirs, disk, tools, last run
+automated_flywheel_setup_checker doctor --local --format json
+```
+
+Each finding comes with a fix hint; exit 3 when a check fails.
+
+### `notify` — Re-send Notifications
+
+```bash
+automated_flywheel_setup_checker notify --last-run          # For the most recent persisted run
+automated_flywheel_setup_checker notify --run 3f2a
+automated_flywheel_setup_checker notify --digest            # Flush runs queued by mode = "daily_digest"
+```
+
+### `serve` — Monitoring Endpoints
+
+Serves `/health` and `/metrics`, recomputed from the data directory on every request. `/health`
+answers `503` (`[monitoring].stale_status_code`) when the last run is older than
+`[monitoring].stale_after_seconds`; `/metrics` includes per-installer gauges
+(`afsc_installer_status{installer="rust"}`), the rolling 24 h counters and the last checksum drift.
+
+```bash
+automated_flywheel_setup_checker serve                      # Ports and bind address from config.toml
+automated_flywheel_setup_checker serve --health-port 8081   # Override the shared listener port (0 = ephemeral)
 ```
 
 ### `classify-error` — Debug Error Classification
 
 ```bash
-automated_flywheel_setup_checker classify-error \
-  --stderr "E: Unable to locate package foo" \
-  --exit-code 100
+automated_flywheel_setup_checker classify-error --stderr "E: Unable to locate package foo" --exit-code 100 --explain
 ```
 
 ### `config` — Configuration Management
 
 ```bash
-automated_flywheel_setup_checker config show                # Current config
+automated_flywheel_setup_checker config show --resolved     # Every key with its source (default/file/env/cli)
 automated_flywheel_setup_checker config default             # Print defaults
-automated_flywheel_setup_checker config validate            # Validate config file
+automated_flywheel_setup_checker config validate --strict   # Unknown keys are errors
 ```
-
-### `status` — Last Run Results
-
-```bash
-automated_flywheel_setup_checker status                     # Summary
-automated_flywheel_setup_checker status --detailed          # Full failure info
-automated_flywheel_setup_checker status --format prometheus # Prometheus text output
-```
-
-### `serve` — Monitoring Endpoints
-
-Runs the monitoring HTTP server and exposes the endpoints enabled in `[monitoring]`. At least one of
-`health_endpoint` or `metrics_enabled` must be enabled.
-
-```bash
-automated_flywheel_setup_checker serve                      # Use ports from config.toml
-automated_flywheel_setup_checker serve --health-port 8081   # Override shared listener port
-automated_flywheel_setup_checker serve --metrics-port 9191  # Override metrics-only listener
-```
-
-`serve` returns an error if both `[monitoring].health_endpoint` and `[monitoring].metrics_enabled` are disabled.
 
 ---
 
@@ -333,46 +380,68 @@ The classifier automatically categorizes failures for triage:
 
 ---
 
-## Troubleshooting
+## Deployment (systemd)
 
-### "Docker daemon not running"
+`scripts/install-systemd.sh` renders `systemd/*.service.in`, installs the binary to
+`/usr/local/bin`, creates `/var/lib/flywheel-checker` (results, metrics, locks) and
+`/var/log/flywheel-checker` (structured event log) owned by the service user, writes
+`/etc/flywheel-checker/config.toml` pointing at them, installs logrotate, and enables:
+
+| Unit | Purpose |
+|------|---------|
+| `automated-flywheel-checker.timer` | Nightly at 03:00 (+ up to 30 min jitter), catches up after downtime |
+| `automated-flywheel-checker.service` | `check` with sd_notify + watchdog; `ExecStopPost` re-sends notifications |
+| `automated-flywheel-checker-emergency.service` | On-demand run with `--parallel 4` |
+| `automated-flywheel-checker-serve.service` | `/health` and `/metrics` |
 
 ```bash
-# Start Docker
-sudo systemctl start docker
+cargo build --release
+sudo scripts/install-systemd.sh --dry-run --acfs-repo /srv/agentic_coding_flywheel_setup   # preview
+sudo scripts/install-systemd.sh --acfs-repo /srv/agentic_coding_flywheel_setup --user afsc
+journalctl -u automated-flywheel-checker.service -f
+automated_flywheel_setup_checker --config /etc/flywheel-checker/config.toml status --list
+scripts/uninstall-systemd.sh
+```
 
-# Or if using Docker Desktop
-open -a Docker
+The service user must be in the `docker` group. Notification secrets are read from the environment
+variables named in `[notifications]` (`Environment=` or an `EnvironmentFile=` drop-in). A unit test
+parses every `ExecStart` in the templates with the real CLI, so units cannot drift from the binary.
+
+---
+
+## Troubleshooting
+
+Start with `automated_flywheel_setup_checker doctor`: it checks Docker, the prepared image, the ACFS
+checkout, data/log directories, free disk, external tools, notification secrets, the last run age and
+leaked containers, each with a fix hint.
+
+### "Docker daemon unreachable"
+
+```bash
+sudo systemctl start docker          # or: open -a Docker (Docker Desktop)
+sudo usermod -aG docker $USER        # then log out and back in
+automated_flywheel_setup_checker check --local --yes   # no-container fallback (runs scripts on this host)
 ```
 
 ### "checksums.yaml not found"
 
-The tool looks for ACFS at `/data/projects/agentic_coding_flywheel_setup` by default. Override with config:
+Point the tool at an ACFS checkout: `--acfs-repo DIR`, `[general] acfs_repo = "DIR"` or
+`AFSC_GENERAL_ACFS_REPO=DIR`.
 
-```bash
-automated_flywheel_setup_checker --config my-config.toml check
-# Or set in config.toml: [general] acfs_repo = "/your/path"
-```
+### An installer times out
 
-### "Container timeout after 300s"
+Raise the per-installer timeout (`--timeout 600`, `[docker].timeout_seconds`, or
+`[installers.<name>].timeout_seconds`). The built-in ACFS profiles already give `rust` and `mdwb`
+longer minimums. The whole run can be bounded with `[execution].run_deadline_seconds`.
 
-Some installers (e.g., Rust) need more time. Increase the timeout:
+### "another check is running"
 
-```bash
-automated_flywheel_setup_checker check rust --timeout 600
-```
+A previous run holds `<data_dir>/locks/run.lock`. Wait for it, or pass `--allow-concurrent`. Stale
+locks from dead processes are reclaimed automatically.
 
-### "Permission denied when connecting to Docker socket"
+### Leaked containers
 
-```bash
-# Add your user to the docker group
-sudo usermod -aG docker $USER
-# Then log out and back in
-```
-
-### Tests pass locally but fail in CI
-
-The E2E tests require Docker-in-Docker. Ensure the CI workflow has the `docker:dind` service and `--privileged` flag.
+`check --reap` removes `afsc.managed` containers whose owner process is gone; `doctor` lists them.
 
 ---
 
@@ -415,18 +484,11 @@ Yes. The E2E workflow already demonstrates this. You need a runner with Docker a
 ## Development
 
 ```bash
-# Run Rust tests (366 total; 6 Docker-dependent E2E cases are ignored by default)
-cargo test
-
-# Run with verbose logging
-RUST_LOG=debug cargo run -- check --dry-run
-
-# Format and lint
+cargo test                                   # unit, CLI (real binary + fixtures), e2e; Docker suite skips
+AFSC_DOCKER_TESTS=1 cargo test --test docker  # Docker lifecycle/image suite (needs a daemon)
+AFSC_ACFS_REPO=/path/to/acfs cargo test --test acfs_drift   # profile + base-image drift vs a checkout
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings
-
-# Run the full E2E suite (requires Docker)
-chmod +x scripts/e2e/run_all_tests.sh
-./scripts/e2e/run_all_tests.sh
+scripts/e2e/run_all_tests.sh                 # bash E2E scripts
 ```
 
 ---

@@ -236,6 +236,28 @@ enum Commands {
         profile: bool,
     },
 
+    /// Diagnose the environment (Docker, image, ACFS repo, dirs, disk, tools, last run)
+    Doctor {
+        /// Skip the Docker checks (for --local deployments)
+        #[arg(long)]
+        local: bool,
+    },
+
+    /// Send (or re-send) notifications for a persisted run, or flush the daily digest
+    Notify {
+        /// Notify for the most recent run (what the systemd ExecStopPost hook uses)
+        #[arg(long, conflicts_with_all = ["run", "digest"])]
+        last_run: bool,
+
+        /// Notify for a run selected by id prefix (or "last")
+        #[arg(long, value_name = "RUN", conflicts_with = "digest")]
+        run: Option<String>,
+
+        /// Send one summary for every run queued by `notifications.mode = "daily_digest"`
+        #[arg(long)]
+        digest: bool,
+    },
+
     /// Classify an error message (for testing)
     ClassifyError {
         /// stderr content
@@ -335,30 +357,38 @@ fn local_consent(yes: bool) -> CmdResult {
 fn spawn_signal_handler(token: CancellationToken) -> Arc<Mutex<Option<Signal>>> {
     let which: Arc<Mutex<Option<Signal>>> = Arc::new(Mutex::new(None));
     let seen = which.clone();
-    tokio::spawn(async move {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Cannot install SIGTERM handler");
-                    let _ = tokio::signal::ctrl_c().await;
-                    *seen.lock().unwrap() = Some(Signal::Interrupt);
-                    token.cancel();
-                    return;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // Register synchronously: a signal that arrives before the task is first polled must
+        // still be caught (tokio installs the OS handler when the stream is created).
+        let term = signal(SignalKind::terminate())
+            .map_err(|e| tracing::warn!(error = %e, "Cannot install SIGTERM handler"))
+            .ok();
+        let int = signal(SignalKind::interrupt())
+            .map_err(|e| tracing::warn!(error = %e, "Cannot install SIGINT handler"))
+            .ok();
+        tokio::spawn(async move {
+            let wait = |s: Option<tokio::signal::unix::Signal>| async move {
+                match s {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
                 }
             };
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => { *seen.lock().unwrap() = Some(Signal::Interrupt); }
-                _ = term.recv() => { *seen.lock().unwrap() = Some(Signal::Terminate); }
+                _ = wait(int) => { *seen.lock().unwrap() = Some(Signal::Interrupt); }
+                _ = wait(term) => { *seen.lock().unwrap() = Some(Signal::Terminate); }
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = tokio::signal::ctrl_c().await;
-            *seen.lock().unwrap() = Some(Signal::Interrupt);
-        }
+            tracing::warn!("Signal received; cancelling the run and cleaning up");
+            token.cancel();
+        });
+    }
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        *seen.lock().unwrap() = Some(Signal::Interrupt);
         tracing::warn!("Signal received; cancelling the run and cleaning up");
         token.cancel();
     });
@@ -496,14 +526,14 @@ async fn run_command(
                 &config.monitoring,
                 *health_port,
                 *metrics_port,
-                config.general.metrics_path(),
+                config.general.data_dir_path(),
             )
             .await
             .map_err(|e| {
                 let text = format!("{e:#}");
                 if text.contains("failed to bind") {
                     AfscError::Infra(text)
-                } else if text.contains("disabled in config") {
+                } else if text.contains("disabled in config") || text.contains("not an IP address") {
                     AfscError::Config(text)
                 } else {
                     AfscError::Other(e)
@@ -524,6 +554,13 @@ async fn run_command(
 
         Commands::ClassifyError { stderr, exit_code, explain } => {
             cmd_classify_error(stderr, *exit_code, *explain, cli.format)
+        }
+
+        Commands::Doctor { local } => cmd_doctor(settings, *local, cli.format).await,
+
+        Commands::Notify { last_run, run, digest } => {
+            let selector = if *last_run { Some("last".to_string()) } else { run.clone() };
+            cmd_notify(settings, selector.as_deref(), *digest, cli.format).await
         }
 
         Commands::Config { cmd } => cmd_config(cmd.clone(), settings, cli.format),
@@ -586,6 +623,45 @@ fn summary_counts(results: &[TestResult]) -> serde_json::Value {
         "cancelled": count(TestStatus::Cancelled),
         "duration_ms": results.iter().map(|r| r.duration_ms).sum::<u64>(),
     })
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+async fn cmd_doctor(settings: &Settings, local: bool, format: OutputFormat) -> CmdResult {
+    use automated_flywheel_setup_checker::doctor::{render_human, run_doctor, DoctorOptions};
+    let opts = DoctorOptions {
+        skip_docker: local,
+        unknown_keys: settings.unknown_keys.clone(),
+        config_path: settings.config_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+    };
+    let report = run_doctor(&settings.config, &opts).await;
+    match format {
+        OutputFormat::Human => print!("{}", render_human(&report)),
+        OutputFormat::Json => println!("{}", to_json(&with_kind("doctor", &report)?, true)),
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+            for c in &report.checks {
+                println!("{}", to_json(&with_kind("doctor_check", c)?, false));
+            }
+            let mut summary = serde_json::json!({
+                "passed": report.passed, "warnings": report.warnings, "failed": report.failed, "skipped": report.skipped, "ok": report.ok(),
+            });
+            summary["kind"] = serde_json::json!("doctor_summary");
+            summary["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+            println!("{}", to_json(&summary, false));
+        }
+    }
+    if report.ok() {
+        Ok(())
+    } else {
+        Err(AfscError::Infra(format!("doctor found {} failing check(s)", report.failed)))
+    }
 }
 
 /// Execution order for resolved specs: longest-first (historical median duration, unknown first),
@@ -745,7 +821,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     let specs = order_specs(specs, config.execution.order, &checksums_path, &config.general.results_dir());
 
     let backend_name = if options.local { "local" } else { "docker" };
-    let header = RunHeader {
+    let mut header = RunHeader {
         run_id: run_id.clone(),
         started_at: command_started_at,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -770,6 +846,15 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         installer_count: enabled.len(),
         dry_run: options.dry_run,
         allow_file_urls: config.general.allow_file_urls,
+        image_id: None,
+        run_as_root: !options.local && (config.docker.run_as_root || !config.docker.prepare),
+        deadline_seconds: config.execution.run_deadline_seconds,
+        environment: Some(serde_json::json!({
+            "host": hostname(),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "tool_version": env!("CARGO_PKG_VERSION"),
+        })),
     };
     let run_header = with_kind("run", &header)?;
 
@@ -856,6 +941,31 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         }
     }
 
+    // Build the prepared image once, up front (workers would otherwise all wait on the build
+    // lock), and record what actually ran in the header.
+    if !options.local {
+        let manager = ContainerManager::try_new(ContainerConfig {
+            image: config.docker.image.clone(),
+            prepare: config.docker.prepare,
+            build_timeout_seconds: config.docker.build_timeout_seconds,
+            rebuild: options.rebuild_base,
+            ..Default::default()
+        })
+        .map_err(infra)?
+        .with_pull_policy(PullPolicy::parse_policy(&config.docker.pull_policy));
+        manager.ensure_image().await.map_err(infra)?;
+        header.image_id = manager.image_id().await;
+        if let Ok(v) = manager.docker().version().await {
+            if let Some(env) = header.environment.as_mut().and_then(|e| e.as_object_mut()) {
+                env.insert("docker_version".into(), serde_json::json!(v.version));
+                env.insert("docker_os".into(), serde_json::json!(v.os));
+                env.insert("docker_arch".into(), serde_json::json!(v.arch));
+                env.insert("docker_kernel".into(), serde_json::json!(v.kernel_version));
+            }
+        }
+    }
+    let run_header = with_kind("run", &header)?;
+
     // Structured event log (audit trail); failures never abort the run.
     let mut event_log = match automated_flywheel_setup_checker::reporting::EventLog::open(
         &config.general.log_dir_path(),
@@ -918,7 +1028,19 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             memory_limit: parse_memory_limit(&config.docker.memory_limit),
             cpu_quota: Some(config.docker.cpu_quota),
             timeout_seconds: options.timeout,
-            volumes: Vec::new(),
+            volumes: config
+                .docker
+                .volumes
+                .iter()
+                .filter_map(|spec| {
+                    // host:container[:ro] -> (host[:ro], container)
+                    let mut parts = spec.splitn(3, ':');
+                    let host = parts.next()?.to_string();
+                    let container = parts.next()?.to_string();
+                    let mode = parts.next().map(|m| format!(":{m}")).unwrap_or_default();
+                    Some((format!("{host}{mode}"), container))
+                })
+                .collect(),
             environment: Vec::new(),
             labels: vec![("afsc.run_id".to_string(), run_id.clone())],
             prepare: config.docker.prepare,
@@ -1235,8 +1357,8 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
 
     let started_at = results.first().map(|r| r.started_at).unwrap_or(command_started_at);
     match persist_metrics_snapshot(
-        &config.general.metrics_path(),
-        &results,
+        &config.general.data_dir_path(),
+        config.monitoring.stale_after_seconds,
         options.remediate && any_failed,
         started_at,
     ) {
@@ -1248,13 +1370,15 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         }
     }
 
+    // Notifications work from the persisted run so `notify --last-run` reproduces them exactly.
     if config.notifications.enabled && !signalled {
-        let notifier = automated_flywheel_setup_checker::reporting::Notifier::new(
-            config.notifications.to_internal(),
-        );
-        let (title, body) = build_notification_summary(&results, &run_id, started_at);
-        if let Err(error) = notifier.notify(&title, &body, any_failed).await {
-            tracing::warn!(error = %error, "Notification delivery failed");
+        let history = History::load(&config.general.results_dir()).unwrap_or_default();
+        if let Some(run) = history.find(&run_id) {
+            let outcome = dispatch_notification(config, &history, run, false).await;
+            if let Some(log) = event_log.as_mut() {
+                log.event("notification", outcome);
+                log.flush();
+            }
         }
     }
 
@@ -1367,8 +1491,6 @@ fn cmd_status(
     diff: &[String],
     format: OutputFormat,
 ) -> CmdResult {
-    use automated_flywheel_setup_checker::reporting::{MetricsExporter, MetricsSnapshot};
-
     let config = &settings.config;
 
     if let Some(installer) = history_of {
@@ -1379,10 +1501,12 @@ fn cmd_status(
     }
 
     if matches!(format, OutputFormat::Prometheus) {
-        let mut snapshot = MetricsSnapshot::load_or_default(&config.general.metrics_path());
-        snapshot.reset_if_stale();
-        let exporter = MetricsExporter::from_snapshot("afsc", &snapshot);
-        print!("{}", exporter.export());
+        let report = automated_flywheel_setup_checker::reporting::MetricsReport::from_data_dir(
+            &config.general.data_dir_path(),
+            chrono::Utc::now(),
+            config.monitoring.stale_after_seconds,
+        )?;
+        print!("{}", report.to_prometheus());
         return Ok(());
     }
 
@@ -1719,10 +1843,7 @@ fn cmd_status_diff(config: &Config, a: &str, b: &str, format: OutputFormat) -> C
             }
         }
         OutputFormat::Json => {
-            let mut output = serde_json::to_value(&diff)?;
-            output["kind"] = serde_json::json!("diff");
-            output["schema_version"] = serde_json::json!(SCHEMA_VERSION);
-            println!("{}", to_json(&output, true));
+            println!("{}", to_json(&with_kind("diff", &diff)?, true));
         }
         OutputFormat::Jsonl | OutputFormat::Prometheus => {
             for c in &diff.changes {
@@ -1955,6 +2076,19 @@ async fn cmd_validate(
             exit_code = 4;
             drift_summary.push(format!("{mismatched} checksum mismatch(es)"));
         }
+
+        // Persist for metrics (`afsc_checksum_drift_total`) and doctor.
+        let validation = automated_flywheel_setup_checker::reporting::ValidationReport {
+            checked_at: Some(chrono::Utc::now()),
+            checksums_path: checksums_path.to_string_lossy().to_string(),
+            total: hash_results.len() as u64,
+            matched: matched as u64,
+            mismatched: hash_results.iter().filter(|r| !r.matches && r.error.is_none()).map(|r| r.name.clone()).collect(),
+            unreachable: hash_results.iter().filter(|r| !r.matches && r.error.is_some()).map(|r| r.name.clone()).collect(),
+        };
+        if let Err(e) = validation.save(&config.general.data_dir_path()) {
+            tracing::warn!(error = %e, "Failed to persist validation report");
+        }
     }
 
     report["exit_code"] = serde_json::json!(exit_code);
@@ -2116,71 +2250,270 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
 }
 
 fn persist_metrics_snapshot(
-    path: &std::path::Path,
-    results: &[automated_flywheel_setup_checker::runner::TestResult],
+    data_dir: &std::path::Path,
+    stale_after_seconds: u64,
     remediation_attempted: bool,
     started_at: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<std::path::PathBuf> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    use automated_flywheel_setup_checker::reporting::{MetricsReport, MetricsSnapshot, WINDOW};
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join("metrics.json");
+    let now = chrono::Utc::now();
 
-    let mut snapshot =
-        automated_flywheel_setup_checker::reporting::MetricsSnapshot::load_or_default(path);
-    snapshot.reset_if_stale();
-
-    for result in results {
-        snapshot.record_test(result.success);
-    }
-
+    // Remediation attempts are the one thing not derivable from result files: carry them over
+    // while the previous snapshot is inside the window.
+    let previous = MetricsSnapshot::load(&path).ok().filter(|s| now - s.snapshot_time <= WINDOW);
+    let mut remediations = previous.map(|s| s.total_remediations_24h).unwrap_or(0);
     if remediation_attempted {
-        snapshot.record_remediation();
+        remediations += 1;
     }
 
-    let uptime_seconds = (chrono::Utc::now() - started_at).num_seconds().max(0) as u64;
-    snapshot.set_uptime(uptime_seconds);
-    snapshot.save(path)?;
-
-    Ok(path.to_path_buf())
+    let report = MetricsReport::from_data_dir(data_dir, now, stale_after_seconds)?;
+    let uptime_seconds = (now - started_at).num_seconds().max(0) as u64;
+    report.snapshot(remediations, uptime_seconds).save(&path)?;
+    Ok(path)
 }
 
-fn build_notification_summary(
-    results: &[automated_flywheel_setup_checker::runner::TestResult],
-    run_id: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
-) -> (String, String) {
-    let passed = results.iter().filter(|result| result.success).count();
-    let failed = results.iter().filter(|result| !result.success).count();
-    let total = results.len();
+/// Build the notification for a persisted run: Markdown body (GitHub) plus structured
+/// failures and summary fields (Slack). Captured hints are redacted.
+fn build_notification(
+    run: &automated_flywheel_setup_checker::reporting::LoadedRun,
+    assessments: &std::collections::BTreeMap<String, automated_flywheel_setup_checker::reporting::Assessment>,
+    kind: &str,
+) -> automated_flywheel_setup_checker::reporting::Notification {
+    use automated_flywheel_setup_checker::reporting::{is_failure_status, redact, FailureLine, Notification};
 
-    let title = if failed > 0 {
-        format!("AFSC: {failed} failures in {total} tests")
-    } else {
-        format!("AFSC: {passed}/{total} passed")
+    let short: String = run.run_id().chars().take(8).collect();
+    let total = run.entries.len();
+    let passed = run.entries.iter().filter(|e| e.status == "passed").count();
+    let skipped = run.entries.iter().filter(|e| e.status == "skipped").count();
+    let failing: Vec<_> = run.entries.iter().filter(|e| is_failure_status(&e.status)).collect();
+    let title = match kind {
+        "recovered" => format!("AFSC: all {total} installers passing again (run {short})"),
+        "failure" => format!("AFSC: {} of {total} installers failing (run {short})", failing.len()),
+        _ => format!("AFSC: {passed}/{total} passed (run {short})"),
     };
-
-    let mut body = format!(
-        "Run ID: {run_id}\nStarted: {}\nPassed: {passed}\nFailed: {failed}\nTotal: {total}",
-        started_at.to_rfc3339()
-    );
-
-    let failures: Vec<String> = results
+    let mut body = render_run(run, assessments);
+    body.push_str(&format!("\nRun id: `{}`  \nResults file: `{}`\n", run.run_id(), run.info.path.display()));
+    let failures = failing
         .iter()
-        .filter(|result| !result.success)
-        .take(5)
-        .map(|result| {
-            let category =
-                result.error.as_ref().map(|error| error.category.as_str()).unwrap_or("unknown");
-            format!("- {} ({category})", result.installer_name)
+        .map(|e| FailureLine {
+            installer: e.installer_name.clone(),
+            status: e.status.clone(),
+            category: e.error_classification.as_ref().map(|c| c.category.clone()).unwrap_or_else(|| "unknown".into()),
+            severity: e.error_classification.as_ref().map(|c| c.severity.clone()).unwrap_or_default(),
+            duration_ms: e.duration_ms,
+            attempts: e.attempts.len().max(1),
+            hint: redact(e.stderr_tail.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")),
         })
         .collect();
+    let mut summary_fields = vec![
+        ("Passed".to_string(), passed.to_string()),
+        ("Failed".to_string(), failing.len().to_string()),
+        ("Skipped".to_string(), skipped.to_string()),
+        ("Started (UTC)".to_string(), run.started_at().format("%Y-%m-%d %H:%M").to_string()),
+    ];
+    if let Some(h) = &run.header {
+        summary_fields.push(("Backend".to_string(), format!("{}{}", h.backend, h.image.as_ref().map(|i| format!(" ({i})")).unwrap_or_default())));
+    }
+    Notification {
+        title,
+        body_markdown: body,
+        is_failure: !failing.is_empty(),
+        run_id: run.run_id().to_string(),
+        summary_fields,
+        failures,
+        kind: kind.to_string(),
+    }
+}
 
-    if !failures.is_empty() {
-        body.push_str("\n\nFailures:\n");
-        body.push_str(&failures.join("\n"));
+fn pending_digest_path(config: &Config) -> PathBuf {
+    config.general.data_dir_path().join("notify").join("pending.jsonl")
+}
+
+/// Decide per `notifications.mode` and send. `force` bypasses the mode (explicit `notify`).
+/// Returns a JSON document describing what happened (also written to the event log).
+async fn dispatch_notification(
+    config: &Config,
+    history: &History,
+    run: &automated_flywheel_setup_checker::reporting::LoadedRun,
+    force: bool,
+) -> serde_json::Value {
+    use automated_flywheel_setup_checker::config::NotificationMode;
+    use automated_flywheel_setup_checker::reporting::Notifier;
+
+    let failing_now = run.failing_set();
+    let previous = history.previous(run.run_id());
+    let previously_failing = previous.map(|p| p.failing_set()).unwrap_or_default();
+    let kind = if failing_now.is_empty() {
+        if previously_failing.is_empty() { "success" } else { "recovered" }
+    } else {
+        "failure"
+    };
+    let mode = config.notifications.mode;
+    let mode_name = format!("{mode:?}").to_lowercase();
+
+    let decision = if force {
+        "send"
+    } else {
+        match mode {
+            NotificationMode::EveryRun => "send",
+            NotificationMode::OnChange => {
+                if previous.is_some() && previously_failing == failing_now {
+                    "unchanged"
+                } else {
+                    "send"
+                }
+            }
+            NotificationMode::DailyDigest => {
+                let path = pending_digest_path(config);
+                let line = serde_json::json!({
+                    "run_id": run.run_id(),
+                    "started_at": run.started_at(),
+                    "total": run.entries.len(),
+                    "failing": failing_now,
+                    "path": run.info.path.to_string_lossy(),
+                });
+                let queued = path
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .and_then(|r| r.ok())
+                    .and_then(|_| {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new().create(true).append(true).open(&path).ok().and_then(|mut f| writeln!(f, "{line}").ok())
+                    })
+                    .is_some();
+                if queued { "queued" } else { "queue_failed" }
+            }
+        }
+    };
+
+    if decision != "send" {
+        tracing::info!(mode = %mode_name, decision, kind, "Notification not sent");
+        return serde_json::json!({ "mode": mode_name, "decision": decision, "kind": kind, "run_id": run.run_id() });
     }
 
-    (title, body)
+    let assessments: std::collections::BTreeMap<_, _> = if history.len() > 1 {
+        run.entries.iter().map(|e| (e.installer_name.clone(), history.assess(&e.installer_name))).collect()
+    } else {
+        Default::default()
+    };
+    let notification = build_notification(run, &assessments, kind);
+    let notifier = Notifier::new(config.notifications.to_internal());
+    match notifier.send(&notification).await {
+        Ok(outcome) => {
+            tracing::info!(kind, github = ?outcome.github, slack = ?outcome.slack, "Notification sent");
+            serde_json::json!({
+                "mode": mode_name,
+                "decision": "sent",
+                "kind": kind,
+                "run_id": run.run_id(),
+                "title": notification.title,
+                "github": outcome.github,
+                "github_issue": outcome.github_issue,
+                "slack": outcome.slack,
+            })
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Notification delivery failed");
+            serde_json::json!({ "mode": mode_name, "decision": "failed", "kind": kind, "run_id": run.run_id(), "error": e.to_string() })
+        }
+    }
+}
+
+/// `notify --last-run | --run <id> | --digest`.
+async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, format: OutputFormat) -> CmdResult {
+    use automated_flywheel_setup_checker::reporting::{Notification, Notifier};
+
+    let config = &settings.config;
+    if !config.notifications.enabled {
+        return Err(AfscError::Config(
+            "notifications are disabled: set [notifications].enabled = true (or AFSC_NOTIFICATIONS_ENABLED=1)".into(),
+        ));
+    }
+    let history = History::load(&config.general.results_dir())?;
+
+    let outcome = if digest {
+        let path = pending_digest_path(config);
+        let pending: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        if pending.is_empty() {
+            serde_json::json!({ "kind": "notify", "schema_version": SCHEMA_VERSION, "decision": "nothing_pending", "runs": 0 })
+        } else {
+            let last = &pending[pending.len() - 1];
+            let last_run = last["run_id"].as_str().and_then(|id| history.find(id));
+            let failing: std::collections::BTreeMap<String, String> = last["failing"]
+                .as_object()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("unknown").to_string())).collect())
+                .unwrap_or_default();
+            let title = format!("AFSC daily digest: {} run(s), {} installer(s) currently failing", pending.len(), failing.len());
+            let mut body = format!("## AFSC daily digest — {} run(s)\n\n| run | started (UTC) | total | failing |\n|---|---|---|---|\n", pending.len());
+            for p in &pending {
+                let started = p["started_at"].as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                let names: Vec<&str> = p["failing"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+                body.push_str(&format!("| `{}` | {} | {} | {} |\n", p["run_id"].as_str().unwrap_or("").chars().take(8).collect::<String>(), started, p["total"], if names.is_empty() { "—".to_string() } else { names.join(", ") }));
+            }
+            let mut notification = match last_run {
+                Some(run) => {
+                    let mut n = build_notification(run, &Default::default(), if failing.is_empty() { "success" } else { "failure" });
+                    body.push_str("\n### Latest run\n\n");
+                    body.push_str(&n.body_markdown);
+                    n.body_markdown = body;
+                    n
+                }
+                None => Notification {
+                    title: title.clone(),
+                    body_markdown: body,
+                    is_failure: !failing.is_empty(),
+                    run_id: last["run_id"].as_str().unwrap_or("").to_string(),
+                    summary_fields: Vec::new(),
+                    failures: Vec::new(),
+                    kind: "digest".into(),
+                },
+            };
+            notification.title = title;
+            notification.kind = "digest".into();
+            let notifier = Notifier::new(config.notifications.to_internal());
+            let sent = notifier.send(&notification).await.map_err(AfscError::Other)?;
+            // Keep the record: rotate the queue instead of deleting it.
+            let rotated = path.with_file_name(format!("sent_{}.jsonl", chrono::Utc::now().format("%Y%m%dT%H%M%S")));
+            if let Err(e) = std::fs::rename(&path, &rotated) {
+                tracing::warn!(error = %e, "Failed to rotate the digest queue");
+            }
+            serde_json::json!({
+                "kind": "notify", "schema_version": SCHEMA_VERSION, "decision": "sent", "digest": true,
+                "runs": pending.len(), "title": notification.title,
+                "github": sent.github, "github_issue": sent.github_issue, "slack": sent.slack,
+                "queue": rotated.to_string_lossy(),
+            })
+        }
+    } else {
+        let selector = selector.unwrap_or("last");
+        let run = history
+            .find(selector)
+            .ok_or_else(|| AfscError::Usage(format!("no run matches {selector:?} (try: status --list)")))?;
+        let mut doc = dispatch_notification(config, &history, run, true).await;
+        doc["kind"] = serde_json::json!("notify");
+        doc["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+        doc
+    };
+
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "Notification: {}{}{}{}",
+                outcome["decision"].as_str().unwrap_or("?"),
+                outcome["title"].as_str().map(|t| format!(" — {t}")).unwrap_or_default(),
+                outcome["github"].as_str().map(|g| format!(" [github: {g}{}]", outcome["github_issue"].as_u64().map(|n| format!(" #{n}")).unwrap_or_default())).unwrap_or_default(),
+                outcome["slack"].as_str().map(|s| format!(" [slack: {s}]")).unwrap_or_default(),
+            );
+        }
+        _ => println!("{}", to_json(&outcome, matches!(format, OutputFormat::Json))),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2226,6 +2559,43 @@ mod tests {
         let o = cli_overrides(&cli);
         assert_eq!(o.image.as_deref(), Some("ubuntu:24.04"));
         assert!(o.fail_fast.is_none());
+    }
+
+    /// Every ExecStart/ExecStopPost in the shipped unit templates must parse with this CLI.
+    #[test]
+    fn systemd_unit_templates_parse_with_this_cli() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("systemd");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "in") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let rendered = text
+                .replace("@BIN@", "afsc")
+                .replace("@USER@", "svc")
+                .replace("@DATA_DIR@", "/var/lib/flywheel-checker")
+                .replace("@LOG_DIR@", "/var/log/flywheel-checker")
+                .replace("@CONFIG_DIR@", "/etc/flywheel-checker")
+                .replace("@CONFIG@", "/etc/flywheel-checker/config.toml");
+            assert!(!rendered.contains('@'), "unrendered placeholder in {}", path.display());
+            assert!(!rendered.contains("NOTIFY_SOCKET"), "{}: never pin NOTIFY_SOCKET", path.display());
+            assert!(!rendered.contains("IOReadBandwidthMax"), "{}: no device pins", path.display());
+            for line in rendered.lines() {
+                let Some(cmd) = line.strip_prefix("ExecStart=").or_else(|| line.strip_prefix("ExecStopPost=")) else { continue };
+                let argv: Vec<&str> = cmd.split_whitespace().collect();
+                assert_eq!(argv[0], "afsc", "{}: {line}", path.display());
+                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{}: {line}\n{e}", path.display()));
+                checked += 1;
+            }
+            if path.file_name().is_some_and(|n| n != "automated-flywheel-checker-serve.service.in") {
+                assert!(rendered.contains("ReadWritePaths=/var/lib/flywheel-checker /var/log/flywheel-checker"), "{}", path.display());
+                assert!(rendered.contains("SupplementaryGroups=docker"), "{}", path.display());
+                assert!(rendered.contains("RestrictAddressFamilies=AF_UNIX"), "{}: docker socket needs AF_UNIX", path.display());
+            }
+        }
+        assert!(checked >= 5, "expected ExecStart lines in the templates, checked {checked}");
     }
 
     #[test]

@@ -1,133 +1,58 @@
 #!/bin/bash
-# ============================================================
-# E2E Test: Real Installer Run (br-74o.8)
+# E2E (Docker, real installers): run real ACFS installers from a checkout inside the prepared
+# image and assert the loop's guarantees: every installer gets a verdict, checksums are verified
+# before execution, passing installers report a version, the non-root user is used, and no
+# container is left behind. Upstream drift (checksum_mismatch) is a legitimate verdict.
 #
-# Exercises the full workflow with real ACFS installers:
-#   1. Validate checksums.yaml
-#   2. Run 2 fast installers in parallel with Docker
-#   3. Verify JSONL output format
-#   4. Verify status command shows results
-#
-# Requirements: Docker, ACFS repo at default path, built binary
-# ============================================================
+#   AFSC_ACFS_REPO=/path/to/agentic_coding_flywheel_setup   (default: /data/projects/...)
+#   E2E_REAL_INSTALLERS="zoxide uv"                          (space separated)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/assertions.sh"
+source "$SCRIPT_DIR/../lib/helpers.sh"
 
-test_name="real_installer_run"
+setup_test "real_installer_run"
+ensure_binary
+require_docker
+repo=$(acfs_repo_path)
+[[ -n "$repo" ]] || skip_test "no ACFS checkout (set AFSC_ACFS_REPO)"
+read -r -a installers <<< "${E2E_REAL_INSTALLERS:-zoxide uv}"
 
-# Check prerequisites
-check_docker() {
-    if ! docker info >/dev/null 2>&1; then
-        echo "SKIP: Docker not available"
-        return 1
-    fi
-    return 0
-}
+write_config
+code=0
+HOME="$TEST_TMP/home" "$CHECKER_BINARY" --acfs-repo "$repo" --data-dir "$TEST_TMP/data" \
+    check "${installers[@]}" --parallel "${#installers[@]}" --format jsonl \
+    > "$TEST_TMP/output/run.jsonl" 2> "$TEST_TMP/output/run.err" || code=$?
 
-check_acfs_repo() {
-    local acfs_path="/data/projects/agentic_coding_flywheel_setup"
-    if [ ! -f "${acfs_path}/checksums.yaml" ]; then
-        echo "SKIP: ACFS repo not found at ${acfs_path}"
-        return 1
-    fi
-    return 0
-}
+header=$(jq -c 'select(.kind == "run")' "$TEST_TMP/output/run.jsonl")
+assert_eq "$(echo "$header" | jq -r .backend)" "docker" "docker backend"
+assert_eq "$(echo "$header" | jq -r .user)" "afsc-user" "non-root user"
+assert_neq "$(echo "$header" | jq -r '.image_id // empty')" "" "image id recorded"
+summary=$(jsonl_summary "$TEST_TMP/output/run.jsonl")
+assert_eq "$(echo "$summary" | jq -r .total)" "${#installers[@]}" "every installer got a verdict"
+assert_eq "$(echo "$summary" | jq -r .interrupted)" "false" "not interrupted"
 
-# Test 1: Validate checksums.yaml
-test_validate() {
-    echo "  [1/4] Validating checksums.yaml..."
-    local output
-    output=$("${BINARY}" validate 2>&1)
-    local rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "  FAIL: validate returned exit code $rc"
-        echo "  Output: $output"
-        return 1
-    fi
-    if echo "$output" | grep -q "is valid"; then
-        echo "  PASS: checksums.yaml is valid"
-        return 0
-    else
-        echo "  FAIL: unexpected validate output"
-        echo "  Output: $output"
-        return 1
-    fi
-}
-
-# Test 2: Run installers with --local (fast, no Docker needed)
-test_check_local() {
-    echo "  [2/4] Running check with --local --dry-run..."
-    local output
-    output=$("${BINARY}" check --dry-run --local 2>&1)
-    local rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "  FAIL: check --dry-run returned exit code $rc"
-        echo "  Output: $output"
-        return 1
-    fi
-    if echo "$output" | grep -q "Would check"; then
-        echo "  PASS: dry-run shows planned tests"
-        return 0
-    else
-        echo "  FAIL: unexpected dry-run output"
-        return 1
-    fi
-}
-
-# Test 3: Run check with JSONL output (dry-run)
-test_jsonl_format() {
-    echo "  [3/4] Verifying JSONL output format..."
-    local output
-    output=$("${BINARY}" check --dry-run --format jsonl 2>&1)
-    local rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "  FAIL: check --dry-run --format jsonl returned exit code $rc"
-        return 1
-    fi
-    # Should be valid JSON
-    if echo "$output" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-        echo "  PASS: JSONL output is valid JSON"
-        return 0
-    else
-        echo "  FAIL: output is not valid JSON"
-        echo "  Output: $output"
-        return 1
-    fi
-}
-
-# Test 4: Status command
-test_status() {
-    echo "  [4/4] Checking status command..."
-    local output
-    output=$("${BINARY}" status 2>&1)
-    local rc=$?
-    # Status might show "no runs" if we haven't done a real check yet
-    if [ $rc -eq 0 ]; then
-        echo "  PASS: status command succeeded"
-        return 0
-    else
-        echo "  FAIL: status returned exit code $rc"
-        return 1
-    fi
-}
-
-# Main
-run_test() {
-    if ! check_acfs_repo; then
-        return 0  # Skip, not fail
-    fi
-
-    local passed=0
-    local failed=0
-
-    if test_validate; then ((passed++)); else ((failed++)); fi
-    if test_check_local; then ((passed++)); else ((failed++)); fi
-    if test_jsonl_format; then ((passed++)); else ((failed++)); fi
-    if test_status; then ((passed++)); else ((failed++)); fi
-
-    echo ""
-    echo "  Results: $passed passed, $failed failed"
-
-    if [ $failed -gt 0 ]; then
-        return 1
-    fi
-    return 0
-}
+for name in "${installers[@]}"; do
+    result=$(jsonl_result "$TEST_TMP/output/run.jsonl" "$name")
+    status=$(echo "$result" | jq -r .status)
+    category=$(echo "$result" | jq -r '.error.category // empty')
+    case "$status" in
+        passed)
+            assert_eq "$(echo "$result" | jq -r .checksum_state)" "verified" "$name checksum verified"
+            echo "  $name: passed ($(echo "$result" | jq -r '.installed_version // "no version"'), $(echo "$result" | jq -r .duration_ms) ms)"
+            ;;
+        failed)
+            if [[ "$category" == "checksum_mismatch" ]]; then
+                assert_eq "$(echo "$result" | jq -r .exit_code)" "99" "$name refused before execution"
+                echo "  $name: upstream drift (checksum mismatch) — installer NOT executed"
+            else
+                echo "  $name: failed ($category)"; echo "$result" | jq -r .stderr | tail -5
+                exit 1
+            fi
+            ;;
+        *) echo "  $name: unexpected status $status"; exit 1 ;;
+    esac
+done
+assert_eq "$(docker ps -a -q --filter label=afsc.managed=true --filter "label=afsc.run_id=$(echo "$header" | jq -r .run_id)" | wc -l | tr -d ' ')" "0" "no leaked containers"
+HOME="$TEST_TMP/home" "$CHECKER_BINARY" --data-dir "$TEST_TMP/data" status --format markdown
+echo "real_installer_run: PASSED (exit $code)"

@@ -27,12 +27,12 @@ fn check_local_jsonl_is_pure_and_every_failure_is_classified() {
     assert_eq!(results.len(), 5);
 
     let good = find_result(&lines, "good_tool");
-    assert_eq!(good["status"], "Passed");
+    assert_eq!(good["status"], "passed");
     assert!(good["error"].is_null());
     assert_eq!(good["checksum_result"]["matches"], true);
 
     let dep = find_result(&lines, "dep_fail_tool");
-    assert_eq!(dep["status"], "Failed");
+    assert_eq!(dep["status"], "failed");
     assert_eq!(dep["exit_code"], 100);
     assert_eq!(dep["error"]["category"], "dependency");
     assert_eq!(dep["checksum_result"]["matches"], true, "verified before it failed");
@@ -138,15 +138,15 @@ fn check_records_full_attempt_history_for_flaky_installer() {
     assert_eq!(out.status.code(), Some(0), "recovers on the second attempt");
     let lines = jsonl_lines(&out);
     let r = find_result(&lines, "flaky_tool");
-    assert_eq!(r["status"], "Passed");
+    assert_eq!(r["status"], "passed");
     assert_eq!(r["attempt"], 2);
     assert_eq!(r["max_attempts"], 3);
     let attempts = r["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0]["status"], "Failed");
+    assert_eq!(attempts[0]["status"], "failed");
     assert_eq!(attempts[0]["exit_code"], 7);
     assert!(attempts[0]["stderr_tail"].as_str().unwrap().contains("Connection refused"));
-    assert_eq!(attempts[1]["status"], "Passed");
+    assert_eq!(attempts[1]["status"], "passed");
     assert!(attempts[1]["waited_before_ms"].as_u64().unwrap() >= 1000);
     assert_eq!(r["retries"].as_array().unwrap().len(), 1);
     let total = r["duration_ms"].as_u64().unwrap();
@@ -205,10 +205,10 @@ fn parallel_fail_fast_cancels_in_flight_and_skips_queued() {
     assert_eq!(out.status.code(), Some(1));
     assert!(elapsed.as_secs() < 12, "fail-fast must stop in-flight installers: {elapsed:?}");
     let lines = jsonl_lines(&out);
-    assert_eq!(find_result(&lines, "a_fail")["status"], "Failed");
+    assert_eq!(find_result(&lines, "a_fail")["status"], "failed");
     for name in ["b_slow", "c_slow", "d_queued"] {
         let s = find_result(&lines, name)["status"].as_str().unwrap().to_string();
-        assert!(s == "Cancelled" || s == "Skipped", "{name}: {s}");
+        assert!(s == "cancelled" || s == "skipped", "{name}: {s}");
     }
     let summary = lines.last().unwrap();
     let cancelled = summary["cancelled"].as_u64().unwrap();
@@ -283,29 +283,26 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     fx.add_sleeper("slow_b", 30);
     fx.add_pass("zz_queued");
 
-    let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
-    let child = std::process::Command::new(bin)
-        .env("HOME", &fx.home)
-        .env("AFSC_ALLOW_LOCAL", "1")
-        .arg("--config")
-        .arg(&fx.config)
-        .args(["check", "--local", "--format", "jsonl"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    // Signal handlers are installed before the header is printed; give the sleepers a moment
+    // to actually start so the cancellation exercises in-flight work.
+    let (mut child, mut reader, header) = fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
+    std::thread::sleep(Duration::from_millis(500));
     let start = Instant::now();
     let status = std::process::Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
-    let out = child.wait_with_output().unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut reader, &mut rest).unwrap();
+    let mut err = String::new();
+    std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
+    let exit = child.wait().unwrap();
     assert!(start.elapsed() < Duration::from_secs(10), "cancellation must be prompt");
-    assert_eq!(out.status.code(), Some(143), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(exit.code(), Some(143), "stderr: {err}");
 
-    let lines = jsonl_lines(&out);
+    let mut lines = vec![header];
+    lines.extend(rest.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()));
     let summary = lines.last().unwrap();
     assert_eq!(summary["kind"], "summary");
     assert_eq!(summary["interrupted"], true);
@@ -315,11 +312,11 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     // submission order), so it is allowed to have passed, been cancelled, or been skipped.
     for name in ["slow_a", "slow_b"] {
         let r = find_result(&lines, name);
-        assert_eq!(r["status"], "Cancelled", "{r}");
+        assert_eq!(r["status"], "cancelled", "{r}");
         assert_eq!(r["error"]["category"], "cancelled");
     }
     let third = find_result(&lines, "zz_queued");
-    assert!(matches!(third["status"].as_str().unwrap(), "Passed" | "Cancelled" | "Skipped"), "{third}");
+    assert!(matches!(third["status"].as_str().unwrap(), "passed" | "cancelled" | "skipped"), "{third}");
 
     // Persisted too.
     let status_doc = json_doc(&fx.run(&["status", "--format", "json"]));
@@ -329,20 +326,11 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
 #[test]
 fn concurrent_checks_are_refused_unless_allowed() {
     use std::time::Duration;
+    let _ = Duration::ZERO;
     let mut fx = Fixture::new();
     fx.add_sleeper("slow", 6);
-    let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
-    let first = std::process::Command::new(&bin)
-        .env("HOME", &fx.home)
-        .env("AFSC_ALLOW_LOCAL", "1")
-        .arg("--config")
-        .arg(&fx.config)
-        .args(["check", "--local", "--format", "jsonl"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    // The header is printed only once the run lock is held.
+    let (mut first, mut first_out, _header) = fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
 
     // Second run: refused immediately with exit 3 and the holder's pid.
     let second = fx.run(&["check", "--local", "--format", "jsonl"]);
@@ -353,8 +341,9 @@ fn concurrent_checks_are_refused_unless_allowed() {
     // With --allow-concurrent both complete and both runs are persisted.
     let third = fx.run(&["check", "--local", "--allow-concurrent", "--format", "jsonl"]);
     assert_eq!(third.status.code(), Some(0), "{}", stderr(&third));
-    let out = first.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut first_out, &mut rest).unwrap();
+    assert_eq!(first.wait().unwrap().code(), Some(0), "{rest}");
     let runs = json_doc(&fx.run(&["status", "--list", "--format", "json"]));
     assert_eq!(runs["runs"].as_array().unwrap().len(), 2);
     // Lock released: a plain run works again.
