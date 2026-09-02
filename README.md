@@ -231,6 +231,10 @@ invoked read-only (`--permission-mode plan --tools Read,Grep,Glob`, budget and t
 `[remediation]`); any command it suggests is run through the safety checker and flagged, never
 executed.
 
+Committed baselines of the whole ACFS catalog running in the prepared image live under
+`docs/baseline/` (`scripts/baseline_run.sh` regenerates one: per-installer verdicts, versions,
+durations, peak memory, validation state, and failure tails).
+
 ### `doctor` — Diagnose the Environment
 
 ```bash
