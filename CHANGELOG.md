@@ -33,6 +33,8 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   drive the binary.
 
 ### Changed
+- Dependencies: bollard 0.16 → 0.21 (query-parameter builders, `ContainerCreateBody`), reqwest
+  0.12 → 0.13 (`rustls` feature), similar 2 → 3.
 - Statuses serialize lowercase everywhere (`passed`, `failed`, `timedout`, `cancelled`, `skipped`).
 - stdout carries only data; logs go to stderr (`--log-format json` available).
 - `--local` requires a terminal, `--yes` or `AFSC_ALLOW_LOCAL=1`.
