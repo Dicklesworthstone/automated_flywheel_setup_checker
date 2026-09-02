@@ -208,8 +208,12 @@ impl ContainerManager {
 
     /// Fallible constructor: returns an error instead of panicking on a bad `DOCKER_HOST`.
     pub fn try_new(config: ContainerConfig) -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults().with_context(|| {
-            format!("Failed to construct Docker client for {}", docker_endpoint())
+        let docker = Docker::connect_with_local_defaults().map_err(|e| {
+            anyhow::anyhow!(
+                "Docker daemon unreachable at {}: {}. Start Docker or use --local",
+                docker_endpoint(),
+                e
+            )
         })?;
         Ok(Self { config, docker: Arc::new(docker), pull_policy: PullPolicy::IfNotPresent })
     }
@@ -238,8 +242,13 @@ impl ContainerManager {
 
     /// Verify the daemon answers using a fresh default client.
     pub async fn preflight_default() -> Result<()> {
-        let docker = Docker::connect_with_local_defaults().with_context(|| {
-            format!("Failed to construct Docker client for {}", docker_endpoint())
+        // bollard 0.21 fails here (not at ping) when the socket does not exist; same wording.
+        let docker = Docker::connect_with_local_defaults().map_err(|e| {
+            anyhow::anyhow!(
+                "Docker daemon unreachable at {}: {}. Start Docker or use --local",
+                docker_endpoint(),
+                e
+            )
         })?;
         docker.ping().await.map(|_| ()).map_err(|e| {
             anyhow::anyhow!(
