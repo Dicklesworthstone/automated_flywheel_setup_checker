@@ -24,7 +24,7 @@
 
 | Feature | What It Does |
 |---------|--------------|
-| **Isolated Docker Testing** | Each installer runs in a fresh `ubuntu:22.04` container — no host contamination |
+| **Isolated Docker Testing** | Each installer runs in a fresh `ubuntu:24.04` container (the ACFS target release) — no host contamination |
 | **Error Classification** | Automatically categorizes failures: network, permission, dependency, configuration, resource |
 | **Parallel Execution** | Run N installer tests concurrently with configurable worker count |
 | **Retry with Backoff** | Transient failures (network timeouts, rate limits) are retried automatically |
@@ -291,7 +291,7 @@ acfs_repo = "/data/projects/agentic_coding_flywheel_setup"
 log_level = "info"   # trace, debug, info, warn, error
 
 [docker]
-image = "ubuntu:22.04"        # Base image for test containers
+image = "ubuntu:24.04"        # Base image for test containers (ACFS targets 24.04+; prebuilt cass/fsfs binaries need glibc 2.38+)
 memory_limit = "2G"           # Per-container memory cap
 cpu_quota = 1.0               # CPU cores per container
 timeout_seconds = 300          # Per-installer timeout (5 min)
@@ -361,7 +361,7 @@ Run `automated_flywheel_setup_checker serve` to expose the HTTP monitoring endpo
 │        │  retry w/ exponential backoff                              │
 │        ▼                                                            │
 │   ┌──────────────────────────────────────────┐                      │
-│   │ Docker Container (ubuntu:22.04)          │                      │
+│   │ Docker Container (ubuntu:24.04)          │                      │
 │   │  → download installer script             │                      │
 │   │  → verify checksum                       │                      │
 │   │  → execute installer                     │                      │
@@ -480,7 +480,7 @@ locks from dead processes are reclaimed automatically.
 - **Network-dependent** — many installers download from the internet. Air-gapped testing isn't currently supported.
 - **Claude remediation is experimental** — auto-fix suggestions require an API key and may not always be actionable. Safety checks prevent dangerous commands.
 - **No post-install validation** — verifies the installer runs successfully but doesn't test that the installed tool actually works correctly.
-- **Single Ubuntu version** — defaults to `ubuntu:22.04`. Testing across multiple Ubuntu versions requires manual config changes.
+- **Single Ubuntu version** — defaults to `ubuntu:24.04` (older bases such as `ubuntu:22.04` make installers that ship glibc 2.38+ binaries, e.g. cass and fsfs, fall back to slow source builds). Testing across multiple Ubuntu versions requires manual config changes.
 - **Local mode available** — use `--local` flag to run installers in temp directories when Docker is unavailable (less isolation but no Docker dependency).
 - **Metrics are snapshot-based** — `serve` and `status --format prometheus` report the persisted metrics snapshot from recent runs; they do not stream live per-installer progress.
 

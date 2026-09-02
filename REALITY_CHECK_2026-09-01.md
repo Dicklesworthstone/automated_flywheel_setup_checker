@@ -1001,9 +1001,18 @@ executing).
 ### Still open
 
 - `C12c` Claude propose/apply (P3, owner sign-off); checksum propose/apply exists and is tested.
-- `C14b` major dependency bumps (bollard 0.21, reqwest 0.13, hyper 1.11, clap 4.6) — now unblocked by the green Docker suite.
 - Cutting the first `v0.1.0` tag (the release workflow is in place).
-- Findings from the full baseline worth acting on in ACFS: 12 pins drifted upstream (atuin, bv, caam, casr, cass, ee, grok, mcp_agent_mail, pi, rust, ubs, uv); fsfs's prebuilt binary needs glibc 2.38+/GLIBCXX 3.4.31 and cannot run on Ubuntu 22.04.
+- Findings from the full baseline worth acting on in ACFS: 12 pins drifted upstream (atuin, bv, caam, casr, cass, ee, grok, mcp_agent_mail, pi, rust, ubs, uv); the ACFS checkout regenerated its checksums later on 2026-09-02, leaving cass and ubs, and the tool's propose mode created branch `afsc/checksum-refresh-20260902-213449` (ubs pin, verified) for the owner to push.
+
+Update 2026-09-02 22:00 UTC: `C14b` is closed (bollard 0.21, reqwest 0.13, similar 3; Docker suite 9/9 and the
+bash Docker scenarios pass on the migrated binary). The fsfs finding turned out to be a checker default, not an
+ACFS bug: ACFS targets Ubuntu 24.04+, and on `ubuntu:22.04` (glibc 2.35) the prebuilt cass and fsfs binaries are
+refused, so their installers start source builds that exceed the timeout. The config default was already 24.04
+but the README example and `docker/Dockerfile.base` said 22.04; all three now agree on 24.04, cass verifies in
+7 s there, and the 24.04 baseline is in `docs/baseline/2026-09-02-ubuntu2404.md` (43 of 48 pass; the base
+image also gained `minisign`, which ACFS installs before the mcp_agent_mail and caam installers). Two facts for
+the owner: the fsfs v1.8.0 release binary needs `GLIBC_2.43`, newer than any Ubuntu LTS, and three pins (cass,
+ubs, srps) drift again after the upstream checksum regeneration.
 
 ### Operational notes
 

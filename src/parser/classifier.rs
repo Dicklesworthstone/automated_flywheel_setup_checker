@@ -204,7 +204,7 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
             severity: ErrorSeverity::Dependency,
             category: "dependency".to_string(),
             suggestion: Some(
-                "The downloaded binary needs a newer glibc/libstdc++ than this base image provides; use a newer base (docker.image) or a build for this platform"
+                "The downloaded binary needs a newer glibc/libstdc++ than this base image provides; use a newer base (docker.image, e.g. ubuntu:24.04) or a build for this platform"
                     .to_string(),
             ),
             retryable: false,
@@ -411,6 +411,12 @@ static PERMISSION_PATTERNS: Patterns = Patterns::new(&[
 
 static DEPENDENCY_PATTERNS: Patterns = Patterns::new(&[
     r"(?i)command not found",
+    // "minisign is required to verify release authenticity but was not found" (mcp_agent_mail,
+    // caam): a verification tool the target host must provide before the installer runs.
+    r"(?i)is required (to|for|by) [^
+]{0,80}(was )?not (found|installed|available)",
+    r"(?i)required tool[^
+]{0,40}(missing|not found)",
     r"(?i)package.*not found",
     r"(?i)unable to locate package",
     r"(?i)no such file or directory",

@@ -97,15 +97,26 @@ fn base_image_installs_a_superset_of_acfs_base_packages() {
     let base_script = repo.join("scripts/generated/install_base.sh");
     let text = std::fs::read_to_string(&base_script)
         .unwrap_or_else(|e| panic!("read {}: {e}", base_script.display()));
-    let acfs = apt_packages(&text);
+    let mut acfs = apt_packages(&text);
     assert!(acfs.contains("curl") && acfs.contains("build-essential"), "parsed ACFS packages: {acfs:?}");
+    // install.sh's "Installing required apt packages" step runs before every tool installer and
+    // is where verification tools such as minisign (mcp_agent_mail, caam) come from.
+    let installer = repo.join("install.sh");
+    let text = std::fs::read_to_string(&installer).unwrap_or_else(|e| panic!("read {}: {e}", installer.display()));
+    let required: BTreeSet<String> = text
+        .lines()
+        .filter(|l| l.contains("Installing required apt packages") && l.contains("install -y"))
+        .flat_map(apt_packages)
+        .collect();
+    assert!(required.contains("minisign"), "parsed ACFS required packages: {required:?}");
+    acfs.extend(required);
 
     let dockerfile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/Dockerfile.base");
     let ours = dockerfile_packages(&std::fs::read_to_string(&dockerfile).unwrap());
     let missing: Vec<&String> = acfs.iter().filter(|p| !ours.contains(*p)).collect();
     assert!(
         missing.is_empty(),
-        "docker/Dockerfile.base lacks packages ACFS installs in install_base.sh: {missing:?} (ACFS list: {acfs:?})"
+        "docker/Dockerfile.base lacks packages ACFS installs in install_base.sh / install.sh (required apt packages): {missing:?} (ACFS list: {acfs:?})"
     );
 }
 

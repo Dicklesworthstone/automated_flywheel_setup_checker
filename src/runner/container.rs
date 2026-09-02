@@ -90,7 +90,7 @@ impl Default for ContainerConfig {
 }
 
 /// Canonical base for the default prepared image.
-pub const CANONICAL_BASE: &str = "ubuntu:22.04";
+pub const CANONICAL_BASE: &str = "ubuntu:24.04";
 
 /// Sanitize an image reference for use inside a tag (`ubuntu:24.04` → `ubuntu-24.04`).
 fn sanitize_for_tag(image: &str) -> String {
@@ -269,7 +269,7 @@ impl ContainerManager {
 
     /// Work out which image containers run: the raw image when `prepare` is off, otherwise the
     /// prepared image derived from the configured base (`afsc-base:latest` means the canonical
-    /// `ubuntu:22.04` base).
+    /// `ubuntu:24.04` base, the ACFS target release).
     pub fn image_plan(&self) -> Result<ImagePlan> {
         if !self.config.prepare {
             return Ok(ImagePlan {
@@ -1001,8 +1001,8 @@ mod tests {
         assert_ne!(h1, h2);
         assert_ne!(h1, h3);
         assert_eq!(h1, template_hash(b"FROM x", "ubuntu:22.04"));
-        assert_eq!(prepared_image_tag("ubuntu:22.04", &h1), format!("afsc-base:{}", &h1[..12]));
-        assert_eq!(prepared_image_tag("ubuntu:24.04", &h2), format!("afsc-prepared:ubuntu-24.04-{}", &h2[..12]));
+        assert_eq!(prepared_image_tag("ubuntu:24.04", &h2), format!("afsc-base:{}", &h2[..12]));
+        assert_eq!(prepared_image_tag("ubuntu:22.04", &h1), format!("afsc-prepared:ubuntu-22.04-{}", &h1[..12]));
         assert_eq!(prepared_image_tag("ghcr.io/org/img:1.0", &h2), format!("afsc-prepared:ghcr.io-org-img-1.0-{}", &h2[..12]));
     }
 
@@ -1015,10 +1015,10 @@ mod tests {
         assert!(plan.run_image.starts_with("afsc-base:"));
         assert_ne!(plan.run_image, ContainerManager::AFSC_BASE_IMAGE, "hash tag, not the alias");
 
-        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:24.04".into(), ..Default::default() });
+        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:22.04".into(), ..Default::default() });
         let plan = mgr.image_plan().unwrap();
-        assert_eq!(plan.base, "ubuntu:24.04");
-        assert!(plan.run_image.starts_with("afsc-prepared:ubuntu-24.04-"));
+        assert_eq!(plan.base, "ubuntu:22.04");
+        assert!(plan.run_image.starts_with("afsc-prepared:ubuntu-22.04-"));
 
         let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:24.04".into(), prepare: false, ..Default::default() });
         let plan = mgr.image_plan().unwrap();

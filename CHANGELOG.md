@@ -35,6 +35,17 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
 ### Changed
 - Dependencies: bollard 0.16 → 0.21 (query-parameter builders, `ContainerCreateBody`), reqwest
   0.12 → 0.13 (`rustls` feature), similar 2 → 3.
+- Default base image is `ubuntu:24.04` everywhere (config default, canonical `afsc-base` tag,
+  `docker/Dockerfile.base`, README examples): ACFS targets 24.04+, and on 22.04 installers that
+  ship glibc 2.38+ binaries (cass, fsfs) fall back to source builds that blow the timeout.
+  `ubuntu:22.04` is still supported as a foreign base (`afsc-prepared:ubuntu-22.04-<hash>`).
+- `remediate checksums` prints the redacted stderr tail and a hint for every failed or timed-out
+  verification instead of a bare status.
+- Base image gains `minisign` and `libsqlite3-dev`, mirroring ACFS's "required apt packages"
+  step (the mcp_agent_mail and caam installers fail closed without minisign); the ACFS drift
+  test now checks that step as well as `install_base.sh`.
+- Classifier: "X is required … but was not found" is a `dependency` failure (golden corpus entry
+  from the real mcp_agent_mail output).
 - Statuses serialize lowercase everywhere (`passed`, `failed`, `timedout`, `cancelled`, `skipped`).
 - stdout carries only data; logs go to stderr (`--log-format json` available).
 - `--local` requires a terminal, `--yes` or `AFSC_ALLOW_LOCAL=1`.

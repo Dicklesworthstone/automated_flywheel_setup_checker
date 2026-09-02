@@ -1029,6 +1029,22 @@ async fn cmd_remediate_checksums(
                     e.drift.as_ref().map(drift_summary).unwrap_or_else(|| "no known-good baseline in the ledger".into()),
                     e.verification.as_ref().map(|v| format!("{}{}", v.status, v.installed_version.as_ref().map(|s| format!(" ({s})")).unwrap_or_default())).unwrap_or_else(|| "not run".into())
                 );
+                // A failed or timed-out verification is only actionable with the installer's last
+                // words; the pin is not refreshed for this entry, so show them here (redacted).
+                if let Some(v) = e.verification.as_ref().filter(|v| !v.passed) {
+                    let tail: Vec<&str> =
+                        v.stderr_tail.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    let last = tail.iter().rev().take(5).rev();
+                    for line in last {
+                        println!("      stderr: {}", automated_flywheel_setup_checker::reporting::redact(line));
+                    }
+                    if v.status == "timedout" {
+                        println!(
+                            "      hint: raise [remediation] timeout_seconds or add an execution profile floor for {} (see acfs_profile.rs)",
+                            e.name
+                        );
+                    }
+                }
                 if let Some(d) = &e.drift {
                     if d.score != automated_flywheel_setup_checker::checksums::RiskScore::Routine {
                         for line in d.unified_diff.lines().take(40) {

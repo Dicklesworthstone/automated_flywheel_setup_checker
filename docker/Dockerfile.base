@@ -10,7 +10,7 @@
 #   docker build --build-arg BASE=ubuntu:24.04 -t afsc-prepared:ubuntu-24.04-<hash> -f docker/Dockerfile.base .
 # The image tag embeds a hash of this file, so editing it triggers a rebuild on the next run.
 
-ARG BASE=ubuntu:22.04
+ARG BASE=ubuntu:24.04
 FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -27,7 +27,7 @@ RUN apt-get update -qq && \
         build-essential sudo gnupg lsb-release libssl-dev pkg-config \
         python3 rsync zsh \
         ripgrep tmux fzf direnv git-lfs lsof \
-        dnsutils netcat-openbsd strace zstd \
+        dnsutils netcat-openbsd strace zstd minisign libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user matching real VPS usage.
