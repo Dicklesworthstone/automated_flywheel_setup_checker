@@ -276,10 +276,10 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     fx.set_execution(2, 0, false);
     fx.add_sleeper("slow_a", 30);
     fx.add_sleeper("slow_b", 30);
-    fx.add_pass("queued_c");
+    fx.add_pass("zz_queued");
 
     let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
-    let mut child = std::process::Command::new(bin)
+    let child = std::process::Command::new(bin)
         .env("HOME", &fx.home)
         .arg("--config")
         .arg(&fx.config)
