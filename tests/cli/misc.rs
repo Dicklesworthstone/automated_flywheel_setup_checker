@@ -212,3 +212,16 @@ fn install_systemd_dry_run_renders_units_without_touching_the_system() {
     assert!(text.contains("[dry-run]"), "{text}");
     assert!(text.contains("acfs_repo=/srv/acfs"), "{text}");
 }
+
+#[test]
+fn version_reports_git_sha_build_date_and_toolchain() {
+    let fx = Fixture::new();
+    let out = fx.run(&["--version"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = stdout(&out);
+    assert!(text.starts_with(&format!("automated_flywheel_setup_checker {} (", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains(", built 20"), "build date: {text}");
+    assert!(text.contains("rustc "), "toolchain: {text}");
+    let sha = text.split('(').nth(1).unwrap().split(',').next().unwrap();
+    assert!(sha == "unknown" || sha.trim_end_matches("-dirty").chars().all(|c| c.is_ascii_hexdigit()), "sha: {sha}");
+}

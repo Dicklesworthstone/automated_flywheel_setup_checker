@@ -48,6 +48,18 @@ type CmdResult = std::result::Result<(), AfscError>;
 /// Version of the JSON/JSONL output schema. Additive changes only within a major.
 const SCHEMA_VERSION: u32 = 1;
 
+/// `--version` line: crate version, git sha (with -dirty), UTC build date, rustc.
+const VERSION_LINE: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("AFSC_GIT_SHA"),
+    ", built ",
+    env!("AFSC_BUILD_DATE"),
+    ", ",
+    env!("AFSC_RUSTC"),
+    ")"
+);
+
 /// Output format for CLI commands
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -70,7 +82,7 @@ pub enum LogFormatArg {
 #[derive(Parser)]
 #[command(name = "automated_flywheel_setup_checker")]
 #[command(about = "Automated ACFS installer verification system")]
-#[command(version)]
+#[command(version = VERSION_LINE)]
 #[command(after_help = "Exit codes: 0 success; 1 installer failures; 2 usage or configuration \
 error (including invalid checksums.yaml); 3 infrastructure error (Docker unreachable); \
 4 validation drift (checksum mismatch or unreachable URL); 130/143 interrupted by SIGINT/SIGTERM")]
