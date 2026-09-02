@@ -66,8 +66,18 @@ case "$scenario" in
         envelope "too late" false 0.0
         ;;
     edits_in_policy)
-        printf 'installers:\n  edited_by_fake: {}\n' > checksums.yaml
-        envelope "Updated checksums.yaml" false 0.30
+        # $AFSC_FAKE_CLAUDE_EDIT_FROM = a checksums.yaml to copy into the worktree (a real fix);
+        # without it the placeholder below is an in-policy edit that cannot verify.
+        if [[ -n "${AFSC_FAKE_CLAUDE_EDIT_FROM:-}" ]]; then
+            cp "$AFSC_FAKE_CLAUDE_EDIT_FROM" checksums.yaml
+        else
+            printf 'installers:\n  edited_by_fake: {}\n' > checksums.yaml
+        fi
+        envelope $'Repointed the installer entry in checksums.yaml at the fixed script and pinned its sha256.' false 0.30
+        ;;
+    edits_unsafe_transcript)
+        printf '# tampered\n' >> checksums.yaml
+        envelope $'Cleaned up first:\n\n```bash\nrm -rf /\n```\n\nthen updated checksums.yaml.' false 0.30
         ;;
     edits_out_of_policy)
         printf '# tampered\n' > README.md

@@ -6,6 +6,43 @@ use std::path::Path;
 #[cfg(test)]
 use crate::parser::ErrorSeverity;
 
+/// Prompt for a propose/apply edit session inside a git worktree of the ACFS checkout. The
+/// policy is stated up front because anything outside it discards the worktree afterwards.
+pub fn generate_edit_prompt(
+    installer: &str,
+    category: &str,
+    stderr: &str,
+    worktree: &Path,
+    previous_failure: Option<&str>,
+) -> String {
+    let retry = previous_failure
+        .map(|f| {
+            format!(
+                "\n\nYour previous edit did not fix it. The installer was re-run against your worktree and still failed:\n\n{f}\n\nAdjust the fix (or leave the tree unchanged if it cannot be fixed inside the policy).",
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"The ACFS installer `{installer}` fails when run from a fresh Ubuntu container. Failure category: {category}.
+
+stderr (tail):
+{stderr}
+
+You are working in a git worktree of the ACFS repository: {wt}
+Fix the failure by editing ONLY these files:
+- checksums.yaml (installer URL and sha256 pins)
+- the KNOWN_INSTALLERS block of scripts/lib/security.sh
+- files under scripts/generated/ (regenerated output)
+
+Rules:
+- Do not edit any other file, do not create files elsewhere, do not run destructive commands.
+- If the fix is a new upstream installer version, download it, verify it is legitimate, and pin its sha256.
+- If the failure cannot be fixed within these files (for example an upstream binary needs a newer glibc), make no changes and explain why.
+- Finish with a short summary of exactly what you changed and why; the installer will be re-run against your worktree before anything is committed.{retry}"#,
+        wt = worktree.display(),
+    )
+}
+
 /// Generate a Claude prompt based on error classification
 pub fn generate_prompt(
     classification: &ErrorClassification,

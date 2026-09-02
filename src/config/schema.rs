@@ -303,6 +303,9 @@ pub struct RemediationConfig {
     pub max_turns: u32,
     /// Timeout per Claude invocation in seconds
     pub timeout_seconds: u64,
+    /// Let propose/apply edit sessions run shell commands (needed for `bun run generate`);
+    /// off by default so Claude can only read and edit files inside the worktree
+    pub allow_bash: bool,
 }
 
 impl Default for RemediationConfig {
@@ -316,6 +319,7 @@ impl Default for RemediationConfig {
             cost_limit_usd: 1.0,
             max_turns: 12,
             timeout_seconds: 300,
+            allow_bash: false,
         }
     }
 }

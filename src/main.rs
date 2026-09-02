@@ -820,8 +820,10 @@ async fn remediate_results(
         }
     }
 
-    // 2. Everything else: read-only advice from Claude (plan mode, read tools only) with the
-    //    safety checker over any command it suggests; fallback suggestions when unavailable.
+    // 2. Everything else. Advisory: read-only advice from Claude (plan mode, read tools only)
+    //    with the safety checker over any command it suggests; fallback suggestions when
+    //    unavailable. Propose/apply: a gated edit session in a git worktree (see
+    //    remediation::propose) that only lands when the installer passes again.
     let rem_config = RemConfig {
         enabled: true,
         cost_limit_usd: config.remediation.cost_limit_usd as f32,
@@ -834,10 +836,38 @@ async fn remediate_results(
         ..Default::default()
     };
     let remediation = ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
+    let editing = matches!(mode, RemediationMode::Propose | RemediationMode::Apply);
+    let data_dir = config.general.data_dir_path();
+    let edit_runner_config = editing.then(|| {
+        build_runner_config(config, local, config.docker.timeout_seconds, 0, false, &format!("remediate-{}", uuid::Uuid::new_v4()), CancellationToken::new())
+    });
+    let globals = GlobalDefaults { timeout_seconds: config.docker.timeout_seconds, retries: 0 };
     for r in results.iter_mut().filter(|r| is_failure(r) && r.remediation.is_none()) {
         let classification = r.error.clone().unwrap_or_else(|| {
             automated_flywheel_setup_checker::parser::classify_error(&r.stderr, r.exit_code.unwrap_or(-1))
         });
+        if let Some(runner_config) = edit_runner_config.as_ref() {
+            let outcome = automated_flywheel_setup_checker::remediation::remediate_with_claude(
+                automated_flywheel_setup_checker::remediation::ClaudeEditRequest {
+                    acfs_repo: &config.general.acfs_repo,
+                    worktrees_dir: &data_dir.join("worktrees"),
+                    installer: &r.installer_name,
+                    category: &classification.category,
+                    stderr: &automated_flywheel_setup_checker::runner::tail(&r.stderr, 4096),
+                    claude: &remediation,
+                    apply: mode == RemediationMode::Apply,
+                    create_pr: config.remediation.create_pr,
+                    max_attempts: config.remediation.max_attempts,
+                    allow_bash: config.remediation.allow_bash,
+                    runner_config: runner_config.clone(),
+                    installer_override: config.installers.get(r.installer_name.as_str()),
+                    globals,
+                },
+            )
+            .await;
+            r.remediation = Some(outcome);
+            continue;
+        }
         let fallback = || {
             let suggestions = generate_suggestions(&classification);
             let text = suggestions

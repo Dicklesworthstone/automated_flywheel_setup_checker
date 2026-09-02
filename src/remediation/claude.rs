@@ -270,6 +270,9 @@ pub enum RemediationError {
     ParseError(String),
     #[error("Safety check failed: {0}")]
     SafetyCheckFailed(String),
+    /// The CLI stopped on its own `--max-budget-usd` / `--max-turns` cap; retrying cannot help
+    #[error("Claude stopped: {0}")]
+    CapReached(String),
 }
 
 /// Method used for remediation
@@ -318,6 +321,60 @@ pub struct ClaudeEnvelope {
     pub duration_ms: u64,
     #[serde(default)]
     pub subtype: Option<String>,
+    /// Error strings the CLI attaches to `is_error` envelopes (e.g. "Reached maximum budget ($0.05)")
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+impl ClaudeEnvelope {
+    /// Human reason for an `is_error` envelope: the CLI's own error strings, else the result
+    /// text, else the subtype.
+    pub fn error_reason(&self) -> String {
+        if !self.errors.is_empty() {
+            return self.errors.join("; ");
+        }
+        if !self.result.is_empty() && self.result != "null" {
+            return self.result.clone();
+        }
+        self.subtype.clone().unwrap_or_else(|| "claude reported is_error=true".into())
+    }
+
+    /// `error_max_budget_usd` / `error_max_turns`: the CLI hit a cap the operator set.
+    pub fn hit_cap(&self) -> bool {
+        self.subtype.as_deref().is_some_and(|s| s.starts_with("error_max_"))
+    }
+}
+
+/// Interpret one CLI run. The envelope is on stdout even when the exit status is non-zero
+/// (budget/turn caps exit 1 with an `is_error` envelope and nothing on stderr), so it is parsed
+/// first and its cost is always accounted.
+fn interpret_run(status_ok: bool, stdout: &str, stderr: &str) -> std::result::Result<ClaudeEnvelope, (RemediationError, f32)> {
+    let envelope = ClaudeEnvelope::parse(stdout);
+    let cost = envelope.total_cost_usd as f32;
+    let looks_like_envelope = stdout.trim_start().starts_with('{');
+    if envelope.is_error {
+        let reason = format!("{} (after {} turn(s), ${:.4})", envelope.error_reason(), envelope.num_turns, envelope.total_cost_usd);
+        let err = if envelope.hit_cap() { RemediationError::CapReached(reason) } else { RemediationError::ClaudeError(reason) };
+        return Err((err, cost));
+    }
+    if !status_ok {
+        let stderr = stderr.trim();
+        if stderr.contains("rate limit") || stderr.contains("429") {
+            return Err((RemediationError::ApiError("Rate limited by Anthropic API".into()), cost));
+        }
+        if stderr.contains("authentication") || stderr.contains("401") {
+            return Err((RemediationError::ClaudeUnavailable("Authentication failed".into()), cost));
+        }
+        let detail = if !stderr.is_empty() {
+            stderr.to_string()
+        } else if looks_like_envelope {
+            format!("exit status non-zero with a non-error envelope (subtype {:?})", envelope.subtype)
+        } else {
+            format!("exit status non-zero, no envelope; stdout: {}", stdout.trim().chars().take(300).collect::<String>())
+        };
+        return Err((RemediationError::ClaudeError(detail), cost));
+    }
+    Ok(envelope)
 }
 
 impl ClaudeEnvelope {
@@ -358,6 +415,30 @@ pub fn advisory_args(max_turns: u32, max_budget_usd: f32, prompt: &str) -> Vec<S
     ]
 }
 
+
+/// Arguments for a propose/apply edit session: edits are accepted without prompts but only
+/// inside `worktree` (`--add-dir`), Bash only when the operator opted in. Never includes
+/// `--dangerously-skip-permissions`.
+pub fn edit_args(max_turns: u32, max_budget_usd: f32, worktree: &std::path::Path, allow_bash: bool, prompt: &str) -> Vec<String> {
+    let tools = if allow_bash { "Read,Grep,Glob,Edit,Write,Bash" } else { "Read,Grep,Glob,Edit,Write" };
+    vec![
+        "--print".into(),
+        "--output-format".into(),
+        "json".into(),
+        "--permission-mode".into(),
+        "acceptEdits".into(),
+        "--tools".into(),
+        tools.into(),
+        "--add-dir".into(),
+        worktree.to_string_lossy().to_string(),
+        "--max-turns".into(),
+        max_turns.max(1).to_string(),
+        "--max-budget-usd".into(),
+        format!("{max_budget_usd:.2}"),
+        "-p".into(),
+        prompt.to_string(),
+    ]
+}
 
 /// Claude remediation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +556,11 @@ impl ClaudeRemediation {
                 Err(e) => {
                     tracing::warn!("Claude request failed (attempt {}): {}", attempt + 1, e);
 
+                    // A budget or turn cap is the operator's setting, not a transient fault:
+                    // retrying would only spend the same money again.
+                    if matches!(&e, RemediationError::CapReached(_) | RemediationError::CostLimitExceeded { .. }) {
+                        return Err(e);
+                    }
                     // Only record circuit breaker failure for certain error types
                     if matches!(
                         &e,
@@ -518,28 +604,84 @@ impl ClaudeRemediation {
         .map_err(|_| RemediationError::Timeout)?
         .map_err(|e| RemediationError::ClaudeUnavailable(e.to_string()))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("rate limit") || stderr.contains("429") {
-                return Err(RemediationError::ApiError("Rate limited by Anthropic API".into()));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let envelope = match interpret_run(output.status.success(), &stdout, &stderr) {
+            Ok(env) => env,
+            Err((e, cost)) => {
+                self.add_cost(cost);
+                return Err(e);
             }
-            if stderr.contains("authentication") || stderr.contains("401") {
-                return Err(RemediationError::ClaudeUnavailable("Authentication failed".into()));
-            }
-            return Err(RemediationError::ClaudeError(stderr.trim().to_string()));
+        };
+        self.add_cost(envelope.total_cost_usd as f32);
+
+        Ok(RemediationResult {
+            success: true,
+            method: RemediationMethod::ClaudeAuto,
+            commit_sha: None,
+            pr_url: None,
+            duration_ms: started.elapsed().as_millis() as u64,
+            claude_output: envelope.result.clone(),
+            estimated_cost_usd: envelope.total_cost_usd as f32,
+            verification_passed: false,
+            envelope: Some(envelope),
+        })
+    }
+
+    /// One propose/apply edit session with cwd = `worktree`. No automatic retries: an edit
+    /// session is not idempotent, the caller bounds attempts with `max_attempts` and decides
+    /// what to do with the worktree. Rate limit, circuit breaker and cost cap still apply.
+    pub async fn execute_edit_session(
+        &self,
+        prompt: &str,
+        worktree: &std::path::Path,
+        allow_bash: bool,
+    ) -> std::result::Result<RemediationResult, RemediationError> {
+        use tokio::process::Command;
+        use tokio::time::timeout;
+
+        if !self.config.enabled {
+            return Err(RemediationError::ClaudeUnavailable("remediation disabled".into()));
         }
+        if !self.circuit_breaker.should_allow().await {
+            return Err(RemediationError::ClaudeUnavailable("circuit breaker open".into()));
+        }
+        if let Err(e) = self.rate_limiter.acquire(Duration::from_secs(30)).await {
+            return Err(RemediationError::RateLimited(e.to_string()));
+        }
+        let current_cost = self.get_total_cost_usd();
+        if current_cost >= self.config.cost_limit_usd {
+            return Err(RemediationError::CostLimitExceeded { current: current_cost, limit: self.config.cost_limit_usd });
+        }
+        self.request_count.fetch_add(1, Ordering::SeqCst);
+        let started = Instant::now();
+        let bin = self.config.claude_bin.clone().unwrap_or_else(|| "claude".to_string());
+        let remaining_budget = (self.config.cost_limit_usd - current_cost).max(0.01);
+        let output = timeout(
+            Duration::from_secs(self.config.timeout_seconds),
+            Command::new(&bin)
+                .args(edit_args(self.config.max_turns, remaining_budget, worktree, allow_bash, prompt))
+                .current_dir(worktree)
+                .output(),
+        )
+        .await
+        .map_err(|_| RemediationError::Timeout)?
+        .map_err(|e| RemediationError::ClaudeUnavailable(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let envelope = ClaudeEnvelope::parse(&stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let envelope = match interpret_run(output.status.success(), &stdout, &stderr) {
+            Ok(env) => env,
+            Err((e, cost)) => {
+                self.add_cost(cost);
+                if matches!(&e, RemediationError::ClaudeUnavailable(_) | RemediationError::ApiError(_)) {
+                    self.circuit_breaker.record_failure().await;
+                }
+                return Err(e);
+            }
+        };
         self.add_cost(envelope.total_cost_usd as f32);
-        if envelope.is_error {
-            return Err(RemediationError::ClaudeError(if envelope.result.is_empty() {
-                "claude reported is_error=true".into()
-            } else {
-                envelope.result.clone()
-            }));
-        }
-
+        self.circuit_breaker.record_success().await;
         Ok(RemediationResult {
             success: true,
             method: RemediationMethod::ClaudeAuto,
@@ -673,6 +815,29 @@ mod tests {
         assert_eq!(config.get_delay(3), Duration::from_secs(8));
         assert_eq!(config.get_delay(4), Duration::from_secs(16));
         assert_eq!(config.get_delay(5), Duration::from_secs(30)); // Capped
+    }
+
+    #[test]
+    fn budget_cap_envelopes_are_errors_with_the_real_reason_and_cost() {
+        // Pinned from `claude --print --output-format json --max-budget-usd 0.05 …` (2.1.259):
+        // exit 1, nothing on stderr, and this on stdout.
+        let stdout = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"duration_ms":1500,"num_turns":1,"result":null,"session_id":"57e7","total_cost_usd":0.128202,"errors":["Reached maximum budget ($0.05)"]}"#;
+        match interpret_run(false, stdout, "") {
+            Err((RemediationError::CapReached(reason), cost)) => {
+                assert!(reason.contains("Reached maximum budget ($0.05)"), "{reason}");
+                assert!(reason.contains("$0.1282"), "{reason}");
+                assert!((cost - 0.128202).abs() < 1e-5);
+            }
+            other => panic!("expected a cap error, got {other:?}"),
+        }
+        // Other is_error envelopes stay ordinary (retryable) errors; a clean run passes through.
+        let plain = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"result":"boom","total_cost_usd":0.01}"#;
+        assert!(matches!(interpret_run(true, plain, ""), Err((RemediationError::ClaudeError(r), _)) if r.starts_with("boom")));
+        let ok = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"fine","total_cost_usd":0.2}"#;
+        assert_eq!(interpret_run(true, ok, "").unwrap().result, "fine");
+        // Non-zero exit without an envelope keeps stderr, or says so when both are empty.
+        assert!(matches!(interpret_run(false, "", "boom on stderr"), Err((RemediationError::ClaudeError(r), _)) if r == "boom on stderr"));
+        assert!(matches!(interpret_run(false, "", ""), Err((RemediationError::ClaudeError(r), _)) if r.contains("no envelope")));
     }
 
     #[test]
