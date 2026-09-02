@@ -27,8 +27,18 @@ RUN apt-get update -qq && \
         build-essential sudo gnupg lsb-release libssl-dev pkg-config \
         python3 rsync zsh \
         ripgrep tmux fzf direnv git-lfs lsof \
-        dnsutils netcat-openbsd strace zstd minisign libsqlite3-dev \
+        dnsutils netcat-openbsd strace zstd libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# minisign verifies release signatures for the mcp_agent_mail and caam installers and is part of
+# ACFS's "required apt packages" step. It is only packaged on Ubuntu 24.04+ (ACFS's floor), so an
+# older foreign base builds without it and those installers fail there exactly as they would on
+# a real, un-upgraded 22.04 host.
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        minisign \
+    || echo "minisign is not packaged for this base (ACFS requires Ubuntu 24.04+)"; \
+    rm -rf /var/lib/apt/lists/*
 
 # Create non-root user matching real VPS usage.
 # ACFS runs as the logged-in user, not root. Many installers (srps, etc.)

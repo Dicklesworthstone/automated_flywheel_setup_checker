@@ -76,7 +76,7 @@ fn dockerfile_packages(text: &str) -> BTreeSet<String> {
             continue;
         }
         if inside {
-            if t.starts_with("&&") || t.is_empty() {
+            if t.starts_with("&&") || t.starts_with("||") || t.is_empty() {
                 inside = false;
                 continue;
             }
