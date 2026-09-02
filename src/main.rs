@@ -1040,7 +1040,7 @@ async fn cmd_remediate_checksums(
                     }
                     if v.status == "timedout" {
                         println!(
-                            "      hint: raise [remediation] timeout_seconds or add an execution profile floor for {} (see acfs_profile.rs)",
+                            "      hint: raise [docker] timeout_seconds, set [installers.{}] timeout_seconds, or add an execution profile floor (acfs_profile.rs)",
                             e.name
                         );
                     }
