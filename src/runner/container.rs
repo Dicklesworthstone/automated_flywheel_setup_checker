@@ -633,7 +633,9 @@ impl ContainerManager {
             // Keep container alive with a long sleep so we can exec into it
             cmd: Some(vec!["sleep".to_string(), "86400".to_string()]),
             working_dir: Some(working_dir.to_string()),
-            user: if using_base_image { Some(user.to_string()) } else { None },
+            // Always explicit: prepared images default to afsc-user in the image itself, so
+            // `run_as_root` must override it with "root" rather than inherit the image USER.
+            user: Some(user.to_string()),
             tty: Some(true),
             ..Default::default()
         };
