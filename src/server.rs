@@ -38,6 +38,7 @@ impl MonitoringServerConfig {
         config: &MonitoringConfig,
         health_port_override: Option<u16>,
         metrics_port_override: Option<u16>,
+        snapshot_path: PathBuf,
     ) -> Result<Self> {
         if !config.health_endpoint && !config.metrics_enabled {
             bail!("monitoring endpoints are disabled in config; enable [monitoring].health_endpoint and/or [monitoring].metrics_enabled");
@@ -51,18 +52,24 @@ impl MonitoringServerConfig {
             health_enabled: config.health_endpoint,
             metrics_enabled: config.metrics_enabled,
             listen_port,
-            snapshot_path: MetricsSnapshot::default_path(),
+            snapshot_path,
         })
     }
 }
 
+/// Serve `/health` and `/metrics` from the persisted metrics snapshot at `snapshot_path`.
 pub async fn serve_monitoring(
     config: &MonitoringConfig,
     health_port_override: Option<u16>,
     metrics_port_override: Option<u16>,
+    snapshot_path: PathBuf,
 ) -> Result<()> {
-    let server_config =
-        MonitoringServerConfig::from_config(config, health_port_override, metrics_port_override)?;
+    let server_config = MonitoringServerConfig::from_config(
+        config,
+        health_port_override,
+        metrics_port_override,
+        snapshot_path,
+    )?;
     let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, server_config.listen_port));
     let listener = TcpListener::bind(addr)
         .await
@@ -236,7 +243,7 @@ mod tests {
     #[test]
     fn test_server_config_requires_enabled_endpoints() {
         let config = MonitoringConfig::default();
-        let error = MonitoringServerConfig::from_config(&config, None, None).unwrap_err();
+        let error = MonitoringServerConfig::from_config(&config, None, None, MetricsSnapshot::default_path()).unwrap_err();
         assert!(error.to_string().contains("monitoring endpoints are disabled"));
     }
 
@@ -247,9 +254,10 @@ mod tests {
             health_port: 8080,
             metrics_enabled: true,
             metrics_port: 9191,
+            ..Default::default()
         };
 
-        let server_config = MonitoringServerConfig::from_config(&config, None, None).unwrap();
+        let server_config = MonitoringServerConfig::from_config(&config, None, None, MetricsSnapshot::default_path()).unwrap();
         assert_eq!(server_config.listen_port, 9191);
         assert!(!server_config.health_enabled);
         assert!(server_config.metrics_enabled);

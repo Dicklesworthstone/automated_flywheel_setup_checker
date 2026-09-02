@@ -5,6 +5,7 @@
 
 pub mod checksums;
 pub mod config;
+pub mod error;
 pub mod logging;
 pub mod parser;
 pub mod remediation;
@@ -14,4 +15,5 @@ pub mod server;
 pub mod watchdog;
 
 pub use config::Config;
+pub use error::{AfscError, Signal};
 pub use watchdog::SystemdWatchdog;

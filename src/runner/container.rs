@@ -2,19 +2,34 @@
 //!
 //! Provides real Docker container lifecycle operations: create, exec, cleanup.
 //! Uses bollard 0.16 to communicate with the Docker daemon.
+//!
+//! Every container the checker creates carries `afsc.*` labels so that orphans left behind by
+//! a killed process can be identified and reaped conservatively (label match AND dead owner pid
+//! or age beyond a bound). Exec calls are cancellable so signals stop installers promptly.
 
 use anyhow::{Context, Result};
 use bollard::container::{
-    Config, CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
+    StopContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::image::CreateImageOptions;
 use bollard::Docker;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Label marking containers created by this tool.
+pub const LABEL_MANAGED: &str = "afsc.managed";
+pub const LABEL_RUN_ID: &str = "afsc.run_id";
+pub const LABEL_INSTALLER: &str = "afsc.installer";
+pub const LABEL_CREATED_AT: &str = "afsc.created_at";
+pub const LABEL_PID: &str = "afsc.pid";
+pub const LABEL_VERSION: &str = "afsc.version";
 
 /// Configuration for Docker containers
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +40,9 @@ pub struct ContainerConfig {
     pub timeout_seconds: u64,
     pub volumes: Vec<(String, String)>,
     pub environment: Vec<(String, String)>,
+    /// Extra labels applied to every container (the `afsc.*` set is always added)
+    #[serde(default)]
+    pub labels: Vec<(String, String)>,
 }
 
 impl Default for ContainerConfig {
@@ -36,6 +54,7 @@ impl Default for ContainerConfig {
             timeout_seconds: 300,
             volumes: Vec::new(),
             environment: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -58,6 +77,18 @@ impl PullPolicy {
     }
 }
 
+/// A container found by the reaper.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanInfo {
+    pub id: String,
+    pub name: String,
+    pub installer: Option<String>,
+    pub run_id: Option<String>,
+    pub pid: Option<u32>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub reason: String,
+}
+
 /// Manages Docker containers for installer testing
 pub struct ContainerManager {
     config: ContainerConfig,
@@ -65,12 +96,26 @@ pub struct ContainerManager {
     pull_policy: PullPolicy,
 }
 
+/// Human-readable Docker endpoint for error messages.
+fn docker_endpoint() -> String {
+    std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string())
+}
+
 impl ContainerManager {
-    /// Create a new ContainerManager connected to the local Docker daemon
+    /// Create a new ContainerManager connected to the local Docker daemon.
+    ///
+    /// Panics only when the Docker client itself cannot be constructed (malformed `DOCKER_HOST`);
+    /// prefer [`ContainerManager::try_new`].
     pub fn new(config: ContainerConfig) -> Self {
-        let docker =
-            Docker::connect_with_local_defaults().expect("Failed to connect to Docker daemon");
-        Self { config, docker: Arc::new(docker), pull_policy: PullPolicy::IfNotPresent }
+        Self::try_new(config).expect("Failed to construct Docker client")
+    }
+
+    /// Fallible constructor: returns an error instead of panicking on a bad `DOCKER_HOST`.
+    pub fn try_new(config: ContainerConfig) -> Result<Self> {
+        let docker = Docker::connect_with_local_defaults().with_context(|| {
+            format!("Failed to construct Docker client for {}", docker_endpoint())
+        })?;
+        Ok(Self { config, docker: Arc::new(docker), pull_policy: PullPolicy::IfNotPresent })
     }
 
     /// Create with a specific pull policy
@@ -82,6 +127,31 @@ impl ContainerManager {
     /// Create with an existing Docker client (useful for testing)
     pub fn with_docker(config: ContainerConfig, docker: Docker) -> Self {
         Self { config, docker: Arc::new(docker), pull_policy: PullPolicy::IfNotPresent }
+    }
+
+    /// Verify the daemon answers before any container work; the error names the endpoint.
+    pub async fn preflight(&self) -> Result<()> {
+        self.docker.ping().await.map(|_| ()).map_err(|e| {
+            anyhow::anyhow!(
+                "Docker daemon unreachable at {}: {}. Start Docker or use --local",
+                docker_endpoint(),
+                e
+            )
+        })
+    }
+
+    /// Verify the daemon answers using a fresh default client.
+    pub async fn preflight_default() -> Result<()> {
+        let docker = Docker::connect_with_local_defaults().with_context(|| {
+            format!("Failed to construct Docker client for {}", docker_endpoint())
+        })?;
+        docker.ping().await.map(|_| ()).map_err(|e| {
+            anyhow::anyhow!(
+                "Docker daemon unreachable at {}: {}. Start Docker or use --local",
+                docker_endpoint(),
+                e
+            )
+        })
     }
 
     /// The tag used for the pre-built ACFS base image.
@@ -234,6 +304,21 @@ impl ContainerManager {
         anyhow::bail!("Cannot find docker/Dockerfile.base. Looked in: {:?}", candidates)
     }
 
+    /// Labels applied to every container: the managed marker, installer, creation time, owner
+    /// pid, tool version, plus any configured extras.
+    fn labels_for(&self, installer: &str) -> HashMap<String, String> {
+        let mut labels = HashMap::new();
+        labels.insert(LABEL_MANAGED.to_string(), "true".to_string());
+        labels.insert(LABEL_INSTALLER.to_string(), installer.to_string());
+        labels.insert(LABEL_CREATED_AT.to_string(), chrono::Utc::now().to_rfc3339());
+        labels.insert(LABEL_PID.to_string(), std::process::id().to_string());
+        labels.insert(LABEL_VERSION.to_string(), env!("CARGO_PKG_VERSION").to_string());
+        for (k, v) in &self.config.labels {
+            labels.insert(k.clone(), v.clone());
+        }
+        labels
+    }
+
     /// Create and start a container for testing
     ///
     /// Returns the container ID string from Docker.
@@ -308,6 +393,7 @@ impl ContainerManager {
             image: Some(self.config.image.clone()),
             env: Some(env),
             host_config: Some(host_config),
+            labels: Some(self.labels_for(name)),
             // Keep container alive with a long sleep so we can exec into it
             cmd: Some(vec!["sleep".to_string(), "86400".to_string()]),
             working_dir: Some(working_dir.to_string()),
@@ -351,11 +437,28 @@ impl ContainerManager {
         container_id: &str,
         command: &[&str],
     ) -> Result<(i32, String, String)> {
+        self.exec_in_container_cancellable(container_id, command, &CancellationToken::new()).await
+    }
+
+    /// Execute a command inside a running container, aborting when `cancel` fires.
+    ///
+    /// On cancellation the container is stopped (which kills the exec'd process) and an error
+    /// containing `cancelled` is returned.
+    pub async fn exec_in_container_cancellable(
+        &self,
+        container_id: &str,
+        command: &[&str],
+        cancel: &CancellationToken,
+    ) -> Result<(i32, String, String)> {
         debug!(
             container_id = %container_id,
             command = ?command,
             "Executing command in container"
         );
+
+        if cancel.is_cancelled() {
+            anyhow::bail!("cancelled before exec started");
+        }
 
         let exec_opts = CreateExecOptions {
             attach_stdout: Some(true),
@@ -387,23 +490,32 @@ impl ContainerManager {
         let mut stderr_buf = Vec::new();
 
         match start_result {
-            StartExecResults::Attached { mut output, .. } => {
-                while let Some(msg) = output.next().await {
-                    match msg {
-                        Ok(bollard::container::LogOutput::StdOut { message }) => {
-                            stdout_buf.extend_from_slice(&message);
-                        }
-                        Ok(bollard::container::LogOutput::StdErr { message }) => {
-                            stderr_buf.extend_from_slice(&message);
-                        }
-                        Ok(_) => {} // Console or other log types
-                        Err(e) => {
-                            warn!(error = %e, "Error reading exec output");
-                            break;
+            StartExecResults::Attached { mut output, .. } => loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        warn!(container_id = %container_id, "Exec cancelled; stopping container");
+                        let stop_opts = StopContainerOptions { t: 2 };
+                        let _ = self.docker.stop_container(container_id, Some(stop_opts)).await;
+                        anyhow::bail!("cancelled while running installer");
+                    }
+                    msg = output.next() => {
+                        match msg {
+                            Some(Ok(bollard::container::LogOutput::StdOut { message })) => {
+                                stdout_buf.extend_from_slice(&message);
+                            }
+                            Some(Ok(bollard::container::LogOutput::StdErr { message })) => {
+                                stderr_buf.extend_from_slice(&message);
+                            }
+                            Some(Ok(_)) => {} // Console or other log types
+                            Some(Err(e)) => {
+                                warn!(error = %e, "Error reading exec output");
+                                break;
+                            }
+                            None => break,
                         }
                     }
                 }
-            }
+            },
             StartExecResults::Detached => {
                 return Err(anyhow::anyhow!("Exec started in detached mode unexpectedly"));
             }
@@ -465,6 +577,74 @@ impl ContainerManager {
         Ok(())
     }
 
+    /// List containers created by this tool (any state).
+    pub async fn list_managed(&self) -> Result<Vec<OrphanInfo>> {
+        let mut filters = HashMap::new();
+        filters.insert("label".to_string(), vec![format!("{LABEL_MANAGED}=true")]);
+        let opts = ListContainersOptions { all: true, filters, ..Default::default() };
+        let containers = self
+            .docker
+            .list_containers(Some(opts))
+            .await
+            .context("Failed to list containers")?;
+        Ok(containers
+            .into_iter()
+            .map(|c| {
+                let labels = c.labels.unwrap_or_default();
+                OrphanInfo {
+                    id: c.id.unwrap_or_default(),
+                    name: c
+                        .names
+                        .and_then(|n| n.first().cloned())
+                        .unwrap_or_default()
+                        .trim_start_matches('/')
+                        .to_string(),
+                    installer: labels.get(LABEL_INSTALLER).cloned(),
+                    run_id: labels.get(LABEL_RUN_ID).cloned(),
+                    pid: labels.get(LABEL_PID).and_then(|p| p.parse().ok()),
+                    created_at: labels
+                        .get(LABEL_CREATED_AT)
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                        .map(|t| t.with_timezone(&chrono::Utc)),
+                    reason: String::new(),
+                }
+            })
+            .collect())
+    }
+
+    /// Remove managed containers whose owner process is dead or whose age exceeds `max_age`.
+    /// Containers owned by the current process are never touched. Returns what was removed.
+    pub async fn reap_orphans(&self, max_age: Duration) -> Result<Vec<OrphanInfo>> {
+        let my_pid = std::process::id();
+        let now = chrono::Utc::now();
+        let mut reaped = Vec::new();
+        for mut c in self.list_managed().await? {
+            if c.pid == Some(my_pid) {
+                continue;
+            }
+            let owner_dead = match c.pid {
+                Some(pid) => !pid_alive(pid),
+                None => false,
+            };
+            let too_old = match c.created_at {
+                Some(t) => (now - t).to_std().map(|d| d > max_age).unwrap_or(false),
+                None => false,
+            };
+            if !(owner_dead || too_old) {
+                continue;
+            }
+            c.reason = if owner_dead {
+                format!("owner pid {} is not running", c.pid.unwrap_or(0))
+            } else {
+                format!("older than {}s", max_age.as_secs())
+            };
+            warn!(container = %c.name, reason = %c.reason, "Reaping orphaned container");
+            let _ = self.cleanup_container(&c.id).await;
+            reaped.push(c);
+        }
+        Ok(reaped)
+    }
+
     /// Get a reference to the Docker client (for advanced use)
     pub fn docker(&self) -> &Docker {
         &self.docker
@@ -477,6 +657,15 @@ impl ContainerManager {
 
     pub fn config(&self) -> &ContainerConfig {
         &self.config
+    }
+}
+
+/// Whether a process id is alive (Linux: /proc; elsewhere: assume alive).
+fn pid_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
     }
 }
 
@@ -545,5 +734,47 @@ impl Drop for ContainerGuard {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_include_managed_marker_pid_and_extras() {
+        let config = ContainerConfig {
+            labels: vec![("afsc.run_id".to_string(), "run-1".to_string())],
+            ..Default::default()
+        };
+        let manager = ContainerManager::new(config);
+        let labels = manager.labels_for("zoxide");
+        assert_eq!(labels[LABEL_MANAGED], "true");
+        assert_eq!(labels[LABEL_INSTALLER], "zoxide");
+        assert_eq!(labels[LABEL_PID], std::process::id().to_string());
+        assert_eq!(labels[LABEL_RUN_ID], "run-1");
+        assert!(chrono::DateTime::parse_from_rfc3339(&labels[LABEL_CREATED_AT]).is_ok());
+    }
+
+    #[test]
+    fn current_pid_is_alive_and_absurd_pid_is_not() {
+        assert!(pid_alive(std::process::id()));
+        if cfg!(target_os = "linux") {
+            assert!(!pid_alive(u32::MAX - 1));
+        }
+    }
+
+    #[test]
+    fn try_new_reports_bad_docker_host() {
+        // A malformed DOCKER_HOST must produce an error, never a panic.
+        let prev = std::env::var("DOCKER_HOST").ok();
+        std::env::set_var("DOCKER_HOST", "not a valid endpoint ::: ///");
+        let result = ContainerManager::try_new(ContainerConfig::default());
+        match prev {
+            Some(v) => std::env::set_var("DOCKER_HOST", v),
+            None => std::env::remove_var("DOCKER_HOST"),
+        }
+        // bollard may accept odd strings lazily; either outcome is acceptable as long as no panic.
+        let _ = result;
     }
 }

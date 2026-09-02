@@ -1,11 +1,22 @@
-//! Structured JSONL logging
+//! Structured JSONL logging and result persistence
+//!
+//! Result files live under `<data_dir>/results/` and are named
+//! `results_<UTC ms timestamp>_<run_id prefix>.jsonl`, so concurrent or same-second runs never
+//! collide. Each file holds one `kind: "run"` header line, one `kind: "result"` line per
+//! installer, and a final `kind: "summary"` line. Files written by older versions (no `kind`
+//! field, second-resolution names) are still readable.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::runner::tail;
+
+/// Bytes of stdout/stderr kept per persisted result.
+const PERSISTED_TAIL_BYTES: usize = 2048;
 
 /// Log level for structured entries
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -215,7 +226,7 @@ impl Drop for JsonlReporter {
 
 /// Manager for log rotation and pruning
 pub struct LogRotation {
-    log_dir: std::path::PathBuf,
+    log_dir: PathBuf,
     retention_days: u32,
     file_prefix: String,
 }
@@ -223,7 +234,7 @@ pub struct LogRotation {
 impl LogRotation {
     /// Create a new log rotation manager
     pub fn new(
-        log_dir: impl Into<std::path::PathBuf>,
+        log_dir: impl Into<PathBuf>,
         retention_days: u32,
         file_prefix: impl Into<String>,
     ) -> Self {
@@ -231,7 +242,7 @@ impl LogRotation {
     }
 
     /// Get the path for today's log file
-    pub fn current_log_path(&self) -> std::path::PathBuf {
+    pub fn current_log_path(&self) -> PathBuf {
         let date = Utc::now().format("%Y%m%d");
         self.log_dir.join(format!("{}_{}.jsonl", self.file_prefix, date))
     }
@@ -277,7 +288,7 @@ impl LogRotation {
     }
 
     /// Get all log files sorted by date (newest first)
-    pub fn list_log_files(&self) -> Result<Vec<std::path::PathBuf>> {
+    pub fn list_log_files(&self) -> Result<Vec<PathBuf>> {
         use std::fs;
 
         let mut files = Vec::new();
@@ -313,7 +324,41 @@ impl LogRotation {
 ///
 /// Results are written atomically (to a .tmp file, then renamed).
 pub struct ResultPersister {
-    results_dir: std::path::PathBuf,
+    results_dir: PathBuf,
+}
+
+/// Run header: the first line of every results file, describing how the run was executed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RunHeader {
+    pub run_id: String,
+    pub started_at: DateTime<Utc>,
+    pub tool_version: String,
+    pub backend: String,
+    pub image: Option<String>,
+    pub user: Option<String>,
+    pub parallel: usize,
+    pub timeout_seconds: u64,
+    pub retries: u32,
+    pub fail_fast: bool,
+    pub acfs_repo: String,
+    pub checksums_sha256: Option<String>,
+    pub config_source: Option<String>,
+    pub data_dir: String,
+    pub installers_requested: Vec<String>,
+    pub installer_count: usize,
+    pub dry_run: bool,
+}
+
+impl RunHeader {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            started_at: Utc::now(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            ..Default::default()
+        }
+    }
 }
 
 /// A single test result line in the results JSONL file
@@ -328,6 +373,21 @@ pub struct ResultEntry {
     pub stderr_excerpt: String,
     pub retry_count: u32,
     pub sha256_verified: bool,
+    /// Verification state: not_checked, verified, mismatch, unknown
+    #[serde(default)]
+    pub checksum_state: String,
+    #[serde(default)]
+    pub checksum_expected: Option<String>,
+    #[serde(default)]
+    pub checksum_actual: Option<String>,
+    /// Last 2 KB of stdout
+    #[serde(default)]
+    pub stdout_tail: String,
+    /// Last 2 KB of stderr
+    #[serde(default)]
+    pub stderr_tail: String,
+    #[serde(default)]
+    pub container_id: Option<String>,
     /// Duration of the final attempt only (total is `duration_ms`)
     #[serde(default)]
     pub last_attempt_ms: u64,
@@ -357,21 +417,50 @@ pub struct ErrorClassificationEntry {
 }
 
 /// Summary line written as the last entry in a results file
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummaryEntry {
     pub run_id: String,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub timed_out: usize,
+    #[serde(default)]
+    pub cancelled: usize,
     pub duration_total_ms: u64,
     pub timestamp_start: DateTime<Utc>,
     pub timestamp_end: DateTime<Utc>,
+    /// True when the run was cancelled before every installer finished
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default)]
+    pub exit_code: i32,
+}
+
+/// Lightweight description of a persisted run (for `status --list`).
+#[derive(Debug, Clone, Serialize)]
+pub struct RunInfo {
+    pub path: PathBuf,
+    pub run_id: String,
+    pub started_at: DateTime<Utc>,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub interrupted: bool,
+}
+
+/// Everything read back from one results file.
+#[derive(Debug, Default)]
+pub struct RunFile {
+    pub header: Option<RunHeader>,
+    pub entries: Vec<ResultEntry>,
+    pub summary: Option<RunSummaryEntry>,
 }
 
 impl ResultPersister {
     /// Create a new ResultPersister with the given results directory
-    pub fn new(results_dir: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(results_dir: impl Into<PathBuf>) -> Self {
         Self { results_dir: results_dir.into() }
     }
 
@@ -389,13 +478,14 @@ impl ResultPersister {
         Ok(())
     }
 
-    /// Generate the results filename for this run
-    fn results_filename(&self) -> String {
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        format!("results_{}.jsonl", timestamp)
+    /// Generate the results filename for this run: millisecond UTC timestamp plus run id prefix.
+    fn results_filename(&self, run_id: &str) -> String {
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let short: String = run_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+        format!("results_{}_{}.jsonl", timestamp, short)
     }
 
-    /// Write test results to a JSONL file atomically
+    /// Write test results to a JSONL file atomically (minimal header).
     ///
     /// Returns the path to the written file.
     pub fn persist(
@@ -403,10 +493,21 @@ impl ResultPersister {
         results: &[crate::runner::TestResult],
         run_id: &str,
         started_at: DateTime<Utc>,
-    ) -> Result<std::path::PathBuf> {
+    ) -> Result<PathBuf> {
+        let header = RunHeader { started_at, ..RunHeader::new(run_id) };
+        self.persist_with_header(results, &header, false)
+    }
+
+    /// Write test results with a full run header. `interrupted` marks a cancelled run.
+    pub fn persist_with_header(
+        &self,
+        results: &[crate::runner::TestResult],
+        header: &RunHeader,
+        interrupted: bool,
+    ) -> Result<PathBuf> {
         self.ensure_dir()?;
 
-        let filename = self.results_filename();
+        let filename = self.results_filename(&header.run_id);
         let final_path = self.results_dir.join(&filename);
         let tmp_path = self.results_dir.join(format!("{}.tmp", filename));
 
@@ -414,42 +515,15 @@ impl ResultPersister {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
 
+        let mut header_json = serde_json::to_value(header)?;
+        header_json["kind"] = serde_json::json!("run");
+        writeln!(writer, "{}", serde_json::to_string(&header_json)?)?;
+
         for result in results {
-            let entry = ResultEntry {
-                timestamp: result.finished_at,
-                installer_name: result.installer_name.clone(),
-                status: format!("{:?}", result.status).to_lowercase(),
-                duration_ms: result.duration_ms,
-                exit_code: result.exit_code,
-                error_classification: result.error.as_ref().map(|e| ErrorClassificationEntry {
-                    category: e.category.clone(),
-                    severity: format!("{:?}", e.severity),
-                    retryable: e.retryable,
-                    confidence: e.confidence,
-                }),
-                stderr_excerpt: result.stderr.chars().take(500).collect(),
-                retry_count: result.retry_count(),
-                sha256_verified: result
-                    .checksum_result
-                    .as_ref()
-                    .map(|c| c.matches)
-                    .unwrap_or(false),
-                last_attempt_ms: result.last_attempt_ms,
-                attempts: result
-                    .attempts
-                    .iter()
-                    .map(|a| AttemptEntry {
-                        index: a.index,
-                        status: a.status.as_str().to_string(),
-                        exit_code: a.exit_code,
-                        duration_ms: a.duration_ms,
-                        waited_before_ms: a.waited_before_ms,
-                        stderr_tail: a.stderr_tail.clone(),
-                    })
-                    .collect(),
-            };
-            let json = serde_json::to_string(&entry)?;
-            writeln!(writer, "{}", json)?;
+            let entry = Self::entry_from(result);
+            let mut json = serde_json::to_value(&entry)?;
+            json["kind"] = serde_json::json!("result");
+            writeln!(writer, "{}", serde_json::to_string(&json)?)?;
         }
 
         // Write summary line
@@ -462,20 +536,33 @@ impl ResultPersister {
             .iter()
             .filter(|r| matches!(r.status, crate::runner::TestStatus::Skipped))
             .count();
+        let timed_out = results
+            .iter()
+            .filter(|r| matches!(r.status, crate::runner::TestStatus::TimedOut))
+            .count();
+        let cancelled = results
+            .iter()
+            .filter(|r| matches!(r.status, crate::runner::TestStatus::Cancelled))
+            .count();
         let total_ms: u64 = results.iter().map(|r| r.duration_ms).sum();
 
         let summary = RunSummaryEntry {
-            run_id: run_id.to_string(),
+            run_id: header.run_id.clone(),
             total: results.len(),
             passed,
             failed,
             skipped,
+            timed_out,
+            cancelled,
             duration_total_ms: total_ms,
-            timestamp_start: started_at,
+            timestamp_start: header.started_at,
             timestamp_end: Utc::now(),
+            interrupted,
+            exit_code: if results.iter().any(|r| !r.success) { 1 } else { 0 },
         };
-        let json = serde_json::to_string(&summary)?;
-        writeln!(writer, "{}", json)?;
+        let mut json = serde_json::to_value(&summary)?;
+        json["kind"] = serde_json::json!("summary");
+        writeln!(writer, "{}", serde_json::to_string(&json)?)?;
 
         writer.flush()?;
         drop(writer);
@@ -494,13 +581,51 @@ impl ResultPersister {
         Ok(final_path)
     }
 
-    /// Get the most recent results file
-    pub fn latest_results(&self) -> Result<Option<std::path::PathBuf>> {
-        if !self.results_dir.exists() {
-            return Ok(None);
+    /// Build the persisted entry for a result.
+    pub fn entry_from(result: &crate::runner::TestResult) -> ResultEntry {
+        ResultEntry {
+            timestamp: result.finished_at,
+            installer_name: result.installer_name.clone(),
+            status: result.status.as_str().to_string(),
+            duration_ms: result.duration_ms,
+            exit_code: result.exit_code,
+            error_classification: result.error.as_ref().map(|e| ErrorClassificationEntry {
+                category: e.category.clone(),
+                severity: format!("{:?}", e.severity),
+                retryable: e.retryable,
+                confidence: e.confidence,
+            }),
+            stderr_excerpt: result.stderr.chars().take(500).collect(),
+            retry_count: result.retry_count(),
+            sha256_verified: result.checksum_state == crate::runner::ChecksumState::Verified,
+            checksum_state: result.checksum_state.as_str().to_string(),
+            checksum_expected: result.checksum_result.as_ref().map(|c| c.expected.clone()),
+            checksum_actual: result.checksum_result.as_ref().map(|c| c.actual.clone()),
+            stdout_tail: tail(&result.stdout, PERSISTED_TAIL_BYTES),
+            stderr_tail: tail(&result.stderr, PERSISTED_TAIL_BYTES),
+            container_id: result.container_id.clone(),
+            last_attempt_ms: result.last_attempt_ms,
+            attempts: result
+                .attempts
+                .iter()
+                .map(|a| AttemptEntry {
+                    index: a.index,
+                    status: a.status.as_str().to_string(),
+                    exit_code: a.exit_code,
+                    duration_ms: a.duration_ms,
+                    waited_before_ms: a.waited_before_ms,
+                    stderr_tail: a.stderr_tail.clone(),
+                })
+                .collect(),
         }
+    }
 
-        let mut files: Vec<_> = std::fs::read_dir(&self.results_dir)?
+    /// All result files in the directory (any order).
+    fn result_files(&self) -> Result<Vec<PathBuf>> {
+        if !self.results_dir.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(std::fs::read_dir(&self.results_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
@@ -510,52 +635,144 @@ impl ResultPersister {
                     .unwrap_or(false)
             })
             .map(|e| e.path())
-            .collect();
-
-        files.sort_by(|a, b| b.cmp(a)); // newest first
-        Ok(files.into_iter().next())
+            .collect())
     }
 
-    /// Read results from a file, returning (entries, summary)
-    pub fn read_results(
-        path: &std::path::Path,
-    ) -> Result<(Vec<ResultEntry>, Option<RunSummaryEntry>)> {
+    /// Best-effort start time for a results file that has no readable header or summary:
+    /// the timestamp embedded in the file name, else the file's modification time.
+    fn started_at_from_path(path: &Path) -> DateTime<Utc> {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let stamp = name.trim_start_matches("results_").split('_').next().unwrap_or("");
+        for fmt in ["%Y%m%dT%H%M%S%.3fZ", "%Y%m%dT%H%M%SZ"] {
+            if let Ok(t) = chrono::NaiveDateTime::parse_from_str(stamp, fmt) {
+                return t.and_utc();
+            }
+        }
+        // Legacy `results_YYYYmmdd_HHMMSS.jsonl`
+        let legacy = name.trim_start_matches("results_").trim_end_matches(".jsonl");
+        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(legacy, "%Y%m%d_%H%M%S") {
+            return t.and_utc();
+        }
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(DateTime::<Utc>::from)
+            .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::UNIX_EPOCH))
+    }
+
+    /// List persisted runs, newest first (by header start time, then file name).
+    pub fn list_runs(&self) -> Result<Vec<RunInfo>> {
+        let mut runs = Vec::new();
+        for path in self.result_files()? {
+            let Ok(file) = Self::read_run_file(&path) else { continue };
+            let (run_id, started_at) = match (&file.header, &file.summary) {
+                (Some(h), _) => (h.run_id.clone(), h.started_at),
+                (None, Some(s)) => (s.run_id.clone(), s.timestamp_start),
+                (None, None) => (String::new(), Self::started_at_from_path(&path)),
+            };
+            let (total, passed, failed, interrupted) = match &file.summary {
+                Some(s) => (s.total, s.passed, s.failed, s.interrupted),
+                None => (file.entries.len(), 0, 0, false),
+            };
+            runs.push(RunInfo { path, run_id, started_at, total, passed, failed, interrupted });
+        }
+        runs.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| b.path.cmp(&a.path)));
+        Ok(runs)
+    }
+
+    /// Get the most recent results file
+    pub fn latest_results(&self) -> Result<Option<PathBuf>> {
+        Ok(self.list_runs()?.into_iter().next().map(|r| r.path))
+    }
+
+    /// Find a run by run id prefix (or `last`).
+    pub fn find_run(&self, prefix: &str) -> Result<Option<RunInfo>> {
+        let runs = self.list_runs()?;
+        if prefix.eq_ignore_ascii_case("last") {
+            return Ok(runs.into_iter().next());
+        }
+        Ok(runs.into_iter().find(|r| r.run_id.starts_with(prefix)))
+    }
+
+    /// Keep the newest `keep` result files, delete older ones. `keep == 0` keeps everything.
+    /// Only files matching `results_*.jsonl` are ever removed.
+    pub fn prune(&self, keep: usize) -> Result<usize> {
+        if keep == 0 {
+            return Ok(0);
+        }
+        let runs = self.list_runs()?;
+        let mut deleted = 0;
+        for run in runs.into_iter().skip(keep) {
+            tracing::info!(path = %run.path.display(), "Pruning old results file");
+            std::fs::remove_file(&run.path)?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// Read a results file (header, entries, summary). Old files without `kind` are handled.
+    pub fn read_run_file(path: &Path) -> Result<RunFile> {
         let content = std::fs::read_to_string(path)?;
-        let lines: Vec<&str> = content.lines().collect();
+        let mut file = RunFile::default();
 
-        let mut entries = Vec::new();
-        let mut summary = None;
-
-        for line in &lines {
+        for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            // Try to parse as summary first (has run_id field)
-            if let Ok(s) = serde_json::from_str::<RunSummaryEntry>(line) {
-                summary = Some(s);
-            } else if let Ok(e) = serde_json::from_str::<ResultEntry>(line) {
-                entries.push(e);
+            let value: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            match value.get("kind").and_then(|k| k.as_str()) {
+                Some("run") => {
+                    if let Ok(h) = serde_json::from_value::<RunHeader>(value.clone()) {
+                        file.header = Some(h);
+                    }
+                }
+                Some("result") => {
+                    if let Ok(e) = serde_json::from_value::<ResultEntry>(value.clone()) {
+                        file.entries.push(e);
+                    }
+                }
+                Some("summary") => {
+                    if let Ok(s) = serde_json::from_value::<RunSummaryEntry>(value.clone()) {
+                        file.summary = Some(s);
+                    }
+                }
+                _ => {
+                    // Legacy line without a kind: summary has run_id, results have installer_name.
+                    if let Ok(s) = serde_json::from_value::<RunSummaryEntry>(value.clone()) {
+                        file.summary = Some(s);
+                    } else if let Ok(e) = serde_json::from_value::<ResultEntry>(value.clone()) {
+                        file.entries.push(e);
+                    }
+                }
             }
         }
 
-        Ok((entries, summary))
+        Ok(file)
+    }
+
+    /// Read results from a file, returning (entries, summary)
+    pub fn read_results(path: &Path) -> Result<(Vec<ResultEntry>, Option<RunSummaryEntry>)> {
+        let file = Self::read_run_file(path)?;
+        Ok((file.entries, file.summary))
     }
 
     /// Get the results directory path
-    pub fn results_dir(&self) -> &std::path::Path {
+    pub fn results_dir(&self) -> &Path {
         &self.results_dir
     }
 }
 
 /// Default results directory
-fn dirs_default_results_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home).join(".local").join("share").join("afsc").join("results")
+fn dirs_default_results_dir() -> PathBuf {
+    crate::config::default_data_dir().join("results")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::TestResult;
     use serde::Deserialize;
     use tempfile::NamedTempFile;
 
@@ -675,5 +892,111 @@ mod tests {
         assert!(files[0].to_string_lossy().contains("20260127"));
         assert!(files[1].to_string_lossy().contains("20260126"));
         assert!(files[2].to_string_lossy().contains("20260125"));
+    }
+
+    #[test]
+    fn test_same_millisecond_persists_do_not_collide() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = ResultPersister::new(tmp.path());
+        let results = vec![TestResult::new("a").passed()];
+        let now = Utc::now();
+        let a = p.persist(&results, "11111111-aaaa", now).unwrap();
+        let b = p.persist(&results, "22222222-bbbb", now).unwrap();
+        assert_ne!(a, b);
+        assert!(a.exists() && b.exists());
+        assert_eq!(p.list_runs().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_run_file_round_trip_with_header_and_kinds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = ResultPersister::new(tmp.path());
+        let mut failed = TestResult::new("b").failed(100, "E: Unable to locate package foo");
+        failed.stdout = "some stdout".into();
+        crate::runner::finalize_failure(&mut failed, None);
+        let results = vec![TestResult::new("a").passed(), failed];
+        let header = RunHeader {
+            backend: "local".into(),
+            parallel: 2,
+            timeout_seconds: 60,
+            retries: 1,
+            installer_count: 2,
+            ..RunHeader::new("run-xyz")
+        };
+        let path = p.persist_with_header(&results, &header, true).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let kinds: Vec<String> = content
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["run", "result", "result", "summary"]);
+
+        let file = ResultPersister::read_run_file(&path).unwrap();
+        let h = file.header.unwrap();
+        assert_eq!(h.run_id, "run-xyz");
+        assert_eq!(h.parallel, 2);
+        assert_eq!(file.entries.len(), 2);
+        let b = &file.entries[1];
+        assert_eq!(b.status, "failed");
+        assert_eq!(b.stdout_tail, "some stdout");
+        assert_eq!(b.error_classification.as_ref().unwrap().category, "dependency");
+        assert_eq!(b.checksum_state, "not_checked");
+        let s = file.summary.unwrap();
+        assert!(s.interrupted);
+        assert_eq!(s.exit_code, 1);
+        assert_eq!(s.failed, 1);
+    }
+
+    #[test]
+    fn test_legacy_file_without_kind_is_readable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("results_20260901_120000.jsonl");
+        let legacy = concat!(
+            "{\"timestamp\":\"2026-09-01T12:00:00Z\",\"installer_name\":\"x\",\"status\":\"passed\",\"duration_ms\":5,\"exit_code\":0,\"error_classification\":null,\"stderr_excerpt\":\"\",\"retry_count\":0,\"sha256_verified\":true}\n",
+            "{\"run_id\":\"legacy\",\"total\":1,\"passed\":1,\"failed\":0,\"skipped\":0,\"duration_total_ms\":5,\"timestamp_start\":\"2026-09-01T12:00:00Z\",\"timestamp_end\":\"2026-09-01T12:00:01Z\"}\n"
+        );
+        std::fs::write(&path, legacy).unwrap();
+        let file = ResultPersister::read_run_file(&path).unwrap();
+        assert!(file.header.is_none());
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(file.summary.unwrap().run_id, "legacy");
+        let p = ResultPersister::new(tmp.path());
+        assert_eq!(p.latest_results().unwrap().unwrap(), path);
+    }
+
+    #[test]
+    fn test_prune_keeps_newest_and_ignores_foreign_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = ResultPersister::new(tmp.path());
+        let results = vec![TestResult::new("a").passed()];
+        let base = Utc::now() - chrono::Duration::minutes(10);
+        for i in 0..5 {
+            p.persist(&results, &format!("run-{i}"), base + chrono::Duration::minutes(i)).unwrap();
+        }
+        std::fs::write(tmp.path().join("notes.txt"), "keep me").unwrap();
+        std::fs::write(tmp.path().join("metrics.json"), "{}").unwrap();
+
+        assert_eq!(p.prune(0).unwrap(), 0);
+        assert_eq!(p.prune(2).unwrap(), 3);
+        let runs = p.list_runs().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].run_id, "run-4");
+        assert_eq!(runs[1].run_id, "run-3");
+        assert!(tmp.path().join("notes.txt").exists());
+        assert!(tmp.path().join("metrics.json").exists());
+    }
+
+    #[test]
+    fn test_find_run_by_prefix_and_last() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = ResultPersister::new(tmp.path());
+        let results = vec![TestResult::new("a").passed()];
+        let t0 = Utc::now() - chrono::Duration::minutes(5);
+        p.persist(&results, "abcdef12-old", t0).unwrap();
+        p.persist(&results, "fedcba98-new", t0 + chrono::Duration::minutes(1)).unwrap();
+        assert_eq!(p.find_run("last").unwrap().unwrap().run_id, "fedcba98-new");
+        assert_eq!(p.find_run("abcd").unwrap().unwrap().run_id, "abcdef12-old");
+        assert!(p.find_run("zzz").unwrap().is_none());
     }
 }

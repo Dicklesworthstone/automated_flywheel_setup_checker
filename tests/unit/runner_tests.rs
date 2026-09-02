@@ -311,6 +311,7 @@ fn test_container_config_custom() {
         timeout_seconds: 600,
         volumes: vec![("/host/path".to_string(), "/container/path".to_string())],
         environment: vec![("DEBUG".to_string(), "1".to_string())],
+        ..Default::default()
     };
 
     assert_eq!(config.image, "debian:latest");

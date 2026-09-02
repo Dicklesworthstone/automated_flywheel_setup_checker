@@ -2,11 +2,15 @@
 //!
 //! Provides a worker pool that runs installer tests concurrently,
 //! dispatching through the executor abstraction (Docker or local mode).
+//!
+//! Cancellation: the pool owns a child of the run's [`CancellationToken`]. Fail-fast cancels it
+//! on the first failure (in-flight installers are stopped and reported `Cancelled`, queued ones
+//! `Skipped`); a signal cancels the parent and produces the same shape with `Cancelled`.
 
 use super::executor::{finalize_failure, InstallerTestRunner, RunnerConfig};
-use super::installer::{InstallerTest, TestResult};
+use super::installer::{InstallerTest, TestResult, TestStatus};
+use crate::parser::CANCELLED_MARKER;
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
@@ -41,20 +45,31 @@ impl ParallelRunner {
     /// Each worker gets its own executor instance. In Docker mode, each test
     /// gets its own container. Results are collected in submission order.
     pub async fn run_all(&self, tests: Vec<InstallerTest>) -> Result<Vec<TestResult>> {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        // The pool token is a child of the run token: a signal cancels both; fail-fast cancels
+        // only the pool.
+        let run_token = self.runner_config.cancel.clone();
+        let pool_token = run_token.child_token();
         let mut handles = Vec::new();
 
         for test in tests {
             let semaphore = self.semaphore.clone();
-            let config = self.runner_config.clone();
-            let cancelled = cancelled.clone();
+            let mut config = self.runner_config.clone();
+            config.cancel = pool_token.clone();
+            let pool_token = pool_token.clone();
+            let run_token = run_token.clone();
             let fail_fast = self.fail_fast;
 
             let handle = tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
 
-                // Check if we should skip due to fail-fast
-                if cancelled.load(Ordering::Relaxed) {
+                // Queued work after cancellation: a signal yields Cancelled, fail-fast yields Skipped.
+                if run_token.is_cancelled() {
+                    let mut r = TestResult::new(&test.name)
+                        .cancelled(format!("{CANCELLED_MARKER} before start"));
+                    finalize_failure(&mut r, None);
+                    return r;
+                }
+                if pool_token.is_cancelled() {
                     return TestResult::new(&test.name).skipped("Skipped due to fail-fast");
                 }
 
@@ -77,9 +92,10 @@ impl ParallelRunner {
                     "Test completed"
                 );
 
-                // Signal cancellation on failure if fail-fast is enabled
-                if fail_fast && !result.success {
-                    cancelled.store(true, Ordering::Relaxed);
+                // Signal cancellation on failure if fail-fast is enabled (not for cancellations
+                // caused by the run token itself).
+                if fail_fast && !result.success && result.status != TestStatus::Cancelled {
+                    pool_token.cancel();
                 }
 
                 result
@@ -109,6 +125,7 @@ impl ParallelRunner {
 mod tests {
     use super::*;
     use crate::runner::executor::ExecutionBackend;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn test_parallel_runner_creation() {
@@ -130,5 +147,24 @@ mod tests {
         let config = RunnerConfig { backend: ExecutionBackend::Local, ..Default::default() };
         let runner = ParallelRunner::new(0, config);
         assert_eq!(runner.max_parallel(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_run_token_marks_queued_tests_cancelled() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let config =
+            RunnerConfig { backend: ExecutionBackend::Local, cancel, ..Default::default() };
+        let runner = ParallelRunner::new(2, config);
+        let tests = vec![
+            InstallerTest::new("a", "https://127.0.0.1:9/a.sh"),
+            InstallerTest::new("b", "https://127.0.0.1:9/b.sh"),
+        ];
+        let results = runner.run_all(tests).await.unwrap();
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert_eq!(r.status, TestStatus::Cancelled);
+            assert_eq!(r.error.as_ref().unwrap().category, "cancelled");
+        }
     }
 }

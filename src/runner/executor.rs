@@ -6,7 +6,9 @@
 //! Contract (shared by both backends):
 //! - every non-passing result carries an [`ErrorClassification`] (see [`finalize_failure`]);
 //! - retries accumulate an [`AttemptRecord`] per attempt instead of replacing the result;
-//! - checksum verification runs before execution and a mismatch is never retried.
+//! - checksum verification runs before execution and a mismatch is never retried;
+//! - the run's [`CancellationToken`] stops in-flight installers (container stopped, local child
+//!   killed) and yields `Cancelled` results instead of leaking work.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -16,13 +18,15 @@ use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::parser::{classify_error, ErrorClassification, TIMEOUT_MARKER};
+use crate::parser::{classify_error, ErrorClassification, CANCELLED_MARKER, TIMEOUT_MARKER};
 
 use super::container::{ContainerConfig, ContainerGuard, ContainerManager, PullPolicy};
 use super::installer::{
-    tail, AttemptRecord, ChecksumResult, InstallerTest, RetryInfo, TestResult, TestStatus,
+    tail, AttemptRecord, ChecksumResult, ChecksumState, InstallerTest, RetryInfo, TestResult,
+    TestStatus,
 };
 use super::retry::RetryConfig;
 
@@ -67,6 +71,8 @@ pub struct RunnerConfig {
     pub backend: ExecutionBackend,
     /// Backoff policy between attempts (the attempt count comes from each `InstallerTest`)
     pub retry: RetryConfig,
+    /// Run-wide cancellation (signals, fail-fast, deadline)
+    pub cancel: CancellationToken,
 }
 
 impl Default for RunnerConfig {
@@ -80,6 +86,7 @@ impl Default for RunnerConfig {
                 pull_policy: PullPolicy::IfNotPresent,
             },
             retry: RetryConfig::executor_default(3),
+            cancel: CancellationToken::new(),
         }
     }
 }
@@ -105,6 +112,17 @@ pub fn classify_result(result: &TestResult) -> ErrorClassification {
     classify_error(&text, result.exit_code.unwrap_or(-1))
 }
 
+/// Mark a result as cancelled by the run token.
+fn mark_cancelled(result: &mut TestResult, start: Instant, reason: &str) {
+    result.status = TestStatus::Cancelled;
+    result.success = false;
+    result.stderr = format!("{CANCELLED_MARKER}: {reason}");
+    result.duration = start.elapsed();
+    result.duration_ms = result.duration.as_millis() as u64;
+    result.last_attempt_ms = result.duration_ms;
+    result.finished_at = chrono::Utc::now();
+}
+
 /// Executes installer tests in isolated environments
 pub struct InstallerTestRunner {
     config: RunnerConfig,
@@ -113,6 +131,11 @@ pub struct InstallerTestRunner {
 impl InstallerTestRunner {
     pub fn new(config: RunnerConfig) -> Self {
         Self { config }
+    }
+
+    /// The run-wide cancellation token.
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.config.cancel
     }
 
     /// Build a shell script that downloads, verifies checksum, and executes the installer.
@@ -249,6 +272,12 @@ set +e
 
     /// Run an installer test using the configured backend (single attempt)
     pub async fn run_test(&self, test: &InstallerTest) -> Result<TestResult> {
+        if self.config.cancel.is_cancelled() {
+            let mut result = TestResult::new(&test.name);
+            mark_cancelled(&mut result, Instant::now(), "run cancelled before start");
+            finalize_failure(&mut result, None);
+            return Ok(result);
+        }
         let mut result = match &self.config.backend {
             ExecutionBackend::Docker { container_config, pull_policy } => {
                 self.run_test_docker(test, container_config, pull_policy).await?
@@ -272,6 +301,7 @@ set +e
         let mut result = TestResult::new(&test.name);
         let start_time = Instant::now();
         let test_timeout = self.test_timeout(test);
+        let cancel = &self.config.cancel;
 
         info!(
             installer = %test.name,
@@ -292,7 +322,7 @@ set +e
         }
 
         // Create container manager and container
-        let manager = ContainerManager::new(config).with_pull_policy(pull_policy.clone());
+        let manager = ContainerManager::try_new(config)?.with_pull_policy(pull_policy.clone());
 
         let container_id = manager
             .create_container(&test.name)
@@ -311,7 +341,7 @@ set +e
             debug!(container_id = %container_id, "Installing prerequisites in container (not using base image)");
             let prereq_install_result = timeout(
                 Duration::from_secs(180),
-                manager.exec_in_container(
+                manager.exec_in_container_cancellable(
                     &container_id,
                     &[
                         "bash",
@@ -321,12 +351,19 @@ set +e
                         build-essential sudo gnupg libssl-dev pkg-config \
                         python3 rsync zsh >/dev/null 2>&1",
                     ],
+                    cancel,
                 ),
             )
             .await;
             match prereq_install_result {
                 Ok(Ok((code, _, _))) if code != 0 => {
                     warn!(container_id = %container_id, exit_code = code, "Prerequisite installation exited non-zero");
+                }
+                Ok(Err(e)) if cancel.is_cancelled() => {
+                    debug!(container_id = %container_id, error = %e, "Prerequisite installation cancelled");
+                    guard.cleanup().await;
+                    mark_cancelled(&mut result, start_time, "cancelled during prerequisite setup");
+                    return Ok(result);
                 }
                 Ok(Err(e)) => {
                     warn!(container_id = %container_id, error = %e, "Failed to install prerequisites in container");
@@ -354,10 +391,14 @@ set +e
             "Executing installer in container"
         );
 
-        // Execute with timeout
+        // Execute with timeout and cancellation
         let exec_result = timeout(
             test_timeout,
-            manager.exec_in_container(&container_id, &["bash", "-c", &install_script]),
+            manager.exec_in_container_cancellable(
+                &container_id,
+                &["bash", "-c", &install_script],
+                cancel,
+            ),
         )
         .await;
 
@@ -395,6 +436,9 @@ set +e
                         return Ok(result);
                     }
                     result = result.with_checksum_result(checksum_result);
+                } else if test.expected_sha256.is_some() {
+                    // Download failed before the compare could run.
+                    result = result.with_checksum_state(ChecksumState::Unknown);
                 }
 
                 if exit_code == 0 {
@@ -417,6 +461,14 @@ set +e
                     result.status = TestStatus::Failed;
                     result.success = false;
                 }
+            }
+            Ok(Err(e)) if cancel.is_cancelled() => {
+                warn!(
+                    installer = %test.name,
+                    container_id = %container_id,
+                    "Installer test cancelled"
+                );
+                mark_cancelled(&mut result, start_time, &e.to_string());
             }
             Ok(Err(e)) => {
                 let elapsed = start_time.elapsed();
@@ -462,6 +514,7 @@ set +e
     async fn run_test_local(&self, test: &InstallerTest) -> Result<TestResult> {
         let mut result = TestResult::new(&test.name);
         let start_time = Instant::now();
+        let cancel = &self.config.cancel;
 
         info!(
             installer = %test.name,
@@ -498,6 +551,7 @@ set +e
                 result.exit_code = dl_output.status.code();
                 result.status = TestStatus::Failed;
                 result.success = false;
+                result.checksum_state = ChecksumState::Unknown;
                 result.finished_at = chrono::Utc::now();
                 result.duration = start_time.elapsed();
                 result.duration_ms = result.duration.as_millis() as u64;
@@ -583,7 +637,8 @@ set +e
             .env("CI", "true")
             .env("RUSTUP_INIT_SKIP_PATH_CHECK", "yes")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         // Add test-specific environment variables
         for (key, value) in &test.environment {
@@ -602,8 +657,8 @@ set +e
         let mut stdout_handle = child.stdout.take().expect("stdout was piped");
         let mut stderr_handle = child.stderr.take().expect("stderr was piped");
 
-        // Read outputs with timeout
-        let execution_result = timeout(test_timeout, async {
+        // Read outputs with timeout and cancellation
+        let execution = async {
             let mut stdout_buf = Vec::new();
             let mut stderr_buf = Vec::new();
 
@@ -618,11 +673,24 @@ set +e
             let status = child.wait().await.context("Failed to wait for process")?;
 
             Ok::<_, anyhow::Error>((status, stdout_buf, stderr_buf))
-        })
-        .await;
+        };
 
-        match execution_result {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
+        enum Outcome {
+            Done(Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let outcome = tokio::select! {
+            _ = cancel.cancelled() => Outcome::Cancelled,
+            r = timeout(test_timeout, execution) => match r {
+                Ok(inner) => Outcome::Done(inner),
+                Err(_) => Outcome::TimedOut,
+            },
+        };
+
+        match outcome {
+            Outcome::Done(Ok((status, stdout_buf, stderr_buf))) => {
                 let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
                 let exit_code = status.code().unwrap_or(-1);
@@ -653,7 +721,7 @@ set +e
                     result.success = false;
                 }
             }
-            Ok(Err(e)) => {
+            Outcome::Done(Err(e)) => {
                 warn!(installer = %test.name, error = %e, "Installer execution error (local)");
                 result.stderr = format!("Execution error: {}", e);
                 result.status = TestStatus::Failed;
@@ -661,17 +729,13 @@ set +e
                 result.duration = start_time.elapsed();
                 result.duration_ms = result.duration.as_millis() as u64;
             }
-            Err(_) => {
+            Outcome::TimedOut => {
                 warn!(
                     installer = %test.name,
                     timeout_seconds = test_timeout.as_secs(),
                     "Installer test timed out (local)"
                 );
-
-                if let Err(e) = child.kill().await {
-                    debug!(error = %e, "Failed to kill timed-out process");
-                }
-
+                // The child is killed on drop (kill_on_drop); nothing else holds it.
                 result.status = TestStatus::TimedOut;
                 result.success = false;
                 result.stderr = format!(
@@ -681,6 +745,10 @@ set +e
                 );
                 result.duration = test_timeout;
                 result.duration_ms = test_timeout.as_millis() as u64;
+            }
+            Outcome::Cancelled => {
+                warn!(installer = %test.name, "Installer test cancelled (local)");
+                mark_cancelled(&mut result, start_time, "cancelled while running installer");
             }
         }
 
@@ -718,7 +786,9 @@ set +e
                 waited_before_ms,
             });
 
-            let retry = attempt_index < max_attempts && Self::should_retry_result(&result);
+            let retry = attempt_index < max_attempts
+                && !self.config.cancel.is_cancelled()
+                && Self::should_retry_result(&result);
             if !retry {
                 result.last_attempt_ms = result.duration_ms;
                 result.attempt = attempt_index;
@@ -745,7 +815,20 @@ set +e
                 error: tail(&result.stderr, ATTEMPT_STDERR_TAIL_BYTES),
                 wait_ms,
             });
-            tokio::time::sleep(wait).await;
+            tokio::select! {
+                _ = self.config.cancel.cancelled() => {
+                    // Cancelled during backoff: report the last attempt as cancelled.
+                    mark_cancelled(&mut result, overall_start, "cancelled during retry backoff");
+                    finalize_failure(&mut result, None);
+                    result.attempt = attempt_index;
+                    result.max_attempts = max_attempts;
+                    result.attempts = attempts;
+                    result.retries = retries;
+                    result.started_at = started_at;
+                    return Ok(result);
+                }
+                _ = tokio::time::sleep(wait) => {}
+            }
             waited_before_ms = wait_ms;
             attempt_index += 1;
         }
@@ -791,6 +874,7 @@ mod tests {
         assert!(!config.dry_run);
         assert!(matches!(config.backend, ExecutionBackend::Docker { .. }));
         assert_eq!(config.retry.max_attempts, 4);
+        assert!(!config.cancel.is_cancelled());
     }
 
     #[test]
@@ -981,5 +1065,49 @@ mod tests {
         if !result.success {
             assert!(result.error.is_some(), "failures must be classified");
         }
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_token_short_circuits_before_start() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let config =
+            RunnerConfig { backend: ExecutionBackend::Local, cancel, ..Default::default() };
+        let runner = InstallerTestRunner::new(config);
+        let test = InstallerTest::new("x", "https://127.0.0.1:9/x.sh").with_retry_count(3);
+        let result = runner.run_test_with_retry(&test).await.unwrap();
+        assert_eq!(result.status, TestStatus::Cancelled);
+        assert_eq!(result.error.as_ref().unwrap().category, "cancelled");
+        assert_eq!(result.attempts.len(), 1, "no retries after cancellation");
+    }
+
+    #[tokio::test]
+    async fn test_local_installer_is_cancelled_mid_run() {
+        let cancel = CancellationToken::new();
+        let config = RunnerConfig {
+            backend: ExecutionBackend::Local,
+            cancel: cancel.clone(),
+            ..Default::default()
+        };
+        let runner = InstallerTestRunner::new(config);
+        // A sleeping "installer" served via file:// with a matching checksum.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("sleep.sh");
+        std::fs::write(&script, "#!/bin/bash\nsleep 30\nexit 0\n").unwrap();
+        let sha = hex::encode(Sha256::digest(std::fs::read(&script).unwrap()));
+        let test = InstallerTest::new("sleeper", format!("file://{}", script.display()))
+            .with_sha256(sha)
+            .with_timeout(Duration::from_secs(60));
+
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            canceller.cancel();
+        });
+        let start = Instant::now();
+        let result = runner.run_test_with_retry(&test).await.unwrap();
+        assert_eq!(result.status, TestStatus::Cancelled);
+        assert!(start.elapsed() < Duration::from_secs(5), "cancellation must be prompt");
+        assert_eq!(result.error.as_ref().unwrap().category, "cancelled");
     }
 }

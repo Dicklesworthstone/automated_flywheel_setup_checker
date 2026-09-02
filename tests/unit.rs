@@ -18,5 +18,8 @@ mod remediation_tests;
 #[path = "unit/reporting_tests.rs"]
 mod reporting_tests;
 
+#[path = "unit/resolve_tests.rs"]
+mod resolve_tests;
+
 #[path = "unit/runner_tests.rs"]
 mod runner_tests;

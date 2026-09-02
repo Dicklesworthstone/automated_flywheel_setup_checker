@@ -1,14 +1,29 @@
 # Automated Flywheel Setup Checker - Default Configuration
+#
+# Every key below equals the built-in default; omit any section or key you do not want to change.
+# Precedence: built-in defaults < this file < AFSC_* environment variables < CLI flags.
+# Environment variable names are AFSC_<SECTION>_<KEY> (e.g. AFSC_DOCKER_IMAGE, AFSC_EXECUTION_PARALLEL).
+# Run `automated_flywheel_setup_checker config show --resolved` to see effective values and sources.
 
 [general]
-# Path to the ACFS repository
+# Path to the ACFS repository (must contain checksums.yaml)
 acfs_repo = "/data/projects/agentic_coding_flywheel_setup"
-# Log level: trace, debug, info, warn, error
+# Log level when neither RUST_LOG nor -v is given: trace, debug, info, warn, error
 log_level = "info"
+# Data directory for results, metrics, logs, locks (empty = $XDG_DATA_HOME/afsc or ~/.local/share/afsc)
+data_dir = ""
+# Number of result files to keep (0 = keep all)
+results_retention = 200
+# Structured JSONL log directory (empty = <data_dir>/logs)
+log_dir = ""
+# Days to keep structured logs
+log_retention_days = 30
+# Allow file:// installer URLs (tests and local fixtures only)
+allow_file_urls = false
 
 [docker]
-# Base Docker image for testing
-image = "ubuntu:22.04"
+# Base image; the checker derives a prepared image with prerequisites and a non-root user from it
+image = "afsc-base:latest"
 # Memory limit for containers
 memory_limit = "2G"
 # CPU quota (1.0 = 1 full CPU)
@@ -17,28 +32,52 @@ cpu_quota = 1.0
 timeout_seconds = 300
 # Image pull policy: always, if-not-present, never
 pull_policy = "if-not-present"
+# Timeout in seconds for building the prepared image
+build_timeout_seconds = 900
+# Run installers as root inside containers (default: non-root afsc-user)
+run_as_root = false
+# Remove orphaned afsc-managed containers at startup
+reap_orphans = true
+# Container network mode: bridge or none
+network = "bridge"
 
 [execution]
-# Number of parallel installer tests (1 = sequential)
+# Number of parallel installer tests: an integer or "auto" (= max(1, min(4, cores / 2)))
 parallel = 1
-# Number of retries for transient failures
+# Retries for transient failures (attempts = retries + 1)
 retry_transient = 3
 # Stop on first failure
 fail_fast = false
+# Cap on captured stdout/stderr bytes per attempt
+max_capture_bytes = 4194304
+# Whole-run deadline in seconds (0 = none)
+run_deadline_seconds = 0
+# Installer ordering: longest-first, name, manifest
+order = "longest-first"
 
 [remediation]
-# Enable auto-remediation using Claude
+# Enable auto-remediation (equivalent to mode != off)
 enabled = false
-# Auto-commit fixes (requires enabled=true)
+# Remediation mode: off, advisory, propose, apply
+mode = "off"
+# Auto-commit fixes (apply mode)
 auto_commit = false
-# Create PRs for fixes (requires enabled=true)
+# Create PRs for fixes (propose/apply modes)
 create_pr = true
 # Maximum remediation attempts per failure
 max_attempts = 3
+# Per-run Claude spend cap in USD
+cost_limit_usd = 1.0
+# Maximum agent turns per Claude invocation
+max_turns = 12
+# Timeout per Claude invocation in seconds
+timeout_seconds = 300
 
 [notifications]
 # Enable failure notifications
 enabled = false
+# When to send: every_run, on_change, daily_digest
+mode = "on_change"
 # Env var holding the Slack webhook URL (leave empty to disable Slack)
 slack_webhook_env = ""
 # Optional Slack channel override
@@ -51,19 +90,34 @@ notify_on_failure = true
 notify_on_success = false
 
 [monitoring]
-# Enable health check endpoint
+# Enable GET /health on the monitoring server
 health_endpoint = false
-# Health check port
+# Shared listener port when health is enabled
 health_port = 8080
-# Enable metrics collection
+# Enable GET /metrics on the monitoring server
 metrics_enabled = false
-# Metrics port (for Prometheus scraping)
+# Listener port when serving metrics without /health
 metrics_port = 9090
+# Bind address for the monitoring listener
+bind = "0.0.0.0"
+# /health reports "stale" when the last run is older than this many seconds (26 h)
+stale_after_seconds = 93600
+# HTTP status returned for a stale health check
+stale_status_code = 503
 
 [watchdog]
-# Systemd watchdog integration (auto-detected from WATCHDOG_USEC env)
-# This section provides fallback configuration when not running under systemd
-# Default ping interval in seconds (used if WATCHDOG_USEC not set)
+# Fallback ping interval in seconds when WATCHDOG_USEC is not set by systemd
 default_interval_seconds = 120
-# Log watchdog pings at debug level
+# Log watchdog pings at info instead of debug
 log_pings = false
+
+# Per-installer overrides (all keys optional):
+# [installers.mdwb]
+# timeout_seconds = 900
+# [installers.ohmyzsh]
+# interpreter = "sh"
+# args = ["--unattended", "--keep-zshrc"]
+# [installers.broken_tool]
+# skip = true
+# skip_reason = "upstream installer removed"
+[installers]

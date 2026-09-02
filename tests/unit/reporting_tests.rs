@@ -519,16 +519,19 @@ fn test_write_results_valid_jsonl() {
     let content = fs::read_to_string(&path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
 
-    // 2 result entries + 1 summary = 3 lines
-    assert_eq!(lines.len(), 3);
+    // 1 run header + 2 result entries + 1 summary = 4 lines
+    assert_eq!(lines.len(), 4);
 
-    // Each line should be valid JSON
+    // Each line should be valid JSON with a kind discriminator
     for line in &lines {
-        assert!(serde_json::from_str::<serde_json::Value>(line).is_ok(), "Invalid JSON: {}", line);
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|_| panic!("Invalid JSON: {}", line));
+        assert!(v["kind"].is_string(), "line lacks kind: {}", line);
     }
 
-    // Last line should contain run_id (summary)
-    assert!(lines[2].contains("run-2"));
+    // First line is the run header, last line is the summary; both carry the run id
+    assert!(lines[0].contains("\"kind\":\"run\"") && lines[0].contains("run-2"));
+    assert!(lines[3].contains("\"kind\":\"summary\"") && lines[3].contains("run-2"));
 }
 
 #[test]

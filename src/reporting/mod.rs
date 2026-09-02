@@ -6,8 +6,8 @@ mod notify;
 mod summary;
 
 pub use jsonl::{
-    JsonlReporter, JsonlWriter, LogEntry, LogLevel, LogRotation, ResultEntry, ResultPersister,
-    RunSummaryEntry,
+    AttemptEntry, ErrorClassificationEntry, JsonlReporter, JsonlWriter, LogEntry, LogLevel,
+    LogRotation, ResultEntry, ResultPersister, RunFile, RunHeader, RunInfo, RunSummaryEntry,
 };
 pub use metrics::{MetricsExporter, MetricsSnapshot};
 pub use notify::{GitHubConfig, NotificationConfig, Notifier, SlackConfig};

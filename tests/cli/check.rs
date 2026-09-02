@@ -210,10 +210,77 @@ fn check_dry_run_json_lists_installers() {
 }
 
 #[test]
-fn check_missing_checksums_is_an_error() {
+fn check_missing_checksums_is_a_config_error_exit_2() {
     let fx = Fixture::new();
     std::fs::remove_file(fx.acfs.join("checksums.yaml")).unwrap();
     let out = fx.run(&["check", "--local"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("checksums.yaml not found"));
+}
+
+#[test]
+fn docker_unreachable_is_an_infrastructure_error_exit_3() {
+    let mut fx = Fixture::new();
+    fx.add_pass("good_tool");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("automated_flywheel_setup_checker");
+    let out = cmd
+        .env("HOME", &fx.home)
+        .env("DOCKER_HOST", "unix:///nonexistent/afsc-test/docker.sock")
+        .arg("--config")
+        .arg(&fx.config)
+        .args(["check", "good_tool"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("Docker daemon unreachable"), "{err}");
+    assert!(err.contains("--local"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
+    use std::time::{Duration, Instant};
+    let mut fx = Fixture::new();
+    fx.set_execution(2, 0, false);
+    fx.add_sleeper("slow_a", 30);
+    fx.add_sleeper("slow_b", 30);
+    fx.add_pass("queued_c");
+
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("automated_flywheel_setup_checker");
+    let mut child = cmd
+        .env("HOME", &fx.home)
+        .arg("--config")
+        .arg(&fx.config)
+        .args(["check", "--local", "--format", "jsonl"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    let start = Instant::now();
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = child.wait_with_output().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10), "cancellation must be prompt");
+    assert_eq!(out.status.code(), Some(143), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let lines = jsonl_lines(&out);
+    let summary = lines.last().unwrap();
+    assert_eq!(summary["kind"], "summary");
+    assert_eq!(summary["interrupted"], true);
+    assert!(summary["cancelled"].as_u64().unwrap() >= 2, "{summary}");
+    for r in results_of_kind(&lines, "result") {
+        assert!(matches!(r["status"].as_str().unwrap(), "Cancelled" | "Skipped"), "{r}");
+        if r["status"] == "Cancelled" {
+            assert_eq!(r["error"]["category"], "cancelled");
+        }
+    }
+
+    // Persisted too.
+    let status_doc = json_doc(&fx.run(&["status", "--format", "json"]));
+    assert_eq!(status_doc["summary"]["interrupted"], true);
 }

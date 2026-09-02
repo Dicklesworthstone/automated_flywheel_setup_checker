@@ -21,6 +21,7 @@ fn configured_notifications() -> NotificationsConfig {
         github_issue_repo: "owner/repo".to_string(),
         notify_on_failure: true,
         notify_on_success: true,
+        ..Default::default()
     }
 }
 

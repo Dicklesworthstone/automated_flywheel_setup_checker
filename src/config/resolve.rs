@@ -402,6 +402,16 @@ mod tests {
     }
 
     #[test]
+    fn shipped_default_toml_equals_config_default() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml");
+        let s = resolve(Some(&path), &BTreeMap::new(), &CliOverrides::default()).unwrap();
+        assert!(s.unknown_keys.is_empty(), "unknown keys in config/default.toml: {:?}", s.unknown_keys);
+        let shipped = toml::Value::try_from(&s.config).unwrap();
+        let defaults = toml::Value::try_from(Config::default()).unwrap();
+        assert_eq!(shipped, defaults, "config/default.toml drifted from Config::default()");
+    }
+
+    #[test]
     fn type_errors_are_reported_with_the_file_path() {
         let f = file_with("[docker]\ntimeout_seconds = \"soon\"\n");
         let err = resolve(Some(f.path()), &BTreeMap::new(), &CliOverrides::default()).unwrap_err();

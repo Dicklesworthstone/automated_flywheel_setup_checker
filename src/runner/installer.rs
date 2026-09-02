@@ -62,6 +62,32 @@ pub struct AttemptRecord {
     pub waited_before_ms: u64,
 }
 
+/// Checksum verification state of an installer test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksumState {
+    /// No sha256 pinned for this installer; execution was not gated
+    #[default]
+    NotChecked,
+    /// Download hashed and matched the pin; installer was executed
+    Verified,
+    /// Download hashed and did not match; installer was NOT executed
+    Mismatch,
+    /// The download failed before verification could happen
+    Unknown,
+}
+
+impl ChecksumState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChecksumState::NotChecked => "not_checked",
+            ChecksumState::Verified => "verified",
+            ChecksumState::Mismatch => "mismatch",
+            ChecksumState::Unknown => "unknown",
+        }
+    }
+}
+
 /// Result of checksum verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChecksumResult {
@@ -101,6 +127,9 @@ pub struct TestResult {
     pub attempts: Vec<AttemptRecord>,
     pub container_id: Option<String>,
     pub checksum_result: Option<ChecksumResult>,
+    /// Verification state (independent of whether the installer later failed)
+    #[serde(default)]
+    pub checksum_state: ChecksumState,
     /// Classification, always present when the test did not pass
     pub error: Option<ErrorClassification>,
 }
@@ -126,6 +155,7 @@ impl TestResult {
             attempts: Vec::new(),
             container_id: None,
             checksum_result: None,
+            checksum_state: ChecksumState::NotChecked,
             error: None,
         }
     }
@@ -191,7 +221,14 @@ impl TestResult {
     }
 
     pub fn with_checksum_result(mut self, result: ChecksumResult) -> Self {
+        self.checksum_state =
+            if result.matches { ChecksumState::Verified } else { ChecksumState::Mismatch };
         self.checksum_result = Some(result);
+        self
+    }
+
+    pub fn with_checksum_state(mut self, state: ChecksumState) -> Self {
+        self.checksum_state = state;
         self
     }
 

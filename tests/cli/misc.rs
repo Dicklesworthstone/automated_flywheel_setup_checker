@@ -30,7 +30,7 @@ fn validate_reports_invalid_url_with_exit_code() {
     let mut fx = Fixture::new();
     fx.add_entry("bad", "not a url", &"0".repeat(64));
     let out = fx.run(&["validate", "--format", "json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2), "format errors are configuration errors");
     let doc = json_doc(&out);
     assert_eq!(doc["format"]["valid"], false);
     assert!(doc["format"]["errors"][0].as_str().unwrap().contains("Invalid URL"));

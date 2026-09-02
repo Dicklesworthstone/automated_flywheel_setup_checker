@@ -59,7 +59,8 @@ pub struct GeneralConfig {
     /// Log level (trace, debug, info, warn, error)
     pub log_level: String,
     /// Directory for results, metrics, logs, locks, and the script ledger
-    pub data_dir: PathBuf,
+    /// (empty = `$XDG_DATA_HOME/afsc` or `~/.local/share/afsc`)
+    pub data_dir: String,
     /// Number of result files to keep (0 = keep all)
     pub results_retention: u64,
     /// Directory for structured JSONL logs (empty = `<data_dir>/logs`)
@@ -75,7 +76,7 @@ impl Default for GeneralConfig {
         Self {
             acfs_repo: PathBuf::from("/data/projects/agentic_coding_flywheel_setup"),
             log_level: "info".to_string(),
-            data_dir: default_data_dir(),
+            data_dir: String::new(),
             results_retention: 200,
             log_dir: String::new(),
             log_retention_days: 30,
@@ -85,13 +86,32 @@ impl Default for GeneralConfig {
 }
 
 impl GeneralConfig {
+    /// Effective data directory.
+    pub fn data_dir_path(&self) -> PathBuf {
+        if self.data_dir.trim().is_empty() {
+            default_data_dir()
+        } else {
+            PathBuf::from(self.data_dir.trim())
+        }
+    }
+
     /// Effective log directory.
     pub fn log_dir_path(&self) -> PathBuf {
         if self.log_dir.trim().is_empty() {
-            self.data_dir.join("logs")
+            self.data_dir_path().join("logs")
         } else {
             PathBuf::from(&self.log_dir)
         }
+    }
+
+    /// Results directory (`<data_dir>/results`).
+    pub fn results_dir(&self) -> PathBuf {
+        self.data_dir_path().join("results")
+    }
+
+    /// Metrics snapshot path (`<data_dir>/metrics.json`).
+    pub fn metrics_path(&self) -> PathBuf {
+        self.data_dir_path().join("metrics.json")
     }
 }
 
@@ -161,6 +181,27 @@ impl Parallelism {
             Parallelism::Fixed(n) => (*n).max(1),
             Parallelism::Auto(s) if s.eq_ignore_ascii_case("auto") => (cores / 2).clamp(1, 4),
             Parallelism::Auto(s) => s.trim().parse::<usize>().unwrap_or(1).max(1),
+        }
+    }
+}
+
+impl PartialEq<usize> for Parallelism {
+    fn eq(&self, other: &usize) -> bool {
+        self.resolve() == *other
+    }
+}
+
+impl PartialOrd<usize> for Parallelism {
+    fn partial_cmp(&self, other: &usize) -> Option<std::cmp::Ordering> {
+        Some(self.resolve().cmp(other))
+    }
+}
+
+impl std::fmt::Display for Parallelism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Parallelism::Fixed(n) => write!(f, "{n}"),
+            Parallelism::Auto(s) => write!(f, "{s}"),
         }
     }
 }

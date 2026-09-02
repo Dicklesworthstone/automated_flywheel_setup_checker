@@ -287,8 +287,9 @@ fn matches(patterns: &Patterns, text: &str) -> bool {
     patterns.get().iter().any(|re| re.is_match(text))
 }
 
-static TIMEOUT_PATTERNS: Patterns =
-    Patterns::new(&[r"(?i)test timed out after", r"(?i)\btimed out after \d+"]);
+// Only the executor's own phrasing: curl's "Connection timed out after N ms" is a network error
+// and must stay retryable.
+static TIMEOUT_PATTERNS: Patterns = Patterns::new(&[r"(?i)\btest timed out after"]);
 
 static SYNTAX_PATTERNS: Patterns =
     Patterns::new(&[r"(?i)syntax error", r"(?i)unexpected token", r"(?i)parse error"]);

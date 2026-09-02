@@ -289,6 +289,7 @@ fn test_notifications_to_internal_enabled_uses_configured_channels() {
         github_issue_repo: "owner/repo".to_string(),
         notify_on_failure: true,
         notify_on_success: false,
+        ..Default::default()
     };
 
     let internal = notifications.to_internal();
@@ -318,6 +319,7 @@ fn test_notifications_to_internal_disabled_returns_no_providers() {
         github_issue_repo: "owner/repo".to_string(),
         notify_on_failure: true,
         notify_on_success: false,
+        ..Default::default()
     };
 
     let internal = notifications.to_internal();
