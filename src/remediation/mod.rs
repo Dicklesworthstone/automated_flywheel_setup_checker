@@ -8,9 +8,8 @@ mod prompts;
 mod safety;
 
 pub use claude::{
-    get_unavailability_reason, is_claude_available, ChangeType, CircuitState, ClaudeRemediation,
-    ClaudeRemediationConfig, FileChange, RateLimitError, RemediationError, RemediationHealth,
-    RemediationMethod, RemediationResult, RetryConfig, VerificationResult,
+    CircuitState, ClaudeRemediation, ClaudeRemediationConfig, RateLimitError, RemediationError,
+    RemediationMethod, RemediationResult, RetryConfig,
 };
 pub use claude::{advisory_args, ClaudeEnvelope};
 pub use checksums::{

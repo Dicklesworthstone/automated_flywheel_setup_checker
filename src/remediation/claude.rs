@@ -283,29 +283,11 @@ pub enum RemediationMethod {
     Skipped,
 }
 
-/// Type of file change
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChangeType {
-    Created,
-    Modified,
-    Deleted,
-}
-
-/// A file change made during remediation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChange {
-    pub path: PathBuf,
-    pub change_type: ChangeType,
-    pub diff: Option<String>,
-    pub size_bytes: u64,
-}
-
 /// Result of a remediation attempt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemediationResult {
     pub success: bool,
     pub method: RemediationMethod,
-    pub changes_made: Vec<FileChange>,
     pub commit_sha: Option<String>,
     pub pr_url: Option<String>,
     pub duration_ms: u64,
@@ -374,16 +356,6 @@ pub fn advisory_args(max_turns: u32, max_budget_usd: f32, prompt: &str) -> Vec<S
     ]
 }
 
-/// Health status of the remediation system
-#[derive(Debug, Clone, Serialize)]
-pub struct RemediationHealth {
-    pub circuit_state: CircuitState,
-    pub total_requests: u32,
-    pub total_cost_usd: f32,
-    pub cost_limit_usd: f32,
-    pub cost_remaining_usd: f32,
-    pub claude_available: bool,
-}
 
 /// Claude remediation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,7 +541,6 @@ impl ClaudeRemediation {
         Ok(RemediationResult {
             success: true,
             method: RemediationMethod::ClaudeAuto,
-            changes_made: vec![],
             commit_sha: None,
             pr_url: None,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -590,7 +561,6 @@ impl ClaudeRemediation {
         RemediationResult {
             success: false,
             method: RemediationMethod::ManualRequired,
-            changes_made: vec![],
             commit_sha: None,
             pr_url: None,
             duration_ms: 0,
@@ -610,172 +580,8 @@ impl ClaudeRemediation {
         self.total_cost_usd.load(Ordering::SeqCst) as f32 / 1_000_000.0
     }
 
-
-    /// Get health status of the remediation system
-    pub async fn health_check(&self) -> RemediationHealth {
-        RemediationHealth {
-            circuit_state: self.circuit_breaker.get_state().await,
-            total_requests: self.request_count.load(Ordering::SeqCst),
-            total_cost_usd: self.get_total_cost_usd(),
-            cost_limit_usd: self.config.cost_limit_usd,
-            cost_remaining_usd: self.config.cost_limit_usd - self.get_total_cost_usd(),
-            claude_available: is_claude_available().await,
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled
-    }
-
-    /// Verify a remediation by re-running the installer test
-    ///
-    /// This method runs the installer again after remediation to check
-    /// if the fix was successful.
-    pub async fn verify_remediation(
-        &self,
-        installer_url: &str,
-        expected_checksum: Option<&str>,
-    ) -> std::result::Result<VerificationResult, RemediationError> {
-        use tokio::process::Command;
-        use tokio::time::timeout;
-
-        tracing::info!("Verifying remediation by re-running installer test");
-
-        // Create a temporary directory for the test
-        let temp_dir =
-            tempfile::tempdir().map_err(|e| RemediationError::ClaudeError(e.to_string()))?;
-
-        // Download and run the installer in test mode
-        let curl_output = timeout(
-            Duration::from_secs(60),
-            Command::new("curl").args(["-fsSL", installer_url]).output(),
-        )
-        .await
-        .map_err(|_| RemediationError::Timeout)?
-        .map_err(|e| RemediationError::ClaudeError(format!("curl failed: {}", e)))?;
-
-        if !curl_output.status.success() {
-            return Ok(VerificationResult {
-                passed: false,
-                exit_code: curl_output.status.code().unwrap_or(-1),
-                stdout: String::new(),
-                stderr: String::from_utf8_lossy(&curl_output.stderr).to_string(),
-                checksum_valid: false,
-            });
-        }
-
-        // Verify checksum if provided
-        let checksum_valid = if let Some(expected) = expected_checksum {
-            let actual = compute_sha256(&curl_output.stdout);
-            actual == expected
-        } else {
-            true // No checksum to verify
-        };
-
-        // Run the installer in the temp directory
-        let bash_output = timeout(
-            Duration::from_secs(120),
-            Command::new("bash")
-                .arg("-s")
-                .arg("--")
-                .arg("--help") // Most installers support --help for dry validation
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .current_dir(temp_dir.path())
-                .output(),
-        )
-        .await
-        .map_err(|_| RemediationError::Timeout)?
-        .map_err(|e| RemediationError::ClaudeError(format!("bash failed: {}", e)))?;
-
-        Ok(VerificationResult {
-            passed: bash_output.status.success() && checksum_valid,
-            exit_code: bash_output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&bash_output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&bash_output.stderr).to_string(),
-            checksum_valid,
-        })
-    }
-
-    /// Full remediation workflow: prompt -> execute -> verify
-    pub async fn remediate_and_verify(
-        &self,
-        prompt: &str,
-        installer_url: &str,
-        expected_checksum: Option<&str>,
-    ) -> std::result::Result<RemediationResult, RemediationError> {
-        // Execute remediation
-        let mut result = self.execute_with_resilience(prompt).await?;
-
-        if !result.success {
-            return Ok(result);
-        }
-
-        // Verify the fix
-        match self.verify_remediation(installer_url, expected_checksum).await {
-            Ok(verification) => {
-                result.verification_passed = verification.passed;
-                if !verification.passed {
-                    tracing::warn!(
-                        "Verification failed after remediation: exit_code={}, checksum_valid={}",
-                        verification.exit_code,
-                        verification.checksum_valid
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!("Verification error: {}", e);
-                result.verification_passed = false;
-            }
-        }
-
-        Ok(result)
-    }
 }
 
-/// Result of verification after remediation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerificationResult {
-    pub passed: bool,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub checksum_valid: bool,
-}
-
-/// Compute SHA256 hash of data
-fn compute_sha256(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
-
-/// Check if Claude CLI is available and authenticated
-pub async fn is_claude_available() -> bool {
-    use tokio::process::Command;
-
-    let output = Command::new("claude").arg("--version").output().await;
-
-    match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
-    }
-}
-
-/// Get reason why Claude is unavailable
-pub async fn get_unavailability_reason() -> Option<String> {
-    use tokio::process::Command;
-
-    let output = Command::new("claude").arg("--version").output().await;
-
-    match output {
-        Ok(o) if !o.status.success() => Some(String::from_utf8_lossy(&o.stderr).to_string()),
-        Err(e) => Some(format!("Claude CLI not found: {}", e)),
-        Ok(_) => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {

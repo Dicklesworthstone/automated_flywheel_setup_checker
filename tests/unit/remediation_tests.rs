@@ -11,8 +11,8 @@
 //! exported, so we test them indirectly through the public API.
 
 use automated_flywheel_setup_checker::remediation::{
-    is_command_safe, ChangeType, CircuitState, ClaudeRemediation, ClaudeRemediationConfig,
-    FallbackSuggestion, FileChange, RemediationMethod, RemediationResult, RetryConfig,
+    is_command_safe, CircuitState, ClaudeRemediation, ClaudeRemediationConfig,
+    FallbackSuggestion, RemediationMethod, RemediationResult, RetryConfig,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -389,86 +389,6 @@ fn test_remediation_method_debug() {
 }
 
 // ============================================================================
-// ChangeType Tests
-// ============================================================================
-
-#[test]
-fn test_change_type_variants() {
-    let created = ChangeType::Created;
-    let modified = ChangeType::Modified;
-    let deleted = ChangeType::Deleted;
-
-    assert!(matches!(created, ChangeType::Created));
-    assert!(matches!(modified, ChangeType::Modified));
-    assert!(matches!(deleted, ChangeType::Deleted));
-}
-
-#[test]
-fn test_change_type_debug() {
-    let change = ChangeType::Modified;
-    let debug = format!("{:?}", change);
-    assert!(debug.contains("Modified"));
-}
-
-// ============================================================================
-// FileChange Tests
-// ============================================================================
-
-#[test]
-fn test_file_change_created() {
-    let change = FileChange {
-        path: PathBuf::from("src/new_file.rs"),
-        change_type: ChangeType::Created,
-        diff: Some("+fn new_function() {}".to_string()),
-        size_bytes: 100,
-    };
-
-    assert_eq!(change.path, PathBuf::from("src/new_file.rs"));
-    assert!(matches!(change.change_type, ChangeType::Created));
-    assert!(change.diff.is_some());
-    assert_eq!(change.size_bytes, 100);
-}
-
-#[test]
-fn test_file_change_modified() {
-    let change = FileChange {
-        path: PathBuf::from("src/existing.rs"),
-        change_type: ChangeType::Modified,
-        diff: Some("@@ -10,3 +10,5 @@\n+added line".to_string()),
-        size_bytes: 500,
-    };
-
-    assert!(matches!(change.change_type, ChangeType::Modified));
-}
-
-#[test]
-fn test_file_change_deleted() {
-    let change = FileChange {
-        path: PathBuf::from("src/old_file.rs"),
-        change_type: ChangeType::Deleted,
-        diff: None,
-        size_bytes: 0,
-    };
-
-    assert!(matches!(change.change_type, ChangeType::Deleted));
-    assert!(change.diff.is_none());
-}
-
-#[test]
-fn test_file_change_clone() {
-    let change = FileChange {
-        path: PathBuf::from("test.rs"),
-        change_type: ChangeType::Created,
-        diff: Some("content".to_string()),
-        size_bytes: 50,
-    };
-
-    let cloned = change.clone();
-    assert_eq!(change.path, cloned.path);
-    assert_eq!(change.size_bytes, cloned.size_bytes);
-}
-
-// ============================================================================
 // RemediationResult Tests
 // ============================================================================
 
@@ -477,12 +397,6 @@ fn test_remediation_result_success() {
     let result = RemediationResult {
         success: true,
         method: RemediationMethod::ClaudeAuto,
-        changes_made: vec![FileChange {
-            path: PathBuf::from("fix.sh"),
-            change_type: ChangeType::Modified,
-            diff: Some("fix".to_string()),
-            size_bytes: 50,
-        }],
         commit_sha: Some("abc123".to_string()),
         pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
         duration_ms: 5000,
@@ -494,7 +408,6 @@ fn test_remediation_result_success() {
 
     assert!(result.success);
     assert!(matches!(result.method, RemediationMethod::ClaudeAuto));
-    assert_eq!(result.changes_made.len(), 1);
     assert!(result.commit_sha.is_some());
     assert!(result.pr_url.is_some());
     assert!(result.verification_passed);
@@ -505,7 +418,6 @@ fn test_remediation_result_manual() {
     let result = RemediationResult {
         success: false,
         method: RemediationMethod::ManualRequired,
-        changes_made: vec![],
         commit_sha: None,
         pr_url: None,
         duration_ms: 100,
@@ -517,7 +429,6 @@ fn test_remediation_result_manual() {
 
     assert!(!result.success);
     assert!(matches!(result.method, RemediationMethod::ManualRequired));
-    assert!(result.changes_made.is_empty());
     assert!(result.commit_sha.is_none());
 }
 
@@ -526,7 +437,6 @@ fn test_remediation_result_skipped() {
     let result = RemediationResult {
         success: false,
         method: RemediationMethod::Skipped,
-        changes_made: vec![],
         commit_sha: None,
         pr_url: None,
         duration_ms: 0,
@@ -631,31 +541,10 @@ fn test_remediation_method_serializable() {
 }
 
 #[test]
-fn test_change_type_serializable() {
-    let change = ChangeType::Modified;
-    let json = serde_json::to_string(&change).unwrap();
-    assert!(json.contains("Modified"));
-}
-
-#[test]
-fn test_file_change_serializable() {
-    let change = FileChange {
-        path: PathBuf::from("test.rs"),
-        change_type: ChangeType::Created,
-        diff: None,
-        size_bytes: 0,
-    };
-
-    let json = serde_json::to_string(&change).unwrap();
-    assert!(json.contains("test.rs"));
-}
-
-#[test]
 fn test_remediation_result_serializable() {
     let result = RemediationResult {
         success: true,
         method: RemediationMethod::ClaudeAuto,
-        changes_made: vec![],
         commit_sha: None,
         pr_url: None,
         duration_ms: 0,

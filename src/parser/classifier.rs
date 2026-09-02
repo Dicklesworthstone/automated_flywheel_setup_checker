@@ -198,6 +198,20 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
         };
     }
 
+    // Prebuilt binaries linked against a newer libc/libstdc++ than the base image ships.
+    if is_libc_too_old(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Dependency,
+            category: "dependency".to_string(),
+            suggestion: Some(
+                "The downloaded binary needs a newer glibc/libstdc++ than this base image provides; use a newer base (docker.image) or a build for this platform"
+                    .to_string(),
+            ),
+            retryable: false,
+            confidence: 0.9,
+        };
+    }
+
     // Dependency errors (general)
     if is_dependency_error(stderr) {
         return ErrorClassification {
@@ -424,6 +438,16 @@ fn is_checksum_mismatch(stderr: &str) -> bool {
 
 fn is_network_error(stderr: &str) -> bool {
     matches(&NETWORK_PATTERNS, stderr)
+}
+
+static LIBC_PATTERNS: Patterns = Patterns::new(&[
+    r"GLIBC_\d+\.\d+'? not found",
+    r"GLIBCXX_\d+\.\d+(\.\d+)?'? not found",
+    r"(?i)version `?GLIBC[A-Z_]*\d",
+]);
+
+fn is_libc_too_old(stderr: &str) -> bool {
+    matches(&LIBC_PATTERNS, stderr)
 }
 
 static APT_LOCK_PATTERNS: Patterns = Patterns::new(&[
