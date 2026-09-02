@@ -199,6 +199,20 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
     }
 
     // Resource errors
+    // SIGKILL (137) inside a container is the OOM killer or a hard cap being enforced.
+    if exit_code == 137 || is_oom(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Resource,
+            category: "resource".to_string(),
+            suggestion: Some(
+                "Killed (exit 137 / out of memory): raise [docker].memory_limit or [installers.<name>].memory_limit"
+                    .to_string(),
+            ),
+            retryable: false,
+            confidence: 0.85,
+        };
+    }
+
     if is_resource_error(stderr) {
         return ErrorClassification {
             severity: ErrorSeverity::Resource,
@@ -258,6 +272,9 @@ pub fn explain(stderr: &str, exit_code: i32) -> Option<(&'static str, String, us
     }
     if exit_code == 126 {
         return Some(("permission", "exit code 126".to_string(), 0));
+    }
+    if exit_code == 137 {
+        return Some(("resource", "exit code 137 (SIGKILL / OOM)".to_string(), 0));
     }
     None
 }
@@ -412,8 +429,33 @@ fn is_resource_error(stderr: &str) -> bool {
     matches(&RESOURCE_PATTERNS, stderr)
 }
 
+static OOM_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)\bout of memory\b",
+    r"(?i)\bOOM[- ]?killed?\b",
+    r"(?i)cannot allocate memory",
+    r"(?i)memory ?error",
+]);
+
+fn is_oom(stderr: &str) -> bool {
+    matches(&OOM_PATTERNS, stderr)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sigkill_and_oom_are_resource_failures() {
+        let killed = super::classify_error("", 137);
+        assert_eq!(killed.category, "resource");
+        assert!(!killed.retryable);
+        assert!(killed.suggestion.unwrap().contains("memory_limit"));
+        let oom = super::classify_error("python3: MemoryError\nKilled", 1);
+        assert_eq!(oom.category, "resource");
+        let explained = super::explain("", 137).unwrap();
+        assert_eq!(explained.0, "resource");
+        // A plain non-zero exit with unrelated stderr is still unknown.
+        assert_eq!(super::classify_error("something else", 3).category, "unknown");
+    }
+
     use super::*;
 
     #[test]

@@ -26,10 +26,7 @@ result=$(jsonl_result "$TEST_TMP/output/run.jsonl" hungry_tool)
 assert_eq "$(echo "$result" | jq -r .status)" "failed" "status"
 exit_code=$(echo "$result" | jq -r .exit_code)
 category=$(echo "$result" | jq -r '.error.category')
-if [[ "$exit_code" != "137" && "$category" != "resource" ]]; then
-    echo "expected exit 137 or a resource classification, got exit=$exit_code category=$category"
-    echo "$result" | jq .
-    exit 1
-fi
+assert_eq "$category" "resource" "SIGKILL/OOM is a resource failure (exit=$exit_code)"
+assert_eq "$(echo "$result" | jq -r .error.retryable)" "false" "not retried"
 assert_eq "$(docker ps -a -q --filter label=afsc.managed=true --filter label=afsc.installer=hungry_tool | wc -l | tr -d ' ')" "0" "no leaked container"
 echo "out_of_memory_scenario: PASSED (exit=$exit_code category=$category)"
