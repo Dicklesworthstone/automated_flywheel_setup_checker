@@ -740,6 +740,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     }
 
     // Docker preflight and orphan reaping before any container work.
+    let mut reaped_orphans: Vec<String> = Vec::new();
     if !options.local {
         ContainerManager::preflight_default().await.map_err(infra)?;
         if config.docker.reap_orphans {
@@ -752,11 +753,44 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             match manager.reap_orphans(max_age).await {
                 Ok(reaped) if !reaped.is_empty() => {
                     tracing::warn!(count = reaped.len(), "Removed orphaned containers from earlier runs");
+                    reaped_orphans = reaped.iter().map(|c| c.name.clone()).collect();
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "Orphan reaping failed"),
             }
         }
+    }
+
+    // Structured event log (audit trail); failures never abort the run.
+    let mut event_log = match automated_flywheel_setup_checker::reporting::EventLog::open(
+        &config.general.log_dir_path(),
+        config.general.log_retention_days,
+        &run_id,
+    ) {
+        Ok(log) => Some(log),
+        Err(e) => {
+            tracing::warn!(error = %e, "Event log unavailable");
+            None
+        }
+    };
+    if let Some(log) = event_log.as_mut() {
+        log.event(
+            "run_started",
+            serde_json::json!({
+                "backend": backend_name,
+                "image": header.image,
+                "parallel": options.parallel,
+                "timeout_seconds": options.timeout,
+                "retries": options.retries,
+                "installer_count": specs.iter().filter(|s| s.skip_reason.is_none()).count(),
+                "skipped": specs.iter().filter(|s| s.skip_reason.is_some()).count(),
+                "tool_version": env!("CARGO_PKG_VERSION"),
+            }),
+        );
+    }
+
+    if let (Some(log), false) = (event_log.as_mut(), reaped_orphans.is_empty()) {
+        log.warn_event("reaper", serde_json::json!({ "removed": reaped_orphans }));
     }
 
     // Cancellation: signals cancel the token; workers stop promptly and clean up.
@@ -855,6 +889,28 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
 
     let interrupted = cancel.is_cancelled();
     let any_failed = results.iter().any(is_failure);
+
+    if let Some(log) = event_log.as_mut() {
+        for r in &results {
+            log.installer_event(
+                "installer_finished",
+                &r.installer_name,
+                serde_json::json!({
+                    "status": r.status.as_str(),
+                    "exit_code": r.exit_code,
+                    "duration_ms": r.duration_ms,
+                    "attempts": r.attempts.len().max(1),
+                    "checksum": r.checksum_state.as_str(),
+                    "category": r.error.as_ref().map(|e| e.category.clone()),
+                    "installed_version": r.installed_version,
+                }),
+            );
+        }
+        let mut summary = summary_counts(&results);
+        summary["interrupted"] = serde_json::json!(interrupted);
+        log.event("run_finished", summary);
+        log.flush();
+    }
 
     // Print per-result output
     for result in &results {

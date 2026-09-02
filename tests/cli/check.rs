@@ -284,6 +284,7 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
     let child = std::process::Command::new(bin)
         .env("HOME", &fx.home)
+        .env("AFSC_ALLOW_LOCAL", "1")
         .arg("--config")
         .arg(&fx.config)
         .args(["check", "--local", "--format", "jsonl"])
@@ -329,7 +330,7 @@ fn concurrent_checks_are_refused_unless_allowed() {
     let mut fx = Fixture::new();
     fx.add_sleeper("slow", 6);
     let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
-    let mut first = std::process::Command::new(&bin)
+    let first = std::process::Command::new(&bin)
         .env("HOME", &fx.home)
         .env("AFSC_ALLOW_LOCAL", "1")
         .arg("--config")

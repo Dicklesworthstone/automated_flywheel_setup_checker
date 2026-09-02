@@ -331,7 +331,7 @@ fn test_container_config_custom() {
 fn test_container_manager_new() {
     let config = ContainerConfig::default();
     let manager = ContainerManager::new(config.clone());
-    assert_eq!(manager.config().image, "ubuntu:22.04");
+    assert_eq!(manager.config().image, "afsc-base:latest");
 }
 
 #[test]

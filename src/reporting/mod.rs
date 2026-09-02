@@ -1,11 +1,13 @@
 //! Reporting and notification module
 
+mod eventlog;
 mod jsonl;
 mod metrics;
 mod notify;
 mod redact;
 mod summary;
 
+pub use eventlog::{EventLog, LOG_PREFIX};
 pub use jsonl::{
     AttemptEntry, ErrorClassificationEntry, JsonlReporter, JsonlWriter, LogEntry, LogLevel,
     LogRotation, ResultEntry, ResultPersister, RunFile, RunHeader, RunInfo, RunSummaryEntry,

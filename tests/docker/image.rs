@@ -2,7 +2,7 @@
 
 use super::support::*;
 use crate::skip_unless_docker;
-use automated_flywheel_setup_checker::runner::{ContainerConfig, ContainerManager};
+use automated_flywheel_setup_checker::runner::ContainerManager;
 use std::time::Instant;
 
 fn manager(image: &str, run_as_root: bool, fx: &DockerFixture) -> ContainerManager {

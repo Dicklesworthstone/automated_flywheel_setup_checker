@@ -146,3 +146,37 @@ fn data_dir_flag_relocates_results_and_metrics() {
     let status = json_doc(&fx.run(&["--data-dir", &data_s, "status", "--format", "json"]));
     assert_eq!(status["results"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn structured_event_log_records_each_run_and_prunes_old_files() {
+    let mut fx = Fixture::new();
+    fx.add_pass("good_tool");
+    fx.add_dependency_failure("dep_fail_tool");
+    let log_dir = fx.home.join(".local/share/afsc/logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let stale = log_dir.join("checker_20200101.jsonl");
+    std::fs::write(&stale, "{}\n").unwrap();
+
+    let first = jsonl_lines(&fx.run(&["check", "--local", "--format", "jsonl"]));
+    let run_id = first[0]["run_id"].as_str().unwrap().to_string();
+    assert!(!stale.exists(), "logs older than the retention are pruned");
+    let files: Vec<_> = std::fs::read_dir(&log_dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("checker_") && files[0].ends_with(".jsonl"));
+    let text = std::fs::read_to_string(log_dir.join(&files[0])).unwrap();
+    let events: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let mine: Vec<&serde_json::Value> = events.iter().filter(|e| e["correlation_id"] == run_id).collect();
+    assert_eq!(mine.iter().filter(|e| e["event"] == "run_started").count(), 1);
+    assert_eq!(mine.iter().filter(|e| e["event"] == "installer_finished").count(), 2);
+    let dep = mine.iter().find(|e| e["installer"] == "dep_fail_tool").unwrap();
+    assert_eq!(dep["data"]["category"], "dependency");
+    assert_eq!(dep["data"]["status"], "failed");
+    let finished = mine.iter().find(|e| e["event"] == "run_finished").unwrap();
+    assert_eq!(finished["data"]["failed"], 1);
+    assert_eq!(finished["data"]["interrupted"], false);
+
+    // A second run appends to the same day's file.
+    fx.run(&["check", "--local", "--format", "jsonl"]);
+    let text = std::fs::read_to_string(log_dir.join(&files[0])).unwrap();
+    assert_eq!(text.lines().filter(|l| l.contains("run_started")).count(), 2);
+}
