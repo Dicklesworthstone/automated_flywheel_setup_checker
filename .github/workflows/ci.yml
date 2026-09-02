@@ -180,16 +180,34 @@ jobs:
       - name: Test status command
         run: ./target/release/automated_flywheel_setup_checker status
 
-      - name: Test check --dry-run --local
+      - name: Test check --local against a real fixture
         run: |
-          # Create minimal checksums.yaml for dry-run test
-          mkdir -p /tmp/afsc-test
-          cat > /tmp/afsc-test/checksums.yaml << 'YAML'
-          test_tool:
-            url: "https://example.com/install.sh"
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-            enabled: true
+          # Real local check: a mock installer served via file://, verified by sha256,
+          # executed by the checker, asserted through JSONL output. No || true.
+          set -euo pipefail
+          FX=/tmp/afsc-smoke
+          mkdir -p "$FX/acfs" "$FX/home"
+          printf '#!/bin/bash\necho "mock installer ran as $(id -un) HOME=$HOME"\nexit 0\n' > "$FX/mock_install.sh"
+          SHA=$(sha256sum "$FX/mock_install.sh" | cut -d' ' -f1)
+          cat > "$FX/acfs/checksums.yaml" << YAML
+          installers:
+            mock_tool:
+              url: "file://$FX/mock_install.sh"
+              sha256: "$SHA"
           YAML
-          ./target/release/automated_flywheel_setup_checker \
-            --config /dev/null \
-            check --dry-run --local 2>&1 || true
+          cat > "$FX/config.toml" << TOML
+          [general]
+          acfs_repo = "$FX/acfs"
+          log_level = "info"
+          TOML
+          OUT=$(HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \
+            --config "$FX/config.toml" check --local --format jsonl)
+          echo "$OUT"
+          echo "$OUT" | grep '^{' | jq -e 'select(.installer_name == "mock_tool") | .success == true and .status == "Passed" and .checksum_result.matches == true'
+          # The checker must also refuse a wrong checksum (exit 1, installer not executed)
+          sed -i "s/$SHA/0000000000000000000000000000000000000000000000000000000000000000/" "$FX/acfs/checksums.yaml"
+          if HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \
+              --config "$FX/config.toml" check --local --format jsonl > "$FX/bad.out" 2>/dev/null; then
+            echo "expected non-zero exit on checksum mismatch"; exit 1
+          fi
+          grep '^{' "$FX/bad.out" | jq -e 'select(.installer_name == "mock_tool") | .success == false and .exit_code == 99'

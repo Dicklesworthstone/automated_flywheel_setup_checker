@@ -3,6 +3,12 @@
 *.db-journal
 *.db-shm
 *.db-wal
+# fsqlite sidecar and migration files created by br >= 0.5
+*.db-fsqlite-*
+*.db-wal-cert
+*.db-wal-cert-head
+*.fsqlite-migration-state
+.br_recovery/
 
 # Lock files
 *.lock
