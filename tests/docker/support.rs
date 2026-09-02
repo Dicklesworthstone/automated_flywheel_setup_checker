@@ -141,3 +141,19 @@ pub fn must<T>(result: anyhow::Result<T>, what: &str) -> T {
         }
     }
 }
+
+/// Assert that no container matches `filter`, polling briefly: the daemon can still list a
+/// container as "Removal In Progress" for a moment after `remove_container` returns.
+pub fn assert_no_containers(filter: &str, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let names = docker_ps_names(filter);
+        if names.is_empty() {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("{what}: containers still present for {filter}: {names:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}

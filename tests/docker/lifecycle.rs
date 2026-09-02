@@ -61,7 +61,7 @@ async fn create_exec_and_cleanup_with_labels_limits_and_env() {
     // Idempotent and tolerant of unknown ids
     must(manager.cleanup_container(&id).await, "cleanup_container");
     must(manager.cleanup_container("nonexistent-container-12345").await, "cleanup_container");
-    assert!(docker_ps_names("label=afsc.run_id=run-docker-test").is_empty());
+    assert_no_containers("label=afsc.run_id=run-docker-test", "cleaned up");
 }
 
 #[tokio::test]
@@ -98,8 +98,8 @@ async fn real_run_verifies_checksum_and_refuses_mismatch() {
     assert_eq!(failed.checksum_state, ChecksumState::Verified);
     assert_eq!(failed.error.as_ref().unwrap().category, "dependency");
 
-    assert!(docker_ps_names("label=afsc.installer=pass").is_empty(), "containers cleaned up");
-    assert!(docker_ps_names("label=afsc.installer=dep").is_empty());
+    assert_no_containers("label=afsc.installer=pass", "containers cleaned up");
+    assert_no_containers("label=afsc.installer=dep", "cleaned up");
 }
 
 #[tokio::test]
@@ -113,7 +113,7 @@ async fn timeout_kills_the_installer_and_removes_the_container() {
     assert_eq!(r.status, TestStatus::TimedOut);
     assert_eq!(r.error.as_ref().unwrap().category, "timeout");
     assert!(start.elapsed() < Duration::from_secs(40), "{:?}", start.elapsed());
-    assert!(docker_ps_names("label=afsc.installer=sleeper").is_empty(), "container removed after timeout");
+    assert_no_containers("label=afsc.installer=sleeper", "container removed after timeout");
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn cancellation_stops_the_installer_and_removes_the_container() {
     assert_eq!(r.error.as_ref().unwrap().category, "cancelled");
     assert!(start.elapsed() < Duration::from_secs(30), "{:?}", start.elapsed());
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(docker_ps_names("label=afsc.installer=cancelme").is_empty(), "container removed after cancel");
+    assert_no_containers("label=afsc.installer=cancelme", "container removed after cancel");
 }
 
 #[tokio::test]
@@ -168,7 +168,7 @@ async fn reaper_removes_dead_owner_containers_and_leaves_others_alone() {
     let names: Vec<&str> = reaped.iter().map(|c| c.name.as_str()).collect();
     assert!(names.iter().any(|n| n.starts_with("afsc-orphan-")), "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("afsc-mine-")), "{names:?}");
-    assert!(docker_ps_names("label=afsc.run_id=reaper-test").is_empty());
+    assert_no_containers("label=afsc.run_id=reaper-test", "cleaned up");
     assert_eq!(docker_ps_names(&format!("name={bystander}")).len(), 1, "bystander untouched");
     assert_eq!(docker_inspect(&mine_id, "{{.State.Running}}"), "true");
 
