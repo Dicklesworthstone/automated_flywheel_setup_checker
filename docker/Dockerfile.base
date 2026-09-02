@@ -1,13 +1,17 @@
-# ACFS Test Base Image
+# ACFS Test Base Image (template)
 #
-# Pre-installs all prerequisites that ACFS's install.sh sets up before running
-# individual installer scripts. This mirrors a real VPS mid-install state so
-# installer tests produce accurate results.
+# Pre-installs the prerequisites ACFS installs before running individual installer
+# scripts (see scripts/generated/install_base.sh in the ACFS repo: curl git ca-certificates
+# unzip tar xz-utils jq build-essential gnupg lsb-release, plus install.sh's sudo libssl-dev
+# pkg-config), adds Rust and Node for installers that expect them, and creates the non-root
+# afsc-user. This mirrors a real VPS mid-install state so installer tests produce accurate results.
 #
-# Build:  docker build -t afsc-base:latest -f docker/Dockerfile.base .
-# Use:    automated_flywheel_setup_checker check (auto-builds if missing)
+# The checker builds this automatically for the configured base image:
+#   docker build --build-arg BASE=ubuntu:24.04 -t afsc-prepared:ubuntu-24.04-<hash> -f docker/Dockerfile.base .
+# The image tag embeds a hash of this file, so editing it triggers a rebuild on the next run.
 
-FROM ubuntu:22.04
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CI=true \
@@ -16,11 +20,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-# Core packages that ACFS install.sh pre-installs (line 3346 + 3836)
+# Core packages that ACFS pre-installs (scripts/generated/install_base.sh + install.sh)
 RUN apt-get update -qq && \
     apt-get install -y -qq \
         curl ca-certificates git unzip xz-utils tar jq \
-        build-essential sudo gnupg libssl-dev pkg-config \
+        build-essential sudo gnupg lsb-release libssl-dev pkg-config \
         python3 rsync zsh \
         ripgrep tmux fzf direnv git-lfs lsof \
         dnsutils netcat-openbsd strace zstd \

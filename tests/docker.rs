@@ -8,3 +8,6 @@ pub mod support;
 
 #[path = "docker/lifecycle.rs"]
 mod lifecycle;
+
+#[path = "docker/image.rs"]
+mod image;

@@ -199,15 +199,16 @@ jobs:
           [general]
           acfs_repo = "$FX/acfs"
           log_level = "info"
+          allow_file_urls = true
           TOML
           OUT=$(HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \
-            --config "$FX/config.toml" check --local --format jsonl)
+            --config "$FX/config.toml" check --local --yes --format jsonl)
           echo "$OUT"
           echo "$OUT" | grep '^{' | jq -e 'select(.installer_name == "mock_tool") | .success == true and .status == "Passed" and .checksum_result.matches == true'
           # The checker must also refuse a wrong checksum (exit 1, installer not executed)
           sed -i "s/$SHA/0000000000000000000000000000000000000000000000000000000000000000/" "$FX/acfs/checksums.yaml"
           if HOME="$FX/home" ./target/release/automated_flywheel_setup_checker \
-              --config "$FX/config.toml" check --local --format jsonl > "$FX/bad.out" 2>/dev/null; then
+              --config "$FX/config.toml" check --local --yes --format jsonl > "$FX/bad.out" 2>/dev/null; then
             echo "expected non-zero exit on checksum mismatch"; exit 1
           fi
           grep '^{' "$FX/bad.out" | jq -e 'select(.installer_name == "mock_tool") | .success == false and .exit_code == 99'

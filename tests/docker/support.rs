@@ -36,6 +36,12 @@ pub struct DockerFixture {
     pub dir: TempDir,
 }
 
+impl Default for DockerFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DockerFixture {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
