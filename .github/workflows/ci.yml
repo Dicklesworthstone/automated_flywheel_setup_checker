@@ -7,10 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Superseded pull-request runs are cancelled; pushes to main always complete (frequent
-# auto-commits would otherwise cancel every queued run before it starts).
+# Pull requests: one run per ref, superseded runs cancelled. Pushes to main: one group per
+# commit, so a newer push never evicts a still-queued run (GitHub cancels *pending* runs in a
+# shared group regardless of cancel-in-progress, and this repo receives frequent auto-commits).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
