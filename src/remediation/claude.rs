@@ -108,6 +108,8 @@ impl CircuitBreaker {
         }
     }
 
+    /// Current breaker state (used by tests).
+    #[cfg(test)]
     pub async fn get_state(&self) -> CircuitState {
         *self.state.read().await
     }
@@ -574,6 +576,11 @@ impl ClaudeRemediation {
     fn add_cost(&self, cost: f32) {
         let microdollars = (cost * 1_000_000.0) as u64;
         self.total_cost_usd.fetch_add(microdollars, Ordering::SeqCst);
+    }
+
+    /// Whether Claude invocations are enabled at all.
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
     }
 
     pub fn get_total_cost_usd(&self) -> f32 {
