@@ -1,7 +1,11 @@
 //! Configuration schema definitions
+//!
+//! Every struct and field has a default so partial sections parse. Resolution order and
+//! provenance live in `resolve.rs`; this file is only the shape.
 
 use crate::reporting::{GitHubConfig, NotificationConfig, SlackConfig};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn default_true() -> bool {
@@ -24,29 +28,46 @@ fn default_watchdog_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
-    #[serde(default)]
     pub general: GeneralConfig,
-    #[serde(default)]
     pub docker: DockerConfig,
-    #[serde(default)]
     pub execution: ExecutionConfig,
-    #[serde(default)]
     pub remediation: RemediationConfig,
-    #[serde(default)]
     pub notifications: NotificationsConfig,
-    #[serde(default)]
     pub monitoring: MonitoringConfig,
-    #[serde(default)]
     pub watchdog: WatchdogConfig,
+    /// Per-installer overrides, keyed by installer name (`[installers.mdwb]`)
+    pub installers: BTreeMap<String, InstallerOverride>,
+}
+
+/// Default data directory: `$XDG_DATA_HOME/afsc` or `~/.local/share/afsc`.
+pub fn default_data_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.trim().is_empty() {
+            return PathBuf::from(xdg).join("afsc");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".local").join("share").join("afsc")
 }
 
 /// General configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GeneralConfig {
     /// Path to the ACFS repository
     pub acfs_repo: PathBuf,
     /// Log level (trace, debug, info, warn, error)
     pub log_level: String,
+    /// Directory for results, metrics, logs, locks, and the script ledger
+    pub data_dir: PathBuf,
+    /// Number of result files to keep (0 = keep all)
+    pub results_retention: u64,
+    /// Directory for structured JSONL logs (empty = `<data_dir>/logs`)
+    pub log_dir: String,
+    /// Days to keep structured logs
+    pub log_retention_days: u32,
+    /// Allow `file://` installer URLs (tests and local fixtures)
+    pub allow_file_urls: bool,
 }
 
 impl Default for GeneralConfig {
@@ -54,14 +75,31 @@ impl Default for GeneralConfig {
         Self {
             acfs_repo: PathBuf::from("/data/projects/agentic_coding_flywheel_setup"),
             log_level: "info".to_string(),
+            data_dir: default_data_dir(),
+            results_retention: 200,
+            log_dir: String::new(),
+            log_retention_days: 30,
+            allow_file_urls: false,
+        }
+    }
+}
+
+impl GeneralConfig {
+    /// Effective log directory.
+    pub fn log_dir_path(&self) -> PathBuf {
+        if self.log_dir.trim().is_empty() {
+            self.data_dir.join("logs")
+        } else {
+            PathBuf::from(&self.log_dir)
         }
     }
 }
 
 /// Docker-related configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DockerConfig {
-    /// Base Docker image to use
+    /// Base Docker image to derive the prepared image from
     pub image: String,
     /// Memory limit for containers
     pub memory_limit: String,
@@ -71,6 +109,14 @@ pub struct DockerConfig {
     pub timeout_seconds: u64,
     /// Image pull policy: always, if-not-present, never
     pub pull_policy: String,
+    /// Timeout for building the prepared image
+    pub build_timeout_seconds: u64,
+    /// Run installers as root inside containers (default: non-root `afsc-user`)
+    pub run_as_root: bool,
+    /// Remove orphaned afsc-managed containers at startup
+    pub reap_orphans: bool,
+    /// Container network mode: bridge or none
+    pub network: String,
 }
 
 impl Default for DockerConfig {
@@ -81,44 +127,170 @@ impl Default for DockerConfig {
             cpu_quota: 1.0,
             timeout_seconds: 300,
             pull_policy: "if-not-present".to_string(),
+            build_timeout_seconds: 900,
+            run_as_root: false,
+            reap_orphans: true,
+            network: "bridge".to_string(),
         }
     }
 }
 
+/// Worker count: a fixed number or `"auto"` (= max(1, min(4, cores / 2))).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Parallelism {
+    Fixed(usize),
+    Auto(String),
+}
+
+impl Default for Parallelism {
+    fn default() -> Self {
+        Parallelism::Fixed(1)
+    }
+}
+
+impl Parallelism {
+    /// Resolve to a worker count using the machine's core count.
+    pub fn resolve(&self) -> usize {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+        self.resolve_with_cores(cores)
+    }
+
+    pub fn resolve_with_cores(&self, cores: usize) -> usize {
+        match self {
+            Parallelism::Fixed(n) => (*n).max(1),
+            Parallelism::Auto(s) if s.eq_ignore_ascii_case("auto") => (cores / 2).clamp(1, 4),
+            Parallelism::Auto(s) => s.trim().parse::<usize>().unwrap_or(1).max(1),
+        }
+    }
+}
+
+/// Installer ordering for a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunOrder {
+    /// Historical median duration descending (LPT); falls back to name when no history exists
+    #[default]
+    LongestFirst,
+    /// Alphabetical
+    Name,
+    /// Order of appearance in checksums.yaml
+    Manifest,
+}
+
 /// Execution configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExecutionConfig {
-    /// Number of parallel installer tests
-    pub parallel: usize,
-    /// Number of retries for transient failures
+    /// Number of parallel installer tests (integer or "auto")
+    pub parallel: Parallelism,
+    /// Number of retries for transient failures (attempts = retries + 1)
     pub retry_transient: u32,
     /// Stop on first failure
     pub fail_fast: bool,
+    /// Cap on captured stdout/stderr bytes per attempt
+    pub max_capture_bytes: u64,
+    /// Whole-run deadline in seconds (0 = none)
+    pub run_deadline_seconds: u64,
+    /// Installer ordering
+    pub order: RunOrder,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
-        Self { parallel: 1, retry_transient: 3, fail_fast: false }
+        Self {
+            parallel: Parallelism::Fixed(1),
+            retry_transient: 3,
+            fail_fast: false,
+            max_capture_bytes: 4 * 1024 * 1024,
+            run_deadline_seconds: 0,
+            order: RunOrder::LongestFirst,
+        }
+    }
+}
+
+/// Remediation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RemediationMode {
+    #[default]
+    Off,
+    /// Claude runs read-only and prints suggestions; checksum drift produces a reviewable diff
+    Advisory,
+    /// Changes land on a branch in a git worktree with verification and an optional PR
+    Propose,
+    /// Propose plus commit and push to the branch
+    Apply,
+}
+
+impl RemediationMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "advisory" => Some(Self::Advisory),
+            "propose" => Some(Self::Propose),
+            "apply" => Some(Self::Apply),
+            _ => None,
+        }
     }
 }
 
 /// Remediation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RemediationConfig {
-    /// Enable auto-remediation
+    /// Enable auto-remediation (equivalent to `mode != off`)
     pub enabled: bool,
-    /// Auto-commit fixes
+    /// Remediation mode: off, advisory, propose, apply
+    pub mode: RemediationMode,
+    /// Auto-commit fixes (apply mode)
     pub auto_commit: bool,
-    /// Create PRs for fixes
+    /// Create PRs for fixes (propose/apply modes)
     pub create_pr: bool,
-    /// Maximum remediation attempts
+    /// Maximum remediation attempts per failure
     pub max_attempts: u32,
+    /// Per-run Claude spend cap in USD
+    pub cost_limit_usd: f64,
+    /// Maximum agent turns per Claude invocation
+    pub max_turns: u32,
+    /// Timeout per Claude invocation in seconds
+    pub timeout_seconds: u64,
 }
 
 impl Default for RemediationConfig {
     fn default() -> Self {
-        Self { enabled: false, auto_commit: false, create_pr: true, max_attempts: 3 }
+        Self {
+            enabled: false,
+            mode: RemediationMode::Off,
+            auto_commit: false,
+            create_pr: true,
+            max_attempts: 3,
+            cost_limit_usd: 1.0,
+            max_turns: 12,
+            timeout_seconds: 300,
+        }
     }
+}
+
+impl RemediationConfig {
+    /// Effective mode: `enabled = true` with `mode = off` means advisory (backwards compatible).
+    pub fn effective_mode(&self) -> RemediationMode {
+        match (self.enabled, self.mode) {
+            (true, RemediationMode::Off) => RemediationMode::Advisory,
+            (_, mode) => mode,
+        }
+    }
+}
+
+/// Notification mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationMode {
+    EveryRun,
+    /// Only when the set of failing installers or drifted checksums changed (default)
+    #[default]
+    OnChange,
+    DailyDigest,
 }
 
 /// Notification configuration
@@ -127,6 +299,8 @@ impl Default for RemediationConfig {
 pub struct NotificationsConfig {
     /// Enable failure notifications
     pub enabled: bool,
+    /// When to send: every_run, on_change, daily_digest
+    pub mode: NotificationMode,
     /// Environment variable holding the Slack webhook URL
     pub slack_webhook_env: String,
     /// Optional Slack channel override
@@ -146,6 +320,7 @@ impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: NotificationMode::OnChange,
             slack_webhook_env: String::new(),
             slack_channel: String::new(),
             github_token_env: String::new(),
@@ -199,6 +374,12 @@ pub struct MonitoringConfig {
     /// Port used for metrics scraping
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
+    /// Bind address for the monitoring listener
+    pub bind: String,
+    /// `/health` reports `stale` when the last run is older than this many seconds
+    pub stale_after_seconds: u64,
+    /// HTTP status returned for a stale health check
+    pub stale_status_code: u16,
 }
 
 impl Default for MonitoringConfig {
@@ -208,6 +389,9 @@ impl Default for MonitoringConfig {
             health_port: default_health_port(),
             metrics_enabled: false,
             metrics_port: default_metrics_port(),
+            bind: "0.0.0.0".to_string(),
+            stale_after_seconds: 93_600,
+            stale_status_code: 503,
         }
     }
 }
@@ -226,5 +410,77 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self { default_interval_seconds: default_watchdog_interval(), log_pings: false }
+    }
+}
+
+/// Per-installer override (`[installers.<name>]`). Every field is optional; unset fields fall
+/// back to the built-in ACFS profile and then to the global settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct InstallerOverride {
+    pub timeout_seconds: Option<u64>,
+    /// Retries for this installer (attempts = retry + 1)
+    pub retry: Option<u32>,
+    /// `bash` or `sh`
+    pub interpreter: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: BTreeMap<String, String>,
+    pub skip: Option<bool>,
+    pub skip_reason: Option<String>,
+    /// Binary that must be on PATH after a passing install
+    pub expect_binary: Option<String>,
+    /// Command run after a passing install; non-zero → category `post_install`
+    pub verify_cmd: Option<String>,
+    /// Command whose first output line is stored as `installed_version`
+    pub version_cmd: Option<String>,
+    pub run_as_root: Option<bool>,
+    pub memory_limit: Option<String>,
+    /// `bridge` or `none`
+    pub network: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_sections_parse() {
+        let c: Config = toml::from_str("[docker]\ntimeout_seconds = 7\n").unwrap();
+        assert_eq!(c.docker.timeout_seconds, 7);
+        assert_eq!(c.docker.image, "afsc-base:latest");
+        let c: Config = toml::from_str("[execution]\nparallel = \"auto\"\n").unwrap();
+        assert!(c.execution.parallel.resolve_with_cores(8) >= 1);
+        assert_eq!(c.execution.parallel.resolve_with_cores(8), 4);
+        assert_eq!(c.execution.parallel.resolve_with_cores(2), 1);
+    }
+
+    #[test]
+    fn installer_override_parses() {
+        let c: Config = toml::from_str(
+            "[installers.ohmyzsh]\ninterpreter = \"sh\"\nargs = [\"--unattended\", \"--keep-zshrc\"]\nskip = false\n\n[installers.atuin.env]\nATUIN_NO_MODIFY_PATH = \"1\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.installers["ohmyzsh"].interpreter.as_deref(), Some("sh"));
+        assert_eq!(c.installers["ohmyzsh"].args.as_ref().unwrap().len(), 2);
+        assert_eq!(c.installers["atuin"].env["ATUIN_NO_MODIFY_PATH"], "1");
+    }
+
+    #[test]
+    fn remediation_effective_mode_is_backwards_compatible() {
+        let c = RemediationConfig { enabled: true, ..Default::default() };
+        assert_eq!(c.effective_mode(), RemediationMode::Advisory);
+        let c = RemediationConfig { enabled: false, mode: RemediationMode::Propose, ..Default::default() };
+        assert_eq!(c.effective_mode(), RemediationMode::Propose);
+        assert_eq!(RemediationMode::parse("APPLY"), Some(RemediationMode::Apply));
+        assert_eq!(RemediationMode::parse("nope"), None);
+    }
+
+    #[test]
+    fn default_config_round_trips_through_toml() {
+        let text = toml::to_string_pretty(&Config::default()).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.docker.image, "afsc-base:latest");
+        assert_eq!(back.execution.order, RunOrder::LongestFirst);
+        assert_eq!(back.notifications.mode, NotificationMode::OnChange);
     }
 }
