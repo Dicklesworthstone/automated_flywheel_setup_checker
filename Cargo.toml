@@ -28,14 +28,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset", "system-proxy"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 
 # Docker API
-bollard = "0.16"
+bollard = "0.21"
 
 # Error handling
 anyhow = "1"
@@ -43,7 +43,7 @@ thiserror = "1"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
-similar = "2"
+similar = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 regex = "1"

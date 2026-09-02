@@ -8,12 +8,13 @@
 //! or age beyond a bound). Exec calls are cancellable so signals stop installers promptly.
 
 use anyhow::{Context, Result};
-use bollard::container::{
-    Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
-    StopContainerOptions,
-};
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::image::CreateImageOptions;
+use bollard::models::ContainerCreateBody;
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
+    RemoveContainerOptionsBuilder, StatsOptionsBuilder, StopContainerOptionsBuilder,
+    TagImageOptionsBuilder,
+};
 use bollard::Docker;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -332,16 +333,25 @@ impl ContainerManager {
 
 /// One stats sample: (memory bytes, cumulative cpu ns, rx bytes, tx bytes).
 async fn sample_container_stats(docker: &Docker, container_id: &str) -> Option<(u64, u64, u64, u64)> {
-    use bollard::container::StatsOptions;
-    let mut stream = docker.stats(container_id, Some(StatsOptions { stream: false, one_shot: false }));
+    let opts = StatsOptionsBuilder::default().stream(false).one_shot(false).build();
+    let mut stream = docker.stats(container_id, Some(opts));
     {
         let stats = stream.next().await?.ok()?;
-        let memory = stats.memory_stats.usage.unwrap_or(0);
-        let cpu_ns = stats.cpu_stats.cpu_usage.total_usage;
+        let memory = stats.memory_stats.as_ref().and_then(|m| m.usage).unwrap_or(0);
+        let cpu_ns = stats
+            .cpu_stats
+            .as_ref()
+            .and_then(|c| c.cpu_usage.as_ref())
+            .and_then(|u| u.total_usage)
+            .unwrap_or(0);
         let (rx, tx) = stats
             .networks
             .as_ref()
-            .map(|n| n.values().fold((0u64, 0u64), |(r, t), s| (r + s.rx_bytes, t + s.tx_bytes)))
+            .map(|n| {
+                n.values().fold((0u64, 0u64), |(r, t), s| {
+                    (r + s.rx_bytes.unwrap_or(0), t + s.tx_bytes.unwrap_or(0))
+                })
+            })
             .unwrap_or((0, 0));
         Some((memory, cpu_ns, rx, tx))
     }
@@ -403,7 +413,7 @@ impl ContainerManager {
         // Keep the human-friendly alias pointing at the current canonical build.
         if plan.base == CANONICAL_BASE {
             let (repo, tag) = Self::AFSC_BASE_IMAGE.split_once(':').unwrap_or((Self::AFSC_BASE_IMAGE, "latest"));
-            let opts = bollard::image::TagImageOptions { repo, tag };
+            let opts = TagImageOptionsBuilder::default().repo(repo).tag(tag).build();
             if let Err(e) = self.docker.tag_image(&plan.run_image, Some(opts)).await {
                 warn!(error = %e, "Failed to update the afsc-base:latest alias");
             }
@@ -426,7 +436,7 @@ impl ContainerManager {
         } else {
             (image, "latest")
         };
-        let opts = CreateImageOptions { from_image: repo, tag, ..Default::default() };
+        let opts = CreateImageOptionsBuilder::default().from_image(repo).tag(tag).build();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         while let Some(result) = stream.next().await {
             match result {
@@ -625,7 +635,7 @@ impl ContainerManager {
         }
 
         // Create container config
-        let container_config = Config {
+        let container_config = ContainerCreateBody {
             image: Some(plan.run_image.clone()),
             env: Some(env),
             host_config: Some(host_config),
@@ -640,7 +650,7 @@ impl ContainerManager {
             ..Default::default()
         };
 
-        let create_opts = CreateContainerOptions { name: container_name.as_str(), platform: None };
+        let create_opts = CreateContainerOptionsBuilder::default().name(&container_name).build();
 
         let response = self
             .docker
@@ -659,7 +669,7 @@ impl ContainerManager {
 
         // Start the container
         self.docker
-            .start_container::<String>(&container_id, None)
+            .start_container(&container_id, None)
             .await
             .context("Failed to start Docker container")?;
 
@@ -733,7 +743,7 @@ impl ContainerManager {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         warn!(container_id = %container_id, "Exec cancelled; stopping container");
-                        let stop_opts = StopContainerOptions { t: 2 };
+                        let stop_opts = StopContainerOptionsBuilder::default().t(2).build();
                         let _ = self.docker.stop_container(container_id, Some(stop_opts)).await;
                         anyhow::bail!("cancelled while running installer");
                     }
@@ -791,7 +801,7 @@ impl ContainerManager {
         info!(container_id = %container_id, "Cleaning up container");
 
         // Stop with 10-second grace period
-        let stop_opts = StopContainerOptions { t: 10 };
+        let stop_opts = StopContainerOptionsBuilder::default().t(10).build();
         if let Err(e) = self.docker.stop_container(container_id, Some(stop_opts)).await {
             // 304 = already stopped, 404 = not found — both are fine
             debug!(
@@ -802,7 +812,7 @@ impl ContainerManager {
         }
 
         // Force remove
-        let remove_opts = RemoveContainerOptions { force: true, v: true, ..Default::default() };
+        let remove_opts = RemoveContainerOptionsBuilder::default().force(true).v(true).build();
         if let Err(e) = self.docker.remove_container(container_id, Some(remove_opts)).await {
             error!(
                 container_id = %container_id,
@@ -818,9 +828,9 @@ impl ContainerManager {
 
     /// List containers created by this tool (any state).
     pub async fn list_managed(&self) -> Result<Vec<OrphanInfo>> {
-        let mut filters = HashMap::new();
+        let mut filters: HashMap<String, Vec<String>> = HashMap::new();
         filters.insert("label".to_string(), vec![format!("{LABEL_MANAGED}=true")]);
-        let opts = ListContainersOptions { all: true, filters, ..Default::default() };
+        let opts = ListContainersOptionsBuilder::default().all(true).filters(&filters).build();
         let containers = self
             .docker
             .list_containers(Some(opts))
@@ -912,7 +922,7 @@ impl ContainerGuard {
         }
         self.cleaned = true;
 
-        let stop_opts = StopContainerOptions { t: 10 };
+        let stop_opts = StopContainerOptionsBuilder::default().t(10).build();
         if let Err(e) = self.docker.stop_container(&self.container_id, Some(stop_opts)).await {
             debug!(
                 container_id = %self.container_id,
@@ -921,7 +931,7 @@ impl ContainerGuard {
             );
         }
 
-        let remove_opts = RemoveContainerOptions { force: true, v: true, ..Default::default() };
+        let remove_opts = RemoveContainerOptionsBuilder::default().force(true).v(true).build();
         if let Err(e) = self.docker.remove_container(&self.container_id, Some(remove_opts)).await {
             error!(
                 container_id = %self.container_id,
@@ -943,10 +953,10 @@ impl Drop for ContainerGuard {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 if let Ok(rt) = rt {
                     rt.block_on(async {
-                        let stop_opts = StopContainerOptions { t: 5 };
+                        let stop_opts = StopContainerOptionsBuilder::default().t(5).build();
                         let _ = docker.stop_container(&container_id, Some(stop_opts)).await;
                         let remove_opts =
-                            RemoveContainerOptions { force: true, v: true, ..Default::default() };
+                            RemoveContainerOptionsBuilder::default().force(true).v(true).build();
                         let _ = docker.remove_container(&container_id, Some(remove_opts)).await;
                     });
                 }
