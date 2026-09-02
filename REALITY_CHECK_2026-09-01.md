@@ -963,3 +963,54 @@ Phase 3a is done for sections 4.2 to 4.6 (66 beads under epic `automated_flywhee
 the round-1 additions (A1 to A13) and the round-2 split (M10a/M10b) are added as beads next, then 4 to 5
 plan-space refinement rounds over every bead (frozen refinement prompt), then `bv --robot-triage`, then
 implementation starting at wave 0.
+
+## Status update 2026-09-02 (end of implementation session)
+
+Every bead from waves 0–4 and the remediation redesign (wave 5) is implemented, tested and
+pushed; the Rust suite is green on every target (lib 162, CLI 60, unit 268, e2e 46, acfs_drift 3)
+with clippy clean, the bash E2E scripts drive the real binary (18 scripts), and the Docker loop was
+proven end to end on this host with the release binary (prepared image built, zoxide passed as the
+non-root user with its version captured, uv refused for genuine upstream checksum drift without
+executing).
+
+### Verification plan (section 4.6) — results
+
+| # | Goal | Evidence | Status |
+|---|------|----------|--------|
+| 1 | Docker isolation, any base, non-root | local proof run (afsc-user, prepared image); Docker suite image tests (foreign base) | local proven; worker suite run in progress at time of writing |
+| 2 | Checksum gate | `checksum_mismatch.sh` (exit 99, never executed); real uv drift refused; Docker suite `real_run_verifies_checksum_and_refuses_mismatch` | proven |
+| 3 | Classification | CLI category tests, `error_classification.sh`, golden corpus (20 cases, 5 gaps found and fixed) | proven |
+| 4 | Parallel | `check_runs_in_parallel_from_config`, `parallel_execution.sh` | proven |
+| 5 | Retry | flaky-fixture attempts with waits; `network_failure.sh` | proven |
+| 6 | Remediation | `tests/cli/remediate.rs`: advisory diff + verification, propose branch, `--from-last-run`, fake-claude success/unsafe/error/rate-limit/unavailable; `check --remediate` outcomes | proven (Claude propose/apply deferred, C12c) |
+| 7 | JSON/JSONL purity | stdout-purity tests with `-vvv`; `jsonl_output.sh` | proven |
+| 8 | Persistence/status | same-second runs, `--run`, retention, history/diff | proven |
+| 9, 10 | Monitoring | `tests/cli/serve.rs`: per-installer gauges, stale 503, deterministic prometheus | proven |
+| 11, 12 | systemd | templates parse via clap, `install-systemd.sh --dry-run` test, `systemd_integration.sh`; manual `systemctl start` on a host not performed (needs sudo) | partial |
+| 13 | Validation | cross-check, `--profile`, exit 4, file:// hashes, drift persisted | proven |
+| 14 | Config | precedence matrix, `config show --resolved`, `config_override.sh` | proven |
+| 15 | Notifications | wiremock create → comment → close, modes, digest, secret hygiene | proven |
+| 16 | list | spec-aware, `--runnable`, no dead flags | proven |
+| 17 | Docs | README subcommand + config-section drift tests, CHANGELOG test | proven |
+| 18 | CI/release | workflows written (ci, e2e-tests with host Docker, nightly canary, PR gate); GitHub runs not observable from this host; no v0.1.0 release yet (M13) | partial |
+| 19 | Tests | CLI suite 60 tests; Docker suite blocking in CI; bash suite real | proven |
+| 20 | Fidelity | doctor cross-check 0 drift against the real ACFS checkout; drift tests wired in CI; subset baseline document (`docs/baseline/`), full catalog runs in the nightly canary (host disk headroom too small locally) | partial |
+| 21 | Lifecycle | SIGTERM test (exit 143, cancelled results), reaper tests, no leaked containers in bash Docker scenarios | proven |
+| 22 | Infra UX | `DOCKER_HOST=unix:///nope` exits 3 with the documented message | proven |
+
+### Still open
+
+- `C12c` Claude propose/apply (P3, owner sign-off); checksum propose/apply exists and is tested.
+- `M13` stable toolchain baseline and v0.1.0 release; `C14b` major dependency bumps behind the Docker suite.
+- `m4` dead library code (SummaryGenerator, FileChange/ChangeType, health_check, remediate_and_verify — tested but unused; low value).
+- `C10b` full 48-installer baseline document: script committed, subset run locally, full run via the nightly canary.
+
+### Operational notes
+
+- An external auto-commit process on the development host ran `git reset --hard origin/main`
+  once during the session and discarded two hours of uncommitted work; it was recovered from the
+  rch worker's synced tree. Commit and push after every green suite.
+- The host's root disk (4–7 GiB free) is too small for the full catalog in parallel; a leaked
+  container from before this work (`afsc-mdwb-20260901-…`) still holds 2.1 GB and was never
+  authorized for removal.
+
