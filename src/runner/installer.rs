@@ -1,4 +1,8 @@
 //! Individual installer test execution
+//!
+//! Data types shared by both execution backends. A [`TestResult`] always carries the full
+//! attempt history (`attempts`), a classification on failure (`error`), and the checksum
+//! verification state, so every reporting sink renders the same facts.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,14 +19,47 @@ pub enum TestStatus {
     Failed,
     Skipped,
     TimedOut,
+    /// The run was cancelled (signal, fail-fast, or deadline) before this test finished.
+    Cancelled,
 }
 
-/// Information about a retry attempt
+impl TestStatus {
+    /// Lower-case name used in persisted results and human output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TestStatus::Pending => "pending",
+            TestStatus::Running => "running",
+            TestStatus::Passed => "passed",
+            TestStatus::Failed => "failed",
+            TestStatus::Skipped => "skipped",
+            TestStatus::TimedOut => "timedout",
+            TestStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Information about a retry attempt (legacy view, derived from `attempts`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryInfo {
     pub attempt: u32,
     pub error: String,
     pub wait_ms: u64,
+}
+
+/// One execution attempt of an installer test.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    /// 1-based attempt index
+    pub index: u32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub status: TestStatus,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    /// Last 1 KB of stderr for this attempt
+    pub stderr_tail: String,
+    /// Backoff waited before this attempt started (0 for the first attempt)
+    pub waited_before_ms: u64,
 }
 
 /// Result of checksum verification
@@ -45,15 +82,26 @@ pub struct TestResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// Total wall time including retry waits
     pub duration: Duration,
+    /// Total wall time in milliseconds including retry waits
     pub duration_ms: u64,
+    /// Duration of the final attempt only
+    #[serde(default)]
+    pub last_attempt_ms: u64,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
+    /// Index of the final attempt (1-based)
     pub attempt: u32,
     pub max_attempts: u32,
+    /// Legacy retry records (one per wait between attempts)
     pub retries: Vec<RetryInfo>,
+    /// Full attempt history (empty only for synthetic results)
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
     pub container_id: Option<String>,
     pub checksum_result: Option<ChecksumResult>,
+    /// Classification, always present when the test did not pass
     pub error: Option<ErrorClassification>,
 }
 
@@ -69,11 +117,13 @@ impl TestResult {
             stderr: String::new(),
             duration: Duration::ZERO,
             duration_ms: 0,
+            last_attempt_ms: 0,
             started_at: now,
             finished_at: now,
             attempt: 1,
             max_attempts: 3,
             retries: Vec::new(),
+            attempts: Vec::new(),
             container_id: None,
             checksum_result: None,
             error: None,
@@ -87,6 +137,7 @@ impl TestResult {
         self.finished_at = Utc::now();
         self.duration = (self.finished_at - self.started_at).to_std().unwrap_or(Duration::ZERO);
         self.duration_ms = self.duration.as_millis() as u64;
+        self.last_attempt_ms = self.duration_ms;
         self
     }
 
@@ -98,6 +149,7 @@ impl TestResult {
         self.finished_at = Utc::now();
         self.duration = (self.finished_at - self.started_at).to_std().unwrap_or(Duration::ZERO);
         self.duration_ms = self.duration.as_millis() as u64;
+        self.last_attempt_ms = self.duration_ms;
         self
     }
 
@@ -107,6 +159,7 @@ impl TestResult {
         self.finished_at = Utc::now();
         self.duration = (self.finished_at - self.started_at).to_std().unwrap_or(Duration::ZERO);
         self.duration_ms = self.duration.as_millis() as u64;
+        self.last_attempt_ms = self.duration_ms;
         self
     }
 
@@ -117,6 +170,18 @@ impl TestResult {
         self.finished_at = Utc::now();
         self.duration = Duration::ZERO;
         self.duration_ms = 0;
+        self.last_attempt_ms = 0;
+        self
+    }
+
+    pub fn cancelled(mut self, reason: impl Into<String>) -> Self {
+        self.status = TestStatus::Cancelled;
+        self.success = false;
+        self.stderr = reason.into();
+        self.finished_at = Utc::now();
+        self.duration = (self.finished_at - self.started_at).to_std().unwrap_or(Duration::ZERO);
+        self.duration_ms = self.duration.as_millis() as u64;
+        self.last_attempt_ms = self.duration_ms;
         self
     }
 
@@ -135,14 +200,24 @@ impl TestResult {
         self
     }
 
+    /// Record a retry wait (legacy API; also used by tests). Increments `attempt`.
     pub fn add_retry(&mut self, error: impl Into<String>, wait_ms: u64) {
         self.retries.push(RetryInfo { attempt: self.attempt, error: error.into(), wait_ms });
         self.attempt += 1;
     }
 
-    /// Legacy accessor for retries count (for backwards compatibility)
+    /// Number of retries performed (attempts beyond the first).
     pub fn retry_count(&self) -> u32 {
-        self.retries.len() as u32
+        if self.attempts.len() > 1 {
+            (self.attempts.len() - 1) as u32
+        } else {
+            self.retries.len() as u32
+        }
+    }
+
+    /// Whether the checksum was verified successfully before execution.
+    pub fn checksum_verified(&self) -> bool {
+        self.checksum_result.as_ref().map(|c| c.matches).unwrap_or(false)
     }
 }
 
@@ -155,6 +230,7 @@ pub struct InstallerTest {
     pub script_path: Option<String>,
     pub timeout: Duration,
     pub timeout_seconds: u64,
+    /// Maximum number of attempts (first attempt plus retries)
     pub retry_count: u32,
     pub tags: Vec<String>,
     pub environment: Vec<(String, String)>,
@@ -191,6 +267,7 @@ impl InstallerTest {
         self
     }
 
+    /// Set the maximum number of attempts (first attempt plus retries).
     pub fn with_retry_count(mut self, count: u32) -> Self {
         self.retry_count = count;
         self
@@ -205,6 +282,18 @@ impl InstallerTest {
         self.environment.push((key.into(), value.into()));
         self
     }
+}
+
+/// Return the last `max_bytes` of `text` on a char boundary.
+pub fn tail(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut start = text.len() - max_bytes;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
 }
 
 #[cfg(test)]
@@ -241,6 +330,25 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_count_prefers_attempt_history() {
+        let mut result = TestResult::new("x");
+        let now = Utc::now();
+        for i in 1..=3 {
+            result.attempts.push(AttemptRecord {
+                index: i,
+                started_at: now,
+                finished_at: now,
+                status: TestStatus::Failed,
+                exit_code: Some(1),
+                duration_ms: 1,
+                stderr_tail: String::new(),
+                waited_before_ms: 0,
+            });
+        }
+        assert_eq!(result.retry_count(), 2);
+    }
+
+    #[test]
     fn test_installer_test_builder() {
         let test = InstallerTest::new("my-installer", "https://example.com/install.sh")
             .with_sha256("abc123")
@@ -253,5 +361,20 @@ mod tests {
         assert_eq!(test.timeout_seconds, 600);
         assert_eq!(test.retry_count, 5);
         assert_eq!(test.tags.len(), 2);
+    }
+
+    #[test]
+    fn test_tail_respects_char_boundaries() {
+        let s = "héllo wörld";
+        let t = tail(s, 5);
+        assert!(s.ends_with(&t));
+        assert!(t.len() <= 5);
+        assert_eq!(tail("abc", 10), "abc");
+    }
+
+    #[test]
+    fn test_status_as_str() {
+        assert_eq!(TestStatus::TimedOut.as_str(), "timedout");
+        assert_eq!(TestStatus::Cancelled.as_str(), "cancelled");
     }
 }

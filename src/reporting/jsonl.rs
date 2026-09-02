@@ -328,6 +328,23 @@ pub struct ResultEntry {
     pub stderr_excerpt: String,
     pub retry_count: u32,
     pub sha256_verified: bool,
+    /// Duration of the final attempt only (total is `duration_ms`)
+    #[serde(default)]
+    pub last_attempt_ms: u64,
+    /// One entry per attempt, oldest first
+    #[serde(default)]
+    pub attempts: Vec<AttemptEntry>,
+}
+
+/// Persisted view of one execution attempt
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptEntry {
+    pub index: u32,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub waited_before_ms: u64,
+    pub stderr_tail: String,
 }
 
 /// Error classification summary for result entries
@@ -417,6 +434,19 @@ impl ResultPersister {
                     .as_ref()
                     .map(|c| c.matches)
                     .unwrap_or(false),
+                last_attempt_ms: result.last_attempt_ms,
+                attempts: result
+                    .attempts
+                    .iter()
+                    .map(|a| AttemptEntry {
+                        index: a.index,
+                        status: a.status.as_str().to_string(),
+                        exit_code: a.exit_code,
+                        duration_ms: a.duration_ms,
+                        waited_before_ms: a.waited_before_ms,
+                        stderr_tail: a.stderr_tail.clone(),
+                    })
+                    .collect(),
             };
             let json = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", json)?;

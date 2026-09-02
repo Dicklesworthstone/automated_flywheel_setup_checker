@@ -2,6 +2,11 @@
 //!
 //! This module implements the core test runner that executes installer scripts
 //! either inside Docker containers (default) or in isolated local temp directories.
+//!
+//! Contract (shared by both backends):
+//! - every non-passing result carries an [`ErrorClassification`] (see [`finalize_failure`]);
+//! - retries accumulate an [`AttemptRecord`] per attempt instead of replacing the result;
+//! - checksum verification runs before execution and a mismatch is never retried.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -13,13 +18,23 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::parser::classify_error;
+use crate::parser::{classify_error, ErrorClassification, TIMEOUT_MARKER};
 
 use super::container::{ContainerConfig, ContainerGuard, ContainerManager, PullPolicy};
-use super::installer::{ChecksumResult, InstallerTest, TestResult, TestStatus};
+use super::installer::{
+    tail, AttemptRecord, ChecksumResult, InstallerTest, RetryInfo, TestResult, TestStatus,
+};
+use super::retry::RetryConfig;
 
 const CURL_BIN: &str = "curl";
 const BASH_BIN: &str = "bash";
+
+/// Bytes of stdout appended to the classification input.
+const CLASSIFY_STDOUT_TAIL_BYTES: usize = 4096;
+/// Bytes of stderr kept per attempt record.
+const ATTEMPT_STDERR_TAIL_BYTES: usize = 1024;
+/// Additive jitter fraction applied to retry backoff.
+const RETRY_JITTER_FRACTION: f64 = 0.25;
 
 /// Execution backend selection
 #[derive(Debug, Clone)]
@@ -50,6 +65,8 @@ pub struct RunnerConfig {
     pub extra_env: Vec<(String, String)>,
     /// Execution backend
     pub backend: ExecutionBackend,
+    /// Backoff policy between attempts (the attempt count comes from each `InstallerTest`)
+    pub retry: RetryConfig,
 }
 
 impl Default for RunnerConfig {
@@ -62,8 +79,30 @@ impl Default for RunnerConfig {
                 container_config: ContainerConfig::default(),
                 pull_policy: PullPolicy::IfNotPresent,
             },
+            retry: RetryConfig::executor_default(3),
         }
     }
+}
+
+/// Attach a classification to a non-passing result if it does not already have one.
+///
+/// The classifier sees stderr followed by the last 4 KB of stdout (installers such as srps print
+/// their refusal on stdout). `synthetic` lets the executor prepend a marker describing what the
+/// runner observed (timeout, cancellation) rather than what the installer printed.
+pub fn finalize_failure(result: &mut TestResult, synthetic: Option<&str>) {
+    if result.success || result.status == TestStatus::Passed || result.error.is_some() {
+        return;
+    }
+    let stdout_tail = tail(&result.stdout, CLASSIFY_STDOUT_TAIL_BYTES);
+    let text = format!("{}\n{}\n{}", synthetic.unwrap_or(""), result.stderr, stdout_tail);
+    result.error = Some(classify_error(&text, result.exit_code.unwrap_or(-1)));
+}
+
+/// Classify a non-passing result without mutating it (used by callers holding a reference).
+pub fn classify_result(result: &TestResult) -> ErrorClassification {
+    let stdout_tail = tail(&result.stdout, CLASSIFY_STDOUT_TAIL_BYTES);
+    let text = format!("{}\n{}", result.stderr, stdout_tail);
+    classify_error(&text, result.exit_code.unwrap_or(-1))
 }
 
 /// Executes installer tests in isolated environments
@@ -110,6 +149,7 @@ if [ "$ACTUAL" != "{expected}" ]; then
   echo "CHECKSUM_MISMATCH: expected={expected} actual=$ACTUAL url={url}" >&2
   exit 99
 fi
+echo "CHECKSUM_OK $ACTUAL" >&2
 set +e
 {bash} -s --{flags} < '{path}'"#,
                     curl = CURL_BIN,
@@ -144,7 +184,11 @@ set +e
         }
     }
 
-    /// Parse checksum result from stderr output (looks for CHECKSUM_MISMATCH marker)
+    /// Parse checksum result from stderr output.
+    ///
+    /// The verified script prints `CHECKSUM_OK <hash>` after a successful compare and
+    /// `CHECKSUM_MISMATCH: …` (exit 99) otherwise, so verification state is known even when the
+    /// installer itself later fails.
     fn parse_checksum_result(
         &self,
         stderr: &str,
@@ -173,21 +217,23 @@ set +e
                 download_ms,
                 size_bytes: 0,
             })
-        } else if exit_code == 0 {
-            // Script succeeded — checksum was verified and matched
+        } else if exit_code == 0 || stderr.contains("CHECKSUM_OK") {
+            // The compare succeeded (marker present) or the whole script succeeded.
+            let actual = stderr
+                .lines()
+                .find_map(|l| l.strip_prefix("CHECKSUM_OK "))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| expected.to_string());
             Some(ChecksumResult {
                 matches: true,
                 expected: expected.to_string(),
-                actual: expected.to_string(),
+                actual,
                 url: url.to_string(),
                 download_ms,
                 size_bytes: 0,
             })
         } else {
-            // Non-zero exit that isn't a checksum mismatch — the script failed
-            // before or after the checksum check (e.g., download error, installer
-            // crash). We can't confirm the checksum was verified, so return None
-            // to indicate the checksum status is unknown.
+            // Non-zero exit before the marker (download error) — verification state unknown.
             None
         }
     }
@@ -201,14 +247,19 @@ set +e
         }
     }
 
-    /// Run an installer test using the configured backend
+    /// Run an installer test using the configured backend (single attempt)
     pub async fn run_test(&self, test: &InstallerTest) -> Result<TestResult> {
-        match &self.config.backend {
+        let mut result = match &self.config.backend {
             ExecutionBackend::Docker { container_config, pull_policy } => {
-                self.run_test_docker(test, container_config, pull_policy).await
+                self.run_test_docker(test, container_config, pull_policy).await?
             }
-            ExecutionBackend::Local => self.run_test_local(test).await,
+            ExecutionBackend::Local => self.run_test_local(test).await?,
+        };
+        // Every backend exit path is covered here so no failure escapes unclassified.
+        if !result.success {
+            finalize_failure(&mut result, None);
         }
+        Ok(result)
     }
 
     /// Run an installer test inside a Docker container
@@ -340,6 +391,7 @@ set +e
                         // Clean up and return early — do NOT consider this retryable
                         guard.cleanup().await;
                         result.finished_at = chrono::Utc::now();
+                        result.last_attempt_ms = result.duration_ms;
                         return Ok(result);
                     }
                     result = result.with_checksum_result(checksum_result);
@@ -389,7 +441,11 @@ set +e
                 );
                 result.status = TestStatus::TimedOut;
                 result.success = false;
-                result.stderr = format!("Test timed out after {:?}", test_timeout);
+                result.stderr = format!(
+                    "{TIMEOUT_MARKER} after {}s (Test timed out after {:?})",
+                    test_timeout.as_secs(),
+                    test_timeout
+                );
                 result.duration = test_timeout;
                 result.duration_ms = test_timeout.as_millis() as u64;
             }
@@ -398,6 +454,7 @@ set +e
         // Always clean up the container
         guard.cleanup().await;
         result.finished_at = chrono::Utc::now();
+        result.last_attempt_ms = result.duration_ms;
         Ok(result)
     }
 
@@ -438,9 +495,13 @@ set +e
             if !dl_output.status.success() {
                 let stderr = String::from_utf8_lossy(&dl_output.stderr).to_string();
                 result.stderr = format!("Download failed: {}", stderr);
+                result.exit_code = dl_output.status.code();
                 result.status = TestStatus::Failed;
                 result.success = false;
                 result.finished_at = chrono::Utc::now();
+                result.duration = start_time.elapsed();
+                result.duration_ms = result.duration.as_millis() as u64;
+                result.last_attempt_ms = result.duration_ms;
                 return Ok(result);
             }
 
@@ -479,6 +540,7 @@ set +e
                 result.finished_at = chrono::Utc::now();
                 result.duration = start_time.elapsed();
                 result.duration_ms = result.duration.as_millis() as u64;
+                result.last_attempt_ms = result.duration_ms;
                 return Ok(result);
             }
 
@@ -596,6 +658,8 @@ set +e
                 result.stderr = format!("Execution error: {}", e);
                 result.status = TestStatus::Failed;
                 result.success = false;
+                result.duration = start_time.elapsed();
+                result.duration_ms = result.duration.as_millis() as u64;
             }
             Err(_) => {
                 warn!(
@@ -610,7 +674,11 @@ set +e
 
                 result.status = TestStatus::TimedOut;
                 result.success = false;
-                result.stderr = format!("Test timed out after {:?}", test_timeout);
+                result.stderr = format!(
+                    "{TIMEOUT_MARKER} after {}s (Test timed out after {:?})",
+                    test_timeout.as_secs(),
+                    test_timeout
+                );
                 result.duration = test_timeout;
                 result.duration_ms = test_timeout.as_millis() as u64;
             }
@@ -618,41 +686,80 @@ set +e
 
         debug!(path = ?temp_path, "Cleaning up temp directory");
         result.finished_at = chrono::Utc::now();
+        result.last_attempt_ms = result.duration_ms;
         Ok(result)
     }
 
-    /// Run a test with retries (each retry creates a fresh container in Docker mode)
+    /// Run a test with retries (each retry creates a fresh container in Docker mode).
+    ///
+    /// The returned result is the final attempt's result enriched with the full attempt history,
+    /// the legacy `retries` records, and the total wall time including backoff waits.
     pub async fn run_test_with_retry(&self, test: &InstallerTest) -> Result<TestResult> {
-        let mut result = self.run_test(test).await?;
-        let mut attempts = 1;
+        let overall_start = Instant::now();
+        let started_at = chrono::Utc::now();
+        let max_attempts = test.retry_count.max(1);
 
-        while attempts < test.retry_count && Self::should_retry_result(&result) {
-            let wait_ms = self.calculate_backoff(attempts);
+        let mut attempts: Vec<AttemptRecord> = Vec::new();
+        let mut retries: Vec<RetryInfo> = Vec::new();
+        let mut waited_before_ms: u64 = 0;
+        let mut attempt_index: u32 = 1;
+
+        loop {
+            let mut result = self.run_test(test).await?;
+
+            attempts.push(AttemptRecord {
+                index: attempt_index,
+                started_at: result.started_at,
+                finished_at: result.finished_at,
+                status: result.status,
+                exit_code: result.exit_code,
+                duration_ms: result.duration_ms,
+                stderr_tail: tail(&result.stderr, ATTEMPT_STDERR_TAIL_BYTES),
+                waited_before_ms,
+            });
+
+            let retry = attempt_index < max_attempts && Self::should_retry_result(&result);
+            if !retry {
+                result.last_attempt_ms = result.duration_ms;
+                result.attempt = attempt_index;
+                result.max_attempts = max_attempts;
+                result.attempts = attempts;
+                result.retries = retries;
+                result.started_at = started_at;
+                result.duration = overall_start.elapsed();
+                result.duration_ms = result.duration.as_millis() as u64;
+                return Ok(result);
+            }
+
+            let wait = self.config.retry.delay_with_jitter(attempt_index, RETRY_JITTER_FRACTION);
+            let wait_ms = wait.as_millis() as u64;
             info!(
                 installer = %test.name,
-                attempt = attempts + 1,
+                attempt = attempt_index + 1,
+                max_attempts = max_attempts,
                 wait_ms = wait_ms,
                 "Retrying failed test"
             );
-
-            let stderr_copy = result.stderr.clone();
-            result.add_retry(&stderr_copy, wait_ms);
-            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-
-            result = self.run_test(test).await?;
-            attempts += 1;
+            retries.push(RetryInfo {
+                attempt: attempt_index,
+                error: tail(&result.stderr, ATTEMPT_STDERR_TAIL_BYTES),
+                wait_ms,
+            });
+            tokio::time::sleep(wait).await;
+            waited_before_ms = wait_ms;
+            attempt_index += 1;
         }
-
-        result.max_attempts = test.retry_count;
-        Ok(result)
     }
 
+    /// Retry policy: only transient (retryable) classifications, never checksum mismatches,
+    /// timeouts, or cancellations.
     fn should_retry_result(result: &TestResult) -> bool {
         if result.success {
             return false;
         }
 
-        if result.status == TestStatus::TimedOut {
+        if matches!(result.status, TestStatus::TimedOut | TestStatus::Cancelled | TestStatus::Skipped)
+        {
             return false;
         }
 
@@ -662,16 +769,10 @@ set +e
             }
         }
 
-        classify_error(&result.stderr, result.exit_code.unwrap_or(-1)).retryable
-    }
-
-    /// Calculate exponential backoff with jitter
-    fn calculate_backoff(&self, attempt: u32) -> u64 {
-        let base_ms: u64 = 1000;
-        let max_ms: u64 = 30000;
-        let exponential = base_ms * 2u64.pow(attempt.min(10));
-        let jitter = rand::random::<u64>() % (exponential / 4 + 1);
-        (exponential + jitter).min(max_ms)
+        match &result.error {
+            Some(classification) => classification.retryable,
+            None => classify_result(result).retryable,
+        }
     }
 
     pub fn config(&self) -> &RunnerConfig {
@@ -689,6 +790,7 @@ mod tests {
         assert_eq!(config.default_timeout, Duration::from_secs(300));
         assert!(!config.dry_run);
         assert!(matches!(config.backend, ExecutionBackend::Docker { .. }));
+        assert_eq!(config.retry.max_attempts, 4);
     }
 
     #[test]
@@ -702,11 +804,11 @@ mod tests {
         let config = RunnerConfig { backend: ExecutionBackend::Local, ..Default::default() };
         let runner = InstallerTestRunner::new(config);
 
-        let backoff1 = runner.calculate_backoff(1);
-        assert!((2000..=3000).contains(&backoff1));
+        let backoff1 = runner.config.retry.delay_with_jitter(1, RETRY_JITTER_FRACTION);
+        assert!((2000..=2500).contains(&(backoff1.as_millis() as u64)));
 
-        let backoff2 = runner.calculate_backoff(2);
-        assert!((4000..=6000).contains(&backoff2));
+        let backoff2 = runner.config.retry.delay_with_jitter(2, RETRY_JITTER_FRACTION);
+        assert!((4000..=5000).contains(&(backoff2.as_millis() as u64)));
     }
 
     #[test]
@@ -761,6 +863,7 @@ mod tests {
         assert!(cmd.contains("sha256sum"));
         assert!(cmd.contains("abc123def456"));
         assert!(cmd.contains("CHECKSUM_MISMATCH"));
+        assert!(cmd.contains("CHECKSUM_OK"));
         assert!(cmd.contains("exit 99"));
         // Should NOT contain pipe to bash — uses stdin redirect instead
         assert!(!cmd.contains("| bash"));
@@ -803,6 +906,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_checksum_verified_but_installer_failed() {
+        let config = RunnerConfig { backend: ExecutionBackend::Local, ..Default::default() };
+        let runner = InstallerTestRunner::new(config);
+        let stderr = "CHECKSUM_OK abc123\nsome installer error\n";
+        let parsed = runner
+            .parse_checksum_result(stderr, 1, "https://x/install.sh", Some("abc123"), 5)
+            .expect("marker present");
+        assert!(parsed.matches);
+        assert_eq!(parsed.actual, "abc123");
+
+        // Download failure before the marker: unknown.
+        assert!(runner
+            .parse_checksum_result("curl: (22) 404", 22, "https://x", Some("abc"), 1)
+            .is_none());
+    }
+
+    #[test]
     fn test_retry_policy_retries_network_failures() {
         let result = TestResult::new("network")
             .failed(6, "curl: (6) Could not resolve host: raw.githubusercontent.com");
@@ -830,6 +950,21 @@ mod tests {
         assert!(!InstallerTestRunner::should_retry_result(&result));
     }
 
+    #[test]
+    fn test_finalize_failure_classifies_from_stdout_tail() {
+        let mut result = TestResult::new("srps").failed(1, "");
+        result.stdout = "banner\nDon't run this script as root. Run as a regular user.\n".into();
+        finalize_failure(&mut result, None);
+        assert_eq!(result.error.as_ref().unwrap().category, "permission");
+        // Idempotent and never applied to passes
+        let before = result.error.clone().unwrap().category;
+        finalize_failure(&mut result, Some("ignored"));
+        assert_eq!(result.error.unwrap().category, before);
+        let mut ok = TestResult::new("ok").passed();
+        finalize_failure(&mut ok, None);
+        assert!(ok.error.is_none());
+    }
+
     #[tokio::test]
     async fn test_runner_local_with_simple_command() {
         let config =
@@ -843,5 +978,8 @@ mod tests {
         assert!(result.is_ok());
         let result = result.unwrap();
         assert!(result.duration_ms > 0 || result.status == TestStatus::TimedOut);
+        if !result.success {
+            assert!(result.error.is_some(), "failures must be classified");
+        }
     }
 }

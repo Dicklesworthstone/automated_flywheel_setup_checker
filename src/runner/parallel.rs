@@ -3,7 +3,7 @@
 //! Provides a worker pool that runs installer tests concurrently,
 //! dispatching through the executor abstraction (Docker or local mode).
 
-use super::executor::{InstallerTestRunner, RunnerConfig};
+use super::executor::{finalize_failure, InstallerTestRunner, RunnerConfig};
 use super::installer::{InstallerTest, TestResult};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,7 @@ pub struct ParallelRunner {
 
 impl ParallelRunner {
     pub fn new(max_parallel: usize, runner_config: RunnerConfig) -> Self {
+        let max_parallel = max_parallel.max(1);
         Self {
             max_parallel,
             semaphore: Arc::new(Semaphore::new(max_parallel)),
@@ -38,7 +39,7 @@ impl ParallelRunner {
     /// Run multiple installer tests in parallel
     ///
     /// Each worker gets its own executor instance. In Docker mode, each test
-    /// gets its own container. Results are collected as they complete.
+    /// gets its own container. Results are collected in submission order.
     pub async fn run_all(&self, tests: Vec<InstallerTest>) -> Result<Vec<TestResult>> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
@@ -62,7 +63,10 @@ impl ParallelRunner {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(installer = %test.name, error = %e, "Test execution failed");
-                        TestResult::new(&test.name).failed(-1, format!("Execution error: {}", e))
+                        let mut r =
+                            TestResult::new(&test.name).failed(-1, format!("Execution error: {}", e));
+                        finalize_failure(&mut r, None);
+                        r
                     }
                 };
 
@@ -119,5 +123,12 @@ mod tests {
         let runner = ParallelRunner::new(4, config);
         let results = runner.run_all(vec![]).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_runner_zero_is_clamped() {
+        let config = RunnerConfig { backend: ExecutionBackend::Local, ..Default::default() };
+        let runner = ParallelRunner::new(0, config);
+        assert_eq!(runner.max_parallel(), 1);
     }
 }

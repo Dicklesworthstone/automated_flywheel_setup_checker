@@ -1,4 +1,8 @@
 //! Automated ACFS installer verification system CLI
+//!
+//! Output contract: stdout carries only data for the requested `--format`; all logs go to stderr.
+//! `--format json` prints exactly one JSON document per command; `--format jsonl` prints one object
+//! per line, each with a `kind` discriminator and `schema_version`.
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -8,21 +12,32 @@ use std::sync::Arc;
 use automated_flywheel_setup_checker::{
     checksums::{parse_checksums, validate_checksums},
     config::load_config,
+    logging::LogFormat,
     parser::classify_error,
     runner::{
         ContainerConfig, ExecutionBackend, InstallerTest, InstallerTestRunner, PullPolicy,
-        RunnerConfig,
+        RetryConfig, RunnerConfig, TestResult, TestStatus,
     },
     SystemdWatchdog,
 };
 
+/// Version of the JSON/JSONL output schema. Additive changes only within a major.
+const SCHEMA_VERSION: u32 = 1;
+
 /// Output format for CLI commands
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Human,
     Json,
     Jsonl,
     Prometheus,
+}
+
+/// Log line format for stderr
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogFormatArg {
+    Text,
+    Json,
 }
 
 /// Automated ACFS installer verification system
@@ -46,6 +61,14 @@ struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// Suppress progress and per-result lines in human output (summary only)
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Log line format on stderr
+    #[arg(long, global = true, default_value = "text")]
+    log_format: LogFormatArg,
+
     /// Enable systemd watchdog integration
     #[arg(long, global = true, env = "ACFS_WATCHDOG")]
     watchdog: bool,
@@ -58,13 +81,13 @@ enum Commands {
         /// Specific installers to check (default: all enabled)
         installers: Vec<String>,
 
-        /// Number of parallel checks
-        #[arg(long, default_value = "1")]
-        parallel: usize,
+        /// Number of parallel checks (default: [execution].parallel from config)
+        #[arg(long)]
+        parallel: Option<usize>,
 
-        /// Per-installer timeout in seconds
-        #[arg(long, default_value = "300")]
-        timeout: u64,
+        /// Per-installer timeout in seconds (default: [docker].timeout_seconds from config)
+        #[arg(long)]
+        timeout: Option<u64>,
 
         /// Show what would be tested without running
         #[arg(long)]
@@ -74,7 +97,7 @@ enum Commands {
         #[arg(long)]
         remediate: bool,
 
-        /// Stop on first failure
+        /// Stop on first failure (default: [execution].fail_fast from config)
         #[arg(long)]
         fail_fast: bool,
 
@@ -133,9 +156,13 @@ enum Commands {
         #[arg(long)]
         stderr: String,
 
-        /// Exit code
-        #[arg(long)]
+        /// Exit code (negative values allowed, e.g. -1 for "unknown")
+        #[arg(long, allow_negative_numbers = true)]
         exit_code: i32,
+
+        /// Show which pattern matched and where
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Show current configuration
@@ -165,6 +192,8 @@ struct CheckOptions {
     fail_fast: bool,
     local: bool,
     format: OutputFormat,
+    quiet: bool,
+    retries: u32,
 }
 
 const HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS: u64 = 900;
@@ -184,11 +213,18 @@ fn installer_timeout_seconds(installer_name: &str, requested: u64) -> u64 {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    automated_flywheel_setup_checker::logging::init(cli.verbose);
-
-    // Load configuration before constructing subsystems that use config fallbacks.
+    // Load configuration first so the configured log level can seed the subscriber.
     let config = load_config(cli.config.as_deref())?;
+
+    let log_format = match cli.log_format {
+        LogFormatArg::Text => LogFormat::Text,
+        LogFormatArg::Json => LogFormat::Json,
+    };
+    automated_flywheel_setup_checker::logging::init_with(
+        cli.verbose,
+        log_format,
+        Some(&config.general.log_level),
+    );
 
     // Initialize systemd watchdog if enabled
     let watchdog = if cli.watchdog {
@@ -236,13 +272,15 @@ async fn run_command(
                 config,
                 CheckOptions {
                     installers: installers.clone(),
-                    parallel: *parallel,
-                    timeout: *timeout,
+                    parallel: parallel.unwrap_or(config.execution.parallel).max(1),
+                    timeout: timeout.unwrap_or(config.docker.timeout_seconds),
                     dry_run: *dry_run,
                     remediate: *remediate,
-                    fail_fast: *fail_fast,
+                    fail_fast: *fail_fast || config.execution.fail_fast,
                     local: *local,
                     format: cli.format,
+                    quiet: cli.quiet,
+                    retries: config.execution.retry_transient,
                 },
             )
             .await?;
@@ -264,8 +302,8 @@ async fn run_command(
             cmd_validate(config, path.clone(), *check_urls, *check_hashes, cli.format).await?;
         }
 
-        Commands::ClassifyError { stderr, exit_code } => {
-            cmd_classify_error(stderr, *exit_code, cli.format)?;
+        Commands::ClassifyError { stderr, exit_code, explain } => {
+            cmd_classify_error(stderr, *exit_code, *explain, cli.format)?;
         }
 
         Commands::Config { cmd } => {
@@ -294,6 +332,48 @@ async fn cmd_serve(
     .await
 }
 
+/// Attach the `kind` discriminator and schema version to a serializable value.
+fn with_kind<T: serde::Serialize>(kind: &str, value: &T) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(value)?;
+    if let serde_json::Value::Object(map) = &mut v {
+        map.insert("kind".to_string(), serde_json::Value::String(kind.to_string()));
+        map.insert("schema_version".to_string(), serde_json::json!(SCHEMA_VERSION));
+    }
+    Ok(v)
+}
+
+/// Print one human-readable error line (category, severity, suggestion) under a failed result.
+fn print_error_line(result: &TestResult) {
+    if let Some(err) = &result.error {
+        println!(
+            "    error: {} ({:?}, retryable={}, confidence={:.0}%)",
+            err.category,
+            err.severity,
+            err.retryable,
+            err.confidence * 100.0
+        );
+        if let Some(s) = &err.suggestion {
+            println!("    suggestion: {}", s);
+        }
+    }
+}
+
+fn summary_counts(results: &[TestResult]) -> serde_json::Value {
+    let count = |s: TestStatus| results.iter().filter(|r| r.status == s).count();
+    let passed = results.iter().filter(|r| r.success).count();
+    let failed = results.iter().filter(|r| !r.success).count();
+    serde_json::json!({
+        "total": results.len(),
+        "passed": passed,
+        "failed": failed,
+        "failed_only": count(TestStatus::Failed),
+        "timed_out": count(TestStatus::TimedOut),
+        "skipped": count(TestStatus::Skipped),
+        "cancelled": count(TestStatus::Cancelled),
+        "duration_ms": results.iter().map(|r| r.duration_ms).sum::<u64>(),
+    })
+}
+
 async fn cmd_check(
     config: &automated_flywheel_setup_checker::Config,
     options: CheckOptions,
@@ -301,6 +381,7 @@ async fn cmd_check(
     use std::time::Duration;
 
     let command_started_at = chrono::Utc::now();
+    let run_id = uuid::Uuid::new_v4().to_string();
     let checksums_path = config.general.acfs_repo.join("checksums.yaml");
 
     if !checksums_path.exists() {
@@ -308,13 +389,33 @@ async fn cmd_check(
     }
 
     let checksums = parse_checksums(&checksums_path)?;
-    let enabled: Vec<_> = checksums
+    let mut enabled: Vec<_> = checksums
         .installers
         .iter()
         .filter(|(name, entry)| {
             entry.enabled && (options.installers.is_empty() || options.installers.contains(name))
         })
         .collect();
+    enabled.sort_by(|a, b| a.0.cmp(b.0));
+
+    let backend_name = if options.local { "local" } else { "docker" };
+    let run_header = serde_json::json!({
+        "kind": "run",
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "started_at": command_started_at,
+        "tool_version": env!("CARGO_PKG_VERSION"),
+        "backend": backend_name,
+        "image": if options.local { serde_json::Value::Null } else { serde_json::json!(config.docker.image) },
+        "parallel": options.parallel,
+        "timeout_seconds": options.timeout,
+        "retries": options.retries,
+        "fail_fast": options.fail_fast,
+        "acfs_repo": config.general.acfs_repo,
+        "installers_requested": options.installers,
+        "installer_count": enabled.len(),
+        "dry_run": options.dry_run,
+    });
 
     if options.dry_run {
         match options.format {
@@ -325,11 +426,12 @@ async fn cmd_check(
                     options.parallel
                 );
                 println!("Timeout: {}s per installer", options.timeout);
+                println!("Retries: {} (transient failures only)", options.retries);
                 println!(
                     "Heavy setup floor: {}s for Docker base image and known slow installers",
                     HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS
                 );
-                println!("Backend: {}", if options.local { "local" } else { "docker" });
+                println!("Backend: {}", backend_name);
                 println!();
                 for (name, entry) in &enabled {
                     if let Some(ver) = &entry.version {
@@ -340,15 +442,15 @@ async fn cmd_check(
                 }
             }
             OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
-                let output = serde_json::json!({
-                    "dry_run": true,
-                    "installers": enabled.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-                    "parallel": options.parallel,
-                    "timeout": options.timeout,
-                    "heavy_setup_timeout_floor": HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS,
-                    "backend": if options.local { "local" } else { "docker" },
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                let mut output = run_header.clone();
+                output["installers"] =
+                    serde_json::json!(enabled.iter().map(|(n, _)| n).collect::<Vec<_>>());
+                output["heavy_setup_timeout_floor"] = serde_json::json!(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
+                if matches!(options.format, OutputFormat::Json) {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("{}", serde_json::to_string(&output)?);
+                }
             }
         }
         return Ok(());
@@ -377,19 +479,22 @@ async fn cmd_check(
         default_timeout: Duration::from_secs(options.timeout),
         dry_run: false,
         backend,
+        retry: RetryConfig::executor_default(options.retries),
         ..Default::default()
     };
     let runner = InstallerTestRunner::new(runner_config.clone());
 
     // Convert checksums entries to InstallerTest objects
+    let max_attempts = options.retries.saturating_add(1).max(1);
     let tests: Vec<InstallerTest> = enabled
         .iter()
         .filter_map(|(name, entry)| {
             // Skip entries without URLs
             let url = entry.url.as_ref()?;
             let timeout = installer_timeout_seconds(name.as_str(), options.timeout);
-            let mut test =
-                InstallerTest::new(name.as_str(), url).with_timeout(Duration::from_secs(timeout));
+            let mut test = InstallerTest::new(name.as_str(), url)
+                .with_timeout(Duration::from_secs(timeout))
+                .with_retry_count(max_attempts);
 
             // Add checksum if available
             if let Some(sha256) = &entry.sha256 {
@@ -399,6 +504,11 @@ async fn cmd_check(
             Some(test)
         })
         .collect();
+
+    // In JSONL mode the run header is the first line.
+    if matches!(options.format, OutputFormat::Jsonl) {
+        println!("{}", serde_json::to_string(&run_header)?);
+    }
 
     // Run tests — use parallel runner when parallel > 1
     let results = if options.parallel > 1 {
@@ -425,30 +535,46 @@ async fn cmd_check(
     for result in &results {
         match options.format {
             OutputFormat::Human => {
+                if options.quiet {
+                    continue;
+                }
                 let status_icon = if result.success { "\u{2713}" } else { "\u{2717}" };
+                let attempts = if result.attempts.len() > 1 {
+                    format!(", {} attempts", result.attempts.len())
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{} {} ({:?}, {}ms)",
-                    status_icon, result.installer_name, result.status, result.duration_ms
+                    "{} {} ({:?}, {}ms{})",
+                    status_icon, result.installer_name, result.status, result.duration_ms, attempts
                 );
                 if !result.success && !result.stderr.is_empty() {
                     let stderr_preview: String =
                         result.stderr.lines().take(3).collect::<Vec<_>>().join("\n");
                     println!("    stderr: {}", stderr_preview);
                 }
+                if !result.success {
+                    print_error_line(result);
+                }
             }
             OutputFormat::Json => {}
             OutputFormat::Jsonl | OutputFormat::Prometheus => {
-                println!("{}", serde_json::to_string(&result)?);
+                println!("{}", serde_json::to_string(&with_kind("result", result)?)?);
             }
         }
     }
 
     // Summary output
+    let mut summary = summary_counts(&results);
+    summary["run_id"] = serde_json::json!(run_id);
+    summary["exit_code"] = serde_json::json!(if any_failed { 1 } else { 0 });
     match options.format {
         OutputFormat::Human => {
             let passed = results.iter().filter(|r| r.success).count();
             let failed = results.len() - passed;
-            println!();
+            if !options.quiet {
+                println!();
+            }
             println!(
                 "Results: {} passed, {} failed out of {} total",
                 passed,
@@ -458,17 +584,19 @@ async fn cmd_check(
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
+                "kind": "check",
+                "schema_version": SCHEMA_VERSION,
+                "run": run_header,
                 "results": results,
-                "summary": {
-                    "total": results.len(),
-                    "passed": results.iter().filter(|r| r.success).count(),
-                    "failed": results.iter().filter(|r| !r.success).count(),
-                }
+                "summary": summary,
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         OutputFormat::Jsonl | OutputFormat::Prometheus => {
-            // Already printed per result
+            let mut line = summary.clone();
+            line["kind"] = serde_json::json!("summary");
+            line["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+            println!("{}", serde_json::to_string(&line)?);
         }
     }
 
@@ -491,7 +619,7 @@ async fn cmd_check(
         let remediation = ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
 
         for result in results.iter().filter(|r| !r.success) {
-            // Classify the error if not already done
+            // Classification is always attached to failures; fall back defensively.
             let classification = result.error.clone().unwrap_or_else(|| {
                 automated_flywheel_setup_checker::parser::classify_error(
                     &result.stderr,
@@ -543,17 +671,17 @@ async fn cmd_check(
     }
 
     // Persist results to JSONL file
-    let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = results.first().map(|r| r.started_at).unwrap_or(command_started_at);
     let persister = automated_flywheel_setup_checker::reporting::ResultPersister::default_dir();
     match persister.persist(&results, &run_id, started_at) {
         Ok(path) => {
-            if matches!(options.format, OutputFormat::Human) {
+            if matches!(options.format, OutputFormat::Human) && !options.quiet {
                 println!("Results saved to: {}", path.display());
             }
+            tracing::info!(path = %path.display(), "Results saved");
         }
         Err(e) => {
-            eprintln!("Warning: failed to persist results: {}", e);
+            tracing::warn!(error = %e, "Failed to persist results");
         }
     }
 
@@ -597,7 +725,7 @@ fn cmd_list(
 
     let checksums = parse_checksums(&checksums_path)?;
 
-    let filtered: Vec<_> = checksums
+    let mut filtered: Vec<_> = checksums
         .installers
         .iter()
         .filter(|(_, entry)| {
@@ -612,6 +740,7 @@ fn cmd_list(
             true
         })
         .collect();
+    filtered.sort_by(|a, b| a.0.cmp(b.0));
 
     match format {
         OutputFormat::Human => {
@@ -645,6 +774,8 @@ fn cmd_list(
         OutputFormat::Jsonl | OutputFormat::Prometheus => {
             for (name, entry) in &filtered {
                 let output = serde_json::json!({
+                    "kind": "installer",
+                    "schema_version": SCHEMA_VERSION,
                     "name": name,
                     "url": entry.url,
                     "sha256": entry.sha256,
@@ -684,10 +815,16 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
                 }
                 OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
                     let output = serde_json::json!({
+                        "kind": "status",
+                        "schema_version": SCHEMA_VERSION,
                         "status": "no_runs",
                         "message": "No runs recorded yet"
                     });
-                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    if matches!(format, OutputFormat::Json) {
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    } else {
+                        println!("{}", serde_json::to_string(&output)?);
+                    }
                 }
             }
             return Ok(());
@@ -721,6 +858,7 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
                     "passed" => "\u{2713}",
                     "failed" => "\u{2717}",
                     "timedout" => "\u{29D6}",
+                    "cancelled" => "\u{2298}",
                     "skipped" => "-",
                     _ => "?",
                 };
@@ -753,6 +891,16 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
                             ec.confidence * 100.0
                         );
                     }
+                    for attempt in &entry.attempts {
+                        println!(
+                            "      attempt {}: {} exit={} {}ms waited={}ms",
+                            attempt.index,
+                            attempt.status,
+                            attempt.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+                            attempt.duration_ms,
+                            attempt.waited_before_ms
+                        );
+                    }
                 }
             }
 
@@ -760,6 +908,8 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
+                "kind": "status",
+                "schema_version": SCHEMA_VERSION,
                 "results": entries,
                 "summary": summary,
                 "file": results_path.to_string_lossy(),
@@ -768,10 +918,10 @@ fn cmd_status(detailed: bool, format: OutputFormat) -> Result<()> {
         }
         OutputFormat::Jsonl | OutputFormat::Prometheus => {
             for entry in &entries {
-                println!("{}", serde_json::to_string(entry)?);
+                println!("{}", serde_json::to_string(&with_kind("result", entry)?)?);
             }
             if let Some(s) = &summary {
-                println!("{}", serde_json::to_string(s)?);
+                println!("{}", serde_json::to_string(&with_kind("summary", s)?)?);
             }
         }
     }
@@ -797,39 +947,52 @@ async fn cmd_validate(
     let checksums = parse_checksums(&checksums_path)?;
     let result = validate_checksums(&checksums, false); // format validation only
 
-    match format {
-        OutputFormat::Human => {
-            if result.valid {
-                println!("checksums.yaml is valid");
-            } else {
-                println!("checksums.yaml has errors:");
-                for error in &result.errors {
-                    println!("  ERROR: {}", error);
-                }
-            }
-            if !result.warnings.is_empty() {
-                println!("Warnings:");
-                for warning in &result.warnings {
-                    println!("  WARN: {}", warning);
-                }
+    let format_report = serde_json::json!({
+        "valid": result.valid,
+        "errors": result.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+        "warnings": result.warnings,
+    });
+
+    if matches!(format, OutputFormat::Human) {
+        if result.valid {
+            println!("checksums.yaml is valid");
+        } else {
+            println!("checksums.yaml has errors:");
+            for error in &result.errors {
+                println!("  ERROR: {}", error);
             }
         }
-        OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
-            let output = serde_json::json!({
-                "valid": result.valid,
-                "errors": result.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
-                "warnings": result.warnings,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+        if !result.warnings.is_empty() {
+            println!("Warnings:");
+            for warning in &result.warnings {
+                println!("  WARN: {}", warning);
+            }
         }
     }
 
-    if !result.valid {
-        std::process::exit(1);
+    // Accumulate one document for json; stream kinds for jsonl.
+    let mut report = serde_json::json!({
+        "kind": "validate",
+        "schema_version": SCHEMA_VERSION,
+        "path": checksums_path.to_string_lossy(),
+        "format": format_report,
+    });
+    let mut exit_code = if result.valid { 0 } else { 1 };
+
+    if matches!(format, OutputFormat::Jsonl) {
+        let mut line = serde_json::json!({
+            "kind": "format",
+            "schema_version": SCHEMA_VERSION,
+            "path": checksums_path.to_string_lossy(),
+        });
+        line["valid"] = report["format"]["valid"].clone();
+        line["errors"] = report["format"]["errors"].clone();
+        line["warnings"] = report["format"]["warnings"].clone();
+        println!("{}", serde_json::to_string(&line)?);
     }
 
-    // URL checking (async)
-    if check_urls_flag {
+    // URL checking (async) — only when the format is valid
+    if result.valid && check_urls_flag {
         if matches!(format, OutputFormat::Human) {
             println!();
             println!("Checking URLs...");
@@ -863,30 +1026,25 @@ async fn cmd_validate(
                 );
             }
             OutputFormat::Json => {
-                let output = serde_json::json!({
-                    "url_checks": url_results,
-                    "summary": {
-                        "total": url_results.len(),
-                        "reachable": reachable,
-                        "broken": broken,
-                    }
+                report["url_checks"] = serde_json::json!({
+                    "results": url_results,
+                    "summary": { "total": url_results.len(), "reachable": reachable, "broken": broken },
                 });
-                println!("{}", serde_json::to_string_pretty(&output)?);
             }
             OutputFormat::Jsonl | OutputFormat::Prometheus => {
                 for r in &url_results {
-                    println!("{}", serde_json::to_string(r)?);
+                    println!("{}", serde_json::to_string(&with_kind("url_check", r)?)?);
                 }
             }
         }
 
         if broken > 0 {
-            std::process::exit(1);
+            exit_code = 1;
         }
     }
 
     // Hash checking (async)
-    if check_hashes_flag {
+    if result.valid && check_hashes_flag {
         if matches!(format, OutputFormat::Human) {
             println!();
             println!("Checking hashes...");
@@ -921,33 +1079,57 @@ async fn cmd_validate(
                 );
             }
             OutputFormat::Json => {
-                let output = serde_json::json!({
-                    "hash_checks": hash_results,
-                    "summary": {
-                        "total": hash_results.len(),
-                        "matched": matched,
-                        "mismatched": mismatched,
-                    }
+                report["hash_checks"] = serde_json::json!({
+                    "results": hash_results,
+                    "summary": { "total": hash_results.len(), "matched": matched, "mismatched": mismatched },
                 });
-                println!("{}", serde_json::to_string_pretty(&output)?);
             }
             OutputFormat::Jsonl | OutputFormat::Prometheus => {
                 for r in &hash_results {
-                    println!("{}", serde_json::to_string(r)?);
+                    println!("{}", serde_json::to_string(&with_kind("hash_check", r)?)?);
                 }
             }
         }
 
         if mismatched > 0 {
-            std::process::exit(1);
+            exit_code = 1;
         }
+    }
+
+    report["exit_code"] = serde_json::json!(exit_code);
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            let line = serde_json::json!({
+                "kind": "summary",
+                "schema_version": SCHEMA_VERSION,
+                "valid": result.valid,
+                "exit_code": exit_code,
+            });
+            println!("{}", serde_json::to_string(&line)?);
+        }
+        OutputFormat::Human => {}
+    }
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 
     Ok(())
 }
 
-fn cmd_classify_error(stderr: &str, exit_code: i32, format: OutputFormat) -> Result<()> {
+fn cmd_classify_error(
+    stderr: &str,
+    exit_code: i32,
+    explain: bool,
+    format: OutputFormat,
+) -> Result<()> {
     let classification = classify_error(stderr, exit_code);
+    let explanation = if explain {
+        automated_flywheel_setup_checker::parser::explain(stderr, exit_code)
+    } else {
+        None
+    };
 
     match format {
         OutputFormat::Human => {
@@ -959,9 +1141,30 @@ fn cmd_classify_error(stderr: &str, exit_code: i32, format: OutputFormat) -> Res
             if let Some(suggestion) = &classification.suggestion {
                 println!("  Suggestion: {}", suggestion);
             }
+            if explain {
+                match &explanation {
+                    Some((cat, pattern, offset)) => {
+                        println!("  Matched: {} via `{}` at byte {}", cat, pattern, offset)
+                    }
+                    None => println!("  Matched: no pattern (fallback classification)"),
+                }
+            }
         }
         OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
-            println!("{}", serde_json::to_string_pretty(&classification)?);
+            let mut v = with_kind("classification", &classification)?;
+            if explain {
+                v["explain"] = match &explanation {
+                    Some((cat, pattern, offset)) => serde_json::json!({
+                        "category": cat, "pattern": pattern, "offset": offset
+                    }),
+                    None => serde_json::Value::Null,
+                };
+            }
+            if matches!(format, OutputFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!("{}", serde_json::to_string(&v)?);
+            }
         }
     }
 
@@ -1116,5 +1319,31 @@ mod tests {
     #[test]
     fn ordinary_installer_timeout_is_unchanged() {
         assert_eq!(installer_timeout_seconds("dcg", 300), 300);
+    }
+
+    #[test]
+    fn with_kind_adds_discriminator_and_schema_version() {
+        let v = with_kind("result", &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(v["kind"], "result");
+        assert_eq!(v["schema_version"], SCHEMA_VERSION);
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn summary_counts_statuses() {
+        let results = vec![
+            TestResult::new("a").passed(),
+            TestResult::new("b").failed(1, "x"),
+            TestResult::new("c").timed_out(),
+            TestResult::new("d").skipped("s"),
+            TestResult::new("e").cancelled("c"),
+        ];
+        let s = summary_counts(&results);
+        assert_eq!(s["total"], 5);
+        assert_eq!(s["passed"], 1);
+        assert_eq!(s["failed"], 4);
+        assert_eq!(s["timed_out"], 1);
+        assert_eq!(s["skipped"], 1);
+        assert_eq!(s["cancelled"], 1);
     }
 }

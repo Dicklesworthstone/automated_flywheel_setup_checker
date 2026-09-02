@@ -1,7 +1,20 @@
 //! Error classification logic
+//!
+//! Classifies installer failures from their captured output and exit code. Every failed
+//! [`TestResult`](crate::runner::TestResult) carries the classification produced here so that
+//! persisted results, notifications, and `status --detailed` can report a category instead of
+//! "unknown". Patterns are compiled once and cached.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Synthetic marker the executor prepends when an attempt exceeded its timeout.
+pub const TIMEOUT_MARKER: &str = "AFSC_TIMEOUT: test timed out";
+/// Synthetic marker the executor prepends when a run was cancelled (signal, fail-fast, deadline).
+pub const CANCELLED_MARKER: &str = "AFSC_CANCELLED: run cancelled";
+/// Synthetic marker for a post-install verification failure (`verify_cmd` / `expect_binary`).
+pub const POST_INSTALL_MARKER: &str = "AFSC_POST_INSTALL: verification failed";
 
 /// Error severity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,8 +43,65 @@ pub struct ErrorClassification {
     pub confidence: f64,
 }
 
-/// Classify an error based on stderr content and exit code
+/// All category names the classifier can produce, in evaluation order.
+///
+/// Used by documentation drift tests so README tables stay in sync with the code.
+pub const CATEGORIES: &[&str] = &[
+    "cancelled",
+    "timeout",
+    "post_install",
+    "bootstrap_mismatch",
+    "checksum_mismatch",
+    "network",
+    "apt_repair_failed",
+    "command_not_found",
+    "permission",
+    "dependency",
+    "resource",
+    "syntax_error",
+    "unknown",
+];
+
+/// Classify an error based on captured output (stderr plus a stdout tail) and exit code
 pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
+    // Synthetic markers produced by the executor take precedence: they describe what the
+    // runner observed, not what the installer printed.
+    if stderr.contains(CANCELLED_MARKER) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Unknown,
+            category: "cancelled".to_string(),
+            suggestion: Some("Run was cancelled before this installer finished".to_string()),
+            retryable: false,
+            confidence: 1.0,
+        };
+    }
+
+    if stderr.contains(TIMEOUT_MARKER) || matches(&TIMEOUT_PATTERNS, stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Transient,
+            category: "timeout".to_string(),
+            suggestion: Some(
+                "Increase the timeout or add an [installers.<name>] timeout_seconds override"
+                    .to_string(),
+            ),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
+    if stderr.contains(POST_INSTALL_MARKER) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Configuration,
+            category: "post_install".to_string(),
+            suggestion: Some(
+                "Installer exited 0 but post-install verification failed; inspect verify_cmd output"
+                    .to_string(),
+            ),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
     // Bootstrap mismatch errors (specific to ACFS installer)
     if is_bootstrap_mismatch(stderr) {
         return ErrorClassification {
@@ -84,6 +154,20 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
             severity: ErrorSeverity::Dependency,
             category: "command_not_found".to_string(),
             suggestion: Some("Required command is not installed".to_string()),
+            retryable: false,
+            confidence: 0.95,
+        };
+    }
+
+    // Installers that refuse to run as root print their refusal on stdout or stderr.
+    if is_root_refusal(stderr) {
+        return ErrorClassification {
+            severity: ErrorSeverity::Permission,
+            category: "permission".to_string(),
+            suggestion: Some(
+                "Installer refuses to run as root; run as a non-root user (the default afsc-base image does)"
+                    .to_string(),
+            ),
             retryable: false,
             confidence: 0.95,
         };
@@ -146,110 +230,185 @@ pub fn classify_error(stderr: &str, exit_code: i32) -> ErrorClassification {
     }
 }
 
-fn is_syntax_error(stderr: &str) -> bool {
-    let patterns = [r"(?i)syntax error", r"(?i)unexpected token", r"(?i)parse error"];
+/// Explain which pattern (if any) matched, for `classify-error --explain`.
+///
+/// Returns `(category, pattern, byte offset)` for the first matching pattern in evaluation order.
+pub fn explain(stderr: &str, exit_code: i32) -> Option<(&'static str, String, usize)> {
+    let groups: &[(&str, &Patterns)] = &[
+        ("timeout", &TIMEOUT_PATTERNS),
+        ("bootstrap_mismatch", &BOOTSTRAP_PATTERNS),
+        ("checksum_mismatch", &CHECKSUM_PATTERNS),
+        ("network", &NETWORK_PATTERNS),
+        ("apt_repair_failed", &APT_REPAIR_PATTERNS),
+        ("permission", &ROOT_REFUSAL_PATTERNS),
+        ("permission", &PERMISSION_PATTERNS),
+        ("dependency", &DEPENDENCY_PATTERNS),
+        ("resource", &RESOURCE_PATTERNS),
+        ("syntax_error", &SYNTAX_PATTERNS),
+    ];
+    for (category, patterns) in groups {
+        for re in patterns.get() {
+            if let Some(m) = re.find(stderr) {
+                return Some((category, re.as_str().to_string(), m.start()));
+            }
+        }
+    }
+    if exit_code == 127 {
+        return Some(("command_not_found", "exit code 127".to_string(), 0));
+    }
+    if exit_code == 126 {
+        return Some(("permission", "exit code 126".to_string(), 0));
+    }
+    None
+}
 
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+/// A lazily compiled, cached pattern group.
+struct Patterns {
+    sources: &'static [&'static str],
+    cell: OnceLock<Vec<Regex>>,
+}
+
+impl Patterns {
+    const fn new(sources: &'static [&'static str]) -> Self {
+        Self { sources, cell: OnceLock::new() }
+    }
+
+    fn get(&self) -> &Vec<Regex> {
+        self.cell.get_or_init(|| {
+            self.sources
+                .iter()
+                .filter_map(|p| Regex::new(p).ok())
+                .collect()
+        })
+    }
+}
+
+fn matches(patterns: &Patterns, text: &str) -> bool {
+    patterns.get().iter().any(|re| re.is_match(text))
+}
+
+static TIMEOUT_PATTERNS: Patterns =
+    Patterns::new(&[r"(?i)test timed out after", r"(?i)\btimed out after \d+"]);
+
+static SYNTAX_PATTERNS: Patterns =
+    Patterns::new(&[r"(?i)syntax error", r"(?i)unexpected token", r"(?i)parse error"]);
+
+static BOOTSTRAP_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)bootstrap.*mismatch",
+    r"(?i)bootstrap.*verification.*failed",
+    r"(?i)manifest.*mismatch",
+    r"(?i)expected.*bootstrap.*actual",
+]);
+
+static CHECKSUM_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)checksum.*mismatch",
+    r"(?i)checksum.*verification.*failed",
+    r"(?i)checksum.*did\s+not\s+match",
+    r"(?i)sha256.*mismatch",
+    r"(?i)hash.*verification.*failed",
+    r"(?i)expected.*hash.*got",
+    r"(?i)integrity.*check.*failed",
+]);
+
+static NETWORK_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)connection refused",
+    r"(?i)connection timed out",
+    r"(?i)network unreachable",
+    r"(?i)name or service not known",
+    r"(?i)temporary failure in name resolution",
+    r"(?i)could not resolve host",
+    r"(?i)api rate limit exceeded",
+    r"(?i)rate limit",
+    r"(?i)too many requests",
+    r"(?i)\b429\b",
+    r"(?i)\b5(00|02|03)\b",
+    r"(?i)curl.*failed",
+    r"(?i)wget.*failed",
+    r"(?i)unable to fetch some archives",
+    r"(?i)could not fetch release info",
+    r"(?i)ssl certificate problem",
+    r"(?i)unable to acquire.*lock",
+    r"(?i)dpkg.*lock",
+    r"(?i)apt.*lock",
+]);
+
+static APT_REPAIR_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)dpkg\s+--configure\s+-a\s+failed",
+    r"(?i)apt-get\s+-f\s+install\s+failed",
+    r"(?i)apt\s+repair.*failed",
+    r"(?i)dpkg\s+repair.*failed",
+    r"(?i)unmet dependencies",
+    r"(?i)held broken packages",
+    r"(?i)try ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
+    r"(?i)you might want to run ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
+]);
+
+static ROOT_REFUSAL_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)don'?t run (this|the) (script|installer) as root",
+    r"(?i)do not run (this|the) (script|installer) as root",
+    r"(?i)must not be run as root",
+    r"(?i)should not be run as root",
+    r"(?i)refus\w* to run as root",
+    r"(?i)running as root is not (supported|allowed)",
+    r"(?i)please run as a (regular|normal|non-root) user",
+]);
+
+static PERMISSION_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)permission denied",
+    r"(?i)operation not permitted",
+    r"(?i)access denied",
+    r"EACCES",
+]);
+
+static DEPENDENCY_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)command not found",
+    r"(?i)package.*not found",
+    r"(?i)unable to locate package",
+    r"(?i)no such file or directory",
+    r"(?i)missing dependency",
+]);
+
+static RESOURCE_PATTERNS: Patterns = Patterns::new(&[
+    r"(?i)no space left on device",
+    r"(?i)out of memory",
+    r"(?i)cannot allocate memory",
+    r"(?i)disk quota exceeded",
+]);
+
+fn is_syntax_error(stderr: &str) -> bool {
+    matches(&SYNTAX_PATTERNS, stderr)
 }
 
 fn is_bootstrap_mismatch(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)bootstrap.*mismatch",
-        r"(?i)bootstrap.*verification.*failed",
-        r"(?i)manifest.*mismatch",
-        r"(?i)expected.*bootstrap.*actual",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&BOOTSTRAP_PATTERNS, stderr)
 }
 
 fn is_checksum_mismatch(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)checksum.*mismatch",
-        r"(?i)checksum.*verification.*failed",
-        r"(?i)checksum.*did\s+not\s+match",
-        r"(?i)sha256.*mismatch",
-        r"(?i)hash.*verification.*failed",
-        r"(?i)expected.*hash.*got",
-        r"(?i)integrity.*check.*failed",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&CHECKSUM_PATTERNS, stderr)
 }
 
 fn is_network_error(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)connection refused",
-        r"(?i)connection timed out",
-        r"(?i)network unreachable",
-        r"(?i)name or service not known",
-        r"(?i)temporary failure in name resolution",
-        r"(?i)could not resolve host",
-        r"(?i)api rate limit exceeded",
-        r"(?i)rate limit",
-        r"(?i)too many requests",
-        r"(?i)\b429\b",
-        r"(?i)\b5(00|02|03)\b",
-        r"(?i)curl.*failed",
-        r"(?i)wget.*failed",
-        r"(?i)unable to fetch some archives",
-        r"(?i)could not fetch release info",
-        r"(?i)ssl certificate problem",
-        r"(?i)unable to acquire.*lock",
-        r"(?i)dpkg.*lock",
-        r"(?i)apt.*lock",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&NETWORK_PATTERNS, stderr)
 }
 
 fn is_apt_repair_error(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)dpkg\s+--configure\s+-a\s+failed",
-        r"(?i)apt-get\s+-f\s+install\s+failed",
-        r"(?i)apt\s+repair.*failed",
-        r"(?i)dpkg\s+repair.*failed",
-        r"(?i)unmet dependencies",
-        r"(?i)held broken packages",
-        r"(?i)try ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
-        r"(?i)you might want to run ['`]?(apt|apt-get)\s+(--fix-broken|-f)\s+install",
-    ];
+    matches(&APT_REPAIR_PATTERNS, stderr)
+}
 
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+fn is_root_refusal(stderr: &str) -> bool {
+    matches(&ROOT_REFUSAL_PATTERNS, stderr)
 }
 
 fn is_permission_error(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)permission denied",
-        r"(?i)operation not permitted",
-        r"(?i)access denied",
-        r"(?i)EACCES",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&PERMISSION_PATTERNS, stderr)
 }
 
 fn is_dependency_error(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)command not found",
-        r"(?i)package.*not found",
-        r"(?i)unable to locate package",
-        r"(?i)no such file or directory",
-        r"(?i)missing dependency",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&DEPENDENCY_PATTERNS, stderr)
 }
 
 fn is_resource_error(stderr: &str) -> bool {
-    let patterns = [
-        r"(?i)no space left on device",
-        r"(?i)out of memory",
-        r"(?i)cannot allocate memory",
-        r"(?i)disk quota exceeded",
-    ];
-
-    patterns.iter().any(|p| Regex::new(p).map(|re| re.is_match(stderr)).unwrap_or(false))
+    matches(&RESOURCE_PATTERNS, stderr)
 }
 
 #[cfg(test)]
@@ -290,5 +449,49 @@ mod tests {
     fn test_classify_command_not_found() {
         let result = classify_error("bash: jq: command not found", 127);
         assert_eq!(result.severity, ErrorSeverity::Dependency);
+    }
+
+    #[test]
+    fn test_classify_timeout_marker() {
+        let result = classify_error(&format!("{TIMEOUT_MARKER} after 300s"), -1);
+        assert_eq!(result.category, "timeout");
+        assert!(!result.retryable);
+    }
+
+    #[test]
+    fn test_classify_timeout_message() {
+        let result = classify_error("Test timed out after 300s", -1);
+        assert_eq!(result.category, "timeout");
+    }
+
+    #[test]
+    fn test_classify_cancelled_marker() {
+        let result = classify_error(CANCELLED_MARKER, -1);
+        assert_eq!(result.category, "cancelled");
+        assert_eq!(result.confidence, 1.0);
+    }
+
+    #[test]
+    fn test_classify_root_refusal_on_stdout_tail() {
+        let text = "SRPS installer\n\u{2717} Don't run this script as root. Run as a regular user with sudo.\n";
+        let result = classify_error(text, 1);
+        assert_eq!(result.category, "permission");
+        assert!(result.suggestion.unwrap().contains("non-root"));
+    }
+
+    #[test]
+    fn test_categories_list_matches_outputs() {
+        for cat in ["timeout", "cancelled", "permission", "network", "dependency", "unknown"] {
+            assert!(CATEGORIES.contains(&cat), "{cat} missing from CATEGORIES");
+        }
+    }
+
+    #[test]
+    fn test_explain_reports_pattern_and_offset() {
+        let (cat, pattern, offset) =
+            explain("prefix\nE: Unable to locate package foo", 100).expect("should match");
+        assert_eq!(cat, "dependency");
+        assert!(pattern.contains("unable to locate package"));
+        assert_eq!(offset, 10);
     }
 }
