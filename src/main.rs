@@ -20,6 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use automated_flywheel_setup_checker::config::RunOrder;
+use automated_flywheel_setup_checker::reporting::{diff_runs, render_diff, render_run, render_timeline, History};
+
 use automated_flywheel_setup_checker::{
     checksums::{
         cross_check, is_acfs_repo, parse_checksums, profile_drift, scan_acfs_repo,
@@ -50,6 +53,8 @@ pub enum OutputFormat {
     Json,
     Jsonl,
     Prometheus,
+    /// Markdown tables (status only): for issues, PR comments and the nightly canary
+    Markdown,
 }
 
 /// Log line format for stderr
@@ -158,6 +163,11 @@ enum Commands {
         /// Rebuild the prepared Docker image before running (pulls the base, no cache)
         #[arg(long)]
         rebuild_base: bool,
+
+        /// Rerun only the installers that failed, timed out or were cancelled in a run
+        /// (run id prefix or "last")
+        #[arg(long, value_name = "RUN", conflicts_with = "installers")]
+        failed_from: Option<String>,
     },
 
     /// Serve monitoring health and metrics endpoints
@@ -191,6 +201,18 @@ enum Commands {
         /// Select a run by run id prefix (or "last")
         #[arg(long)]
         run: Option<String>,
+
+        /// Timeline of one installer across runs (oldest first), with flakiness assessment
+        #[arg(long, value_name = "INSTALLER", conflicts_with_all = ["list", "diff"])]
+        history: Option<String>,
+
+        /// Limit --history to the newest N runs
+        #[arg(long, value_name = "N", requires = "history")]
+        last: Option<usize>,
+
+        /// Installers whose status changed between two runs (run id prefixes or "last")
+        #[arg(long, num_args = 2, value_names = ["RUN_A", "RUN_B"], conflicts_with = "list")]
+        diff: Vec<String>,
     },
 
     /// Validate checksums.yaml format
@@ -265,6 +287,7 @@ struct CheckOptions {
     quiet: bool,
     retries: u32,
     rebuild_base: bool,
+    failed_from: Option<String>,
 }
 
 /// Build the CLI override set from parsed flags (only flags actually passed).
@@ -406,11 +429,11 @@ async fn run_command(
     settings: &Settings,
     watchdog: Option<&Arc<SystemdWatchdog>>,
 ) -> CmdResult {
-    if matches!(cli.format, OutputFormat::Prometheus)
+    if matches!(cli.format, OutputFormat::Prometheus | OutputFormat::Markdown)
         && !matches!(&cli.command, Commands::Status { .. })
     {
         return Err(AfscError::Usage(
-            "--format prometheus is only supported for the status command".into(),
+            "--format prometheus and --format markdown are only supported for the status command".into(),
         ));
     }
 
@@ -419,7 +442,7 @@ async fn run_command(
     match &cli.command {
         Commands::Check { reap: true, .. } => cmd_reap(settings, cli.format).await,
 
-        Commands::Check { installers, dry_run, remediate, local, yes, allow_concurrent, rebuild_base, .. } => {
+        Commands::Check { installers, dry_run, remediate, local, yes, allow_concurrent, rebuild_base, failed_from, .. } => {
             if let Some(wd) = watchdog {
                 wd.notify_status("Running installer checks");
             }
@@ -457,6 +480,7 @@ async fn run_command(
                     quiet: cli.quiet,
                     retries: config.execution.retry_transient,
                     rebuild_base: *rebuild_base,
+                    failed_from: failed_from.clone(),
                 },
             )
             .await
@@ -487,8 +511,8 @@ async fn run_command(
 
         Commands::List { runnable } => cmd_list(settings, *runnable, cli.format),
 
-        Commands::Status { detailed, list, run } => {
-            cmd_status(settings, *detailed, *list, run.as_deref(), cli.format)
+        Commands::Status { detailed, list, run, history, last, diff } => {
+            cmd_status(settings, *detailed, *list, run.as_deref(), history.as_deref(), *last, diff, cli.format)
         }
 
         Commands::Validate { path, check_urls, check_hashes, profile } => {
@@ -562,6 +586,42 @@ fn summary_counts(results: &[TestResult]) -> serde_json::Value {
     })
 }
 
+/// Execution order for resolved specs: longest-first (historical median duration, unknown first),
+/// name, or manifest order from checksums.yaml.
+fn order_specs(
+    mut specs: Vec<InstallerSpec>,
+    order: RunOrder,
+    checksums_path: &Path,
+    results_dir: &Path,
+) -> Vec<InstallerSpec> {
+    match order {
+        RunOrder::Name => specs.sort_by(|a, b| a.name.cmp(&b.name)),
+        RunOrder::Manifest => {
+            let manifest = manifest_order(checksums_path);
+            let pos = |n: &str| manifest.iter().position(|m| m == n).unwrap_or(usize::MAX);
+            specs.sort_by(|a, b| pos(&a.name).cmp(&pos(&b.name)).then_with(|| a.name.cmp(&b.name)));
+        }
+        RunOrder::LongestFirst => {
+            let history = History::load(results_dir).unwrap_or_default();
+            // Unknown durations first (could be long), then longest known first; ties by name.
+            let key = |n: &str| history.median_duration_ms(n).map(|d| u64::MAX - d).unwrap_or(0);
+            specs.sort_by(|a, b| key(&a.name).cmp(&key(&b.name)).then_with(|| a.name.cmp(&b.name)));
+        }
+    }
+    specs
+}
+
+/// Installer names in the order they appear in checksums.yaml.
+fn manifest_order(checksums_path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(checksums_path) else { return Vec::new() };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
+    value
+        .get("installers")
+        .and_then(|v| v.as_mapping())
+        .map(|m| m.keys().filter_map(|k| k.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
 fn sha256_of_file(path: &std::path::Path) -> Option<String> {
     std::fs::read(path).ok().map(|bytes| hex::encode(Sha256::digest(bytes)))
 }
@@ -614,12 +674,44 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     }
 
     let checksums = parse_checksums(&checksums_path)?;
+
+    // --failed-from: rerun only what failed, timed out or was cancelled in an earlier run.
+    let requested: Vec<String> = match &options.failed_from {
+        Some(run_ref) => {
+            let history = History::load(&config.general.results_dir())?;
+            let run = history.find(run_ref).ok_or_else(|| {
+                AfscError::Usage(format!("no run matches {run_ref:?} (try: status --list)"))
+            })?;
+            let failed = history.failed_installers(run);
+            if failed.is_empty() {
+                let short: String = run.run_id().chars().take(8).collect();
+                match options.format {
+                    OutputFormat::Human => println!("Nothing to rerun: run {short} had no failures"),
+                    _ => println!(
+                        "{}",
+                        to_json(
+                            &serde_json::json!({
+                                "kind": "check",
+                                "schema_version": SCHEMA_VERSION,
+                                "status": "nothing_to_rerun",
+                                "run_id": run.run_id(),
+                            }),
+                            matches!(options.format, OutputFormat::Json)
+                        )
+                    ),
+                }
+                return Ok(());
+            }
+            tracing::info!(run_id = %run.run_id(), installers = ?failed, "Rerunning failures from an earlier run");
+            failed
+        }
+        None => options.installers.clone(),
+    };
+
     let mut enabled: Vec<_> = checksums
         .installers
         .iter()
-        .filter(|(name, entry)| {
-            entry.enabled && (options.installers.is_empty() || options.installers.contains(name))
-        })
+        .filter(|(name, entry)| entry.enabled && (requested.is_empty() || requested.contains(name)))
         .collect();
     enabled.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -629,7 +721,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         .into_iter()
         .filter(|e| {
             let text = e.to_string();
-            options.installers.is_empty() || options.installers.iter().any(|n| text.contains(n.as_str()))
+            requested.is_empty() || requested.iter().any(|n| text.contains(n.as_str()))
         })
         .collect();
     if !policy_errors.is_empty() {
@@ -648,6 +740,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             resolve_spec(name.as_str(), entry, config.installers.get(name.as_str()), globals)
         })
         .collect();
+    let specs = order_specs(specs, config.execution.order, &checksums_path, &config.general.results_dir());
 
     let backend_name = if options.local { "local" } else { "docker" };
     let header = RunHeader {
@@ -671,7 +764,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         checksums_sha256: sha256_of_file(&checksums_path),
         config_source: settings.config_path.as_ref().map(|p| p.to_string_lossy().to_string()),
         data_dir: config.general.data_dir_path().to_string_lossy().to_string(),
-        installers_requested: options.installers.clone(),
+        installers_requested: requested.clone(),
         installer_count: enabled.len(),
         dry_run: options.dry_run,
         allow_file_urls: config.general.allow_file_urls,
@@ -720,7 +813,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                     }
                 }
             }
-            OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                 let mut output = run_header.clone();
                 let installers: Vec<serde_json::Value> = specs
                     .iter()
@@ -796,6 +889,23 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     // Cancellation: signals cancel the token; workers stop promptly and clean up.
     let cancel = CancellationToken::new();
     let signal_seen = spawn_signal_handler(cancel.clone());
+
+    // Whole-run deadline (execution.run_deadline_seconds): cancels the token; remaining work is
+    // reported as cancelled and the summary carries `deadline_exceeded`.
+    let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let deadline_seconds = config.execution.run_deadline_seconds;
+    if deadline_seconds > 0 {
+        let token = cancel.clone();
+        let flag = deadline_hit.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(deadline_seconds)).await;
+            if !token.is_cancelled() {
+                tracing::warn!(deadline_seconds, "Run deadline exceeded; cancelling remaining installers");
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                token.cancel();
+            }
+        });
+    }
 
     // Select execution backend
     let backend = if options.local {
@@ -887,8 +997,21 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     results.append(&mut skipped_results);
     results.sort_by(|a, b| a.installer_name.cmp(&b.installer_name));
 
+    let deadline_exceeded = deadline_hit.load(std::sync::atomic::Ordering::SeqCst);
+    let signalled = signal_seen.lock().unwrap().is_some();
     let interrupted = cancel.is_cancelled();
-    let any_failed = results.iter().any(is_failure);
+    // Deadline cancellations are a policy outcome, not an installer failure: exit 1 only when
+    // something actually failed or timed out (or a signal interrupted the run).
+    let any_failed = results
+        .iter()
+        .any(|r| is_failure(r) && !(deadline_exceeded && !signalled && r.status == TestStatus::Cancelled));
+    if deadline_exceeded && !signalled {
+        tracing::warn!(
+            cancelled = results.iter().filter(|r| r.status == TestStatus::Cancelled).count(),
+            deadline_seconds,
+            "Run stopped at the deadline; cancelled installers were not tested"
+        );
+    }
 
     if let Some(log) = event_log.as_mut() {
         for r in &results {
@@ -939,7 +1062,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                 }
             }
             OutputFormat::Json => {}
-            OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                 println!("{}", to_json(&with_kind("result", result)?, false));
             }
         }
@@ -949,6 +1072,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     let mut summary = summary_counts(&results);
     summary["run_id"] = serde_json::json!(run_id);
     summary["interrupted"] = serde_json::json!(interrupted);
+    summary["deadline_exceeded"] = serde_json::json!(deadline_exceeded);
     let exit_code = match (*signal_seen.lock().unwrap(), any_failed) {
         (Some(Signal::Interrupt), _) => 130,
         (Some(Signal::Terminate), _) => 143,
@@ -964,7 +1088,12 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             if !options.quiet {
                 println!();
             }
-            if interrupted {
+            if deadline_exceeded && !signalled {
+                println!(
+                    "Run deadline of {deadline_seconds}s exceeded: {} installer(s) cancelled (not tested)",
+                    results.iter().filter(|r| r.status == TestStatus::Cancelled).count()
+                );
+            } else if interrupted {
                 println!(
                     "Run interrupted: {} installer(s) cancelled or skipped",
                     results
@@ -991,7 +1120,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             });
             println!("{}", to_json(&output, true));
         }
-        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
             let mut line = summary.clone();
             line["kind"] = serde_json::json!("summary");
             line["schema_version"] = serde_json::json!(SCHEMA_VERSION);
@@ -1106,7 +1235,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         }
     }
 
-    if config.notifications.enabled && !interrupted {
+    if config.notifications.enabled && !signalled {
         let notifier = automated_flywheel_setup_checker::reporting::Notifier::new(
             config.notifications.to_internal(),
         );
@@ -1192,7 +1321,7 @@ fn cmd_list(settings: &Settings, runnable: bool, format: OutputFormat) -> CmdRes
                 .collect();
             println!("{}", to_json(&serde_json::Value::Array(output), true));
         }
-        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
             for (name, entry, spec) in &rows {
                 let output = serde_json::json!({
                     "kind": "installer",
@@ -1214,16 +1343,27 @@ fn cmd_list(settings: &Settings, runnable: bool, format: OutputFormat) -> CmdRes
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_status(
     settings: &Settings,
     detailed: bool,
     list: bool,
     run: Option<&str>,
+    history_of: Option<&str>,
+    last: Option<usize>,
+    diff: &[String],
     format: OutputFormat,
 ) -> CmdResult {
     use automated_flywheel_setup_checker::reporting::{MetricsExporter, MetricsSnapshot};
 
     let config = &settings.config;
+
+    if let Some(installer) = history_of {
+        return cmd_status_history(config, installer, last, format);
+    }
+    if let [a, b] = diff {
+        return cmd_status_diff(config, a, b, format);
+    }
 
     if matches!(format, OutputFormat::Prometheus) {
         let mut snapshot = MetricsSnapshot::load_or_default(&config.general.metrics_path());
@@ -1265,7 +1405,7 @@ fn cmd_status(
                 });
                 println!("{}", to_json(&output, true));
             }
-            OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                 for r in &runs {
                     println!("{}", to_json(&with_kind("run_info", r)?, false));
                 }
@@ -1294,7 +1434,7 @@ fn cmd_status(
                 OutputFormat::Human => {
                     println!("No runs found. Run: automated_flywheel_setup_checker check");
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                     let output = serde_json::json!({
                         "kind": "status",
                         "schema_version": SCHEMA_VERSION,
@@ -1311,6 +1451,35 @@ fn cmd_status(
     let file = ResultPersister::read_run_file(&results_path)?;
     let entries = &file.entries;
     let summary = &file.summary;
+
+    // Flakiness / breakage labels need more than one run; cheap to compute from headers + entries.
+    let history = History::load(&config.general.results_dir()).unwrap_or_default();
+    let assessments: std::collections::BTreeMap<String, automated_flywheel_setup_checker::reporting::Assessment> =
+        if history.len() > 1 {
+            entries.iter().map(|e| (e.installer_name.clone(), history.assess(&e.installer_name))).collect()
+        } else {
+            Default::default()
+        };
+
+    if matches!(format, OutputFormat::Markdown) {
+        let run_id = file.header.as_ref().map(|h| h.run_id.clone())
+            .or_else(|| summary.as_ref().map(|s| s.run_id.clone()))
+            .unwrap_or_default();
+        let loaded = history.find(&run_id).map(|r| render_run(r, &assessments));
+        match loaded {
+            Some(md) => print!("{md}"),
+            None => {
+                let run = automated_flywheel_setup_checker::reporting::LoadedRun {
+                    info: RunInfo { path: results_path.clone(), run_id, started_at: chrono::Utc::now(), total: entries.len(), passed: 0, failed: 0, interrupted: false },
+                    header: file.header.clone(),
+                    entries: Vec::new(),
+                    summary: file.summary.clone(),
+                };
+                print!("{}", render_run(&run, &assessments));
+            }
+        }
+        return Ok(());
+    }
 
     match format {
         OutputFormat::Human => {
@@ -1353,8 +1522,13 @@ fn cmd_status(
                     _ => "?",
                 };
                 let checksum = if entry.sha256_verified { " sha256" } else { "" };
+                let label = assessments
+                    .get(&entry.installer_name)
+                    .and_then(|a| a.label())
+                    .map(|l| format!("  [{l}]"))
+                    .unwrap_or_default();
                 println!(
-                    "  {} {} ({}ms{}){}",
+                    "  {} {} ({}ms{}){}{}",
                     icon,
                     entry.installer_name,
                     entry.duration_ms,
@@ -1363,7 +1537,8 @@ fn cmd_status(
                     } else {
                         String::new()
                     },
-                    checksum
+                    checksum,
+                    label
                 );
 
                 if detailed && !entry.stderr_excerpt.is_empty() && entry.status != "passed" {
@@ -1406,11 +1581,12 @@ fn cmd_status(
                 "run": file.header,
                 "results": entries,
                 "summary": summary,
+                "assessments": assessments,
                 "file": results_path.to_string_lossy(),
             });
             println!("{}", to_json(&output, true));
         }
-        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
             if let Some(h) = &file.header {
                 println!("{}", to_json(&with_kind("run", h)?, false));
             }
@@ -1423,6 +1599,128 @@ fn cmd_status(
         }
     }
 
+    Ok(())
+}
+
+fn cmd_status_history(
+    config: &Config,
+    installer: &str,
+    last: Option<usize>,
+    format: OutputFormat,
+) -> CmdResult {
+    let history = History::load(&config.general.results_dir())?;
+    let mut entries = history.installer_timeline(installer);
+    if entries.is_empty() {
+        return Err(AfscError::Usage(format!(
+            "no history for installer {installer:?} (known: {})",
+            history.installers().into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    if let Some(n) = last {
+        let skip = entries.len().saturating_sub(n);
+        entries.drain(..skip);
+    }
+    let assessment = history.assess(installer);
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "{installer}: {} run(s){}",
+                entries.len(),
+                assessment.label().map(|l| format!("  [{l}]")).unwrap_or_default()
+            );
+            println!(
+                "  {:<8}  {:<16}  {:<9}  {:<11}  {:>8}  {:>4}  {:<8}  version",
+                "run", "started (UTC)", "status", "category", "duration", "att", "script"
+            );
+            for e in &entries {
+                println!(
+                    "  {:<8}  {:<16}  {:<9}  {:<11}  {:>7}ms  {:>4}  {:<8}  {}",
+                    e.run_id.chars().take(8).collect::<String>(),
+                    e.started_at.format("%Y-%m-%d %H:%M"),
+                    e.status,
+                    e.category.as_deref().unwrap_or(""),
+                    e.duration_ms,
+                    e.attempts,
+                    e.script_sha256.as_deref().map(|s| s.chars().take(8).collect::<String>()).unwrap_or_default(),
+                    e.installed_version.as_deref().unwrap_or("")
+                );
+            }
+            println!(
+                "  pass probability {:.0}% over {} trial(s) since the last script change ({} script version(s) seen)",
+                assessment.pass_probability * 100.0,
+                assessment.trials,
+                assessment.script_versions
+            );
+        }
+        OutputFormat::Json => {
+            let output = serde_json::json!({
+                "kind": "history",
+                "schema_version": SCHEMA_VERSION,
+                "installer": installer,
+                "entries": entries,
+                "assessment": assessment,
+            });
+            println!("{}", to_json(&output, true));
+        }
+        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            for e in &entries {
+                let mut line = with_kind("history_entry", e)?;
+                line["installer"] = serde_json::json!(installer);
+                println!("{}", to_json(&line, false));
+            }
+            let mut line = with_kind("assessment", &assessment)?;
+            line["installer"] = serde_json::json!(installer);
+            println!("{}", to_json(&line, false));
+        }
+        OutputFormat::Markdown => print!("{}", render_timeline(installer, &entries, &assessment)),
+    }
+    Ok(())
+}
+
+fn cmd_status_diff(config: &Config, a: &str, b: &str, format: OutputFormat) -> CmdResult {
+    let history = History::load(&config.general.results_dir())?;
+    let find = |prefix: &str| {
+        history
+            .find(prefix)
+            .ok_or_else(|| AfscError::Usage(format!("no run matches {prefix:?} (try: status --list)")))
+    };
+    let (from, to) = (find(a)?, find(b)?);
+    let diff = diff_runs(from, to);
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "Diff {} -> {}: {} changed, {} unchanged",
+                diff.from_run.chars().take(8).collect::<String>(),
+                diff.to_run.chars().take(8).collect::<String>(),
+                diff.changes.len(),
+                diff.unchanged
+            );
+            for c in &diff.changes {
+                println!(
+                    "  {:<10} {:<16} {} -> {}",
+                    c.change,
+                    c.installer,
+                    c.before.as_deref().unwrap_or("-"),
+                    c.after.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        OutputFormat::Json => {
+            let mut output = serde_json::to_value(&diff)?;
+            output["kind"] = serde_json::json!("diff");
+            output["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+            println!("{}", to_json(&output, true));
+        }
+        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            for c in &diff.changes {
+                let mut line = with_kind("diff_entry", c)?;
+                line["from_run"] = serde_json::json!(diff.from_run);
+                line["to_run"] = serde_json::json!(diff.to_run);
+                println!("{}", to_json(&line, false));
+            }
+        }
+        OutputFormat::Markdown => print!("{}", render_diff(&diff)),
+    }
     Ok(())
 }
 
@@ -1579,7 +1877,7 @@ async fn cmd_validate(
                     "summary": { "total": url_results.len(), "reachable": reachable, "broken": broken },
                 });
             }
-            OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                 for r in &url_results {
                     println!("{}", to_json(&with_kind("url_check", r)?, false));
                 }
@@ -1633,7 +1931,7 @@ async fn cmd_validate(
                     "summary": { "total": hash_results.len(), "matched": matched, "mismatched": mismatched },
                 });
             }
-            OutputFormat::Jsonl | OutputFormat::Prometheus => {
+            OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                 for r in &hash_results {
                     println!("{}", to_json(&with_kind("hash_check", r)?, false));
                 }
@@ -1649,7 +1947,7 @@ async fn cmd_validate(
     report["exit_code"] = serde_json::json!(exit_code);
     match format {
         OutputFormat::Json => println!("{}", to_json(&report, true)),
-        OutputFormat::Jsonl | OutputFormat::Prometheus => {
+        OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
             let line = serde_json::json!({
                 "kind": "summary",
                 "schema_version": SCHEMA_VERSION,
@@ -1703,7 +2001,7 @@ fn cmd_classify_error(
                 }
             }
         }
-        OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+        OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
             let mut v = with_kind("classification", &classification)?;
             if explain {
                 v["explain"] = match &explanation {
@@ -1729,7 +2027,7 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                         println!("# Resolved configuration (value  # source)");
                         print!("{}", settings.render_annotated()?);
                     }
-                    OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+                    OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                         let output = serde_json::json!({
                             "kind": "config",
                             "schema_version": SCHEMA_VERSION,
@@ -1752,7 +2050,7 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                             .map_err(|e| AfscError::Other(e.into()))?
                     );
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&settings.config)
@@ -1771,7 +2069,7 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                         toml::to_string_pretty(&config).map_err(|e| AfscError::Other(e.into()))?
                     );
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
+                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&config)
