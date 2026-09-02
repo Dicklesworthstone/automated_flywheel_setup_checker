@@ -43,6 +43,7 @@ thiserror = "1"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
+similar = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 regex = "1"
