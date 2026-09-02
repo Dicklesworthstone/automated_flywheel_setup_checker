@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Full-catalog baseline: run every enabled ACFS installer in the prepared image and write a
+# committed Markdown baseline document (per-installer verdicts, versions, durations, drift).
+#
+#   scripts/baseline_run.sh [--acfs-repo DIR] [--data-dir DIR] [--parallel N] [--out FILE]
+#                           [--bin PATH] [--installers "a b c"]
+#
+# Exit code is the checker's (1 when installers failed) so CI can still gate on it; the document
+# is written either way.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ACFS_REPO="${AFSC_ACFS_REPO:-/data/projects/agentic_coding_flywheel_setup}"
+DATA_DIR="${AFSC_BASELINE_DATA_DIR:-/tmp/afsc-baseline}"
+PARALLEL=4
+OUT=""
+BIN="${CHECKER_BINARY:-$ROOT/target/release/automated_flywheel_setup_checker}"
+INSTALLERS=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --acfs-repo) ACFS_REPO="$2"; shift ;;
+        --data-dir) DATA_DIR="$2"; shift ;;
+        --parallel) PARALLEL="$2"; shift ;;
+        --out) OUT="$2"; shift ;;
+        --bin) BIN="$2"; shift ;;
+        --installers) INSTALLERS="$2"; shift ;;
+        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+date_tag="$(date -u +%Y-%m-%d)"
+OUT="${OUT:-$ROOT/docs/baseline/$date_tag.md}"
+mkdir -p "$(dirname "$OUT")" "$DATA_DIR"
+[[ -x "$BIN" ]] || { echo "binary not found at $BIN (cargo build --release)" >&2; exit 2; }
+[[ -f "$ACFS_REPO/checksums.yaml" ]] || { echo "no checksums.yaml under $ACFS_REPO" >&2; exit 2; }
+
+afsc() { "$BIN" --acfs-repo "$ACFS_REPO" --data-dir "$DATA_DIR" "$@"; }
+
+echo "Baseline: acfs=$ACFS_REPO data=$DATA_DIR parallel=$PARALLEL bin=$BIN"
+acfs_sha=$(git -C "$ACFS_REPO" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+tool_version=$("$BIN" --version | sed 's/^automated_flywheel_setup_checker //')
+
+# 1. Environment and validation (never fatal for the document)
+doctor_out=$(afsc doctor 2>&1 || true)
+validate_json=$(afsc validate --check-hashes --profile --format json 2>/dev/null || true)
+
+# 2. The run
+start=$(date +%s)
+code=0
+# shellcheck disable=SC2086
+afsc --format jsonl check $INSTALLERS --parallel "$PARALLEL" > "$DATA_DIR/baseline.jsonl" 2> "$DATA_DIR/baseline.err" || code=$?
+elapsed=$(( $(date +%s) - start ))
+
+run_id=$(jq -r 'select(.kind == "run") | .run_id' "$DATA_DIR/baseline.jsonl")
+summary=$(jq -c 'select(.kind == "summary")' "$DATA_DIR/baseline.jsonl")
+
+# 3. Document
+{
+    echo "# ACFS installer baseline — $date_tag"
+    echo
+    echo "| | |"
+    echo "|---|---|"
+    echo "| ACFS commit | \`$acfs_sha\` |"
+    echo "| Checker | $tool_version |"
+    echo "| Image | $(jq -r 'select(.kind == "run") | "\(.image) (\(.image_id // "no id"))"' "$DATA_DIR/baseline.jsonl") |"
+    echo "| Docker | $(jq -r 'select(.kind == "run") | "\(.environment.docker_version // "?") on \(.environment.docker_os // "?")/\(.environment.docker_arch // "?"), kernel \(.environment.docker_kernel // "?")"' "$DATA_DIR/baseline.jsonl") |"
+    echo "| Host | $(jq -r 'select(.kind == "run") | .environment.host' "$DATA_DIR/baseline.jsonl") |"
+    echo "| Parallel | $PARALLEL |"
+    echo "| Wall time | ${elapsed}s |"
+    echo "| Run id | \`$run_id\` |"
+    echo "| Exit code | $code |"
+    echo "| Totals | $(echo "$summary" | jq -r '"\(.passed) passed, \(.failed) failed, \(.skipped) skipped, \(.timed_out) timed out, \(.cancelled) cancelled of \(.total)"') |"
+    echo
+    echo "## Per installer"
+    echo
+    echo "| installer | status | category | checksum | version | duration | attempts | peak mem |"
+    echo "|---|---|---|---|---|---|---|---|"
+    jq -r 'select(.kind == "result") | [.installer_name, .status, (.error.category // ""), .checksum_state, (.installed_version // ""), ((.duration_ms / 1000 * 10 | round) / 10 | tostring + "s"), (.attempts | length | tostring), (if .telemetry then ((.telemetry.peak_memory_bytes / 1048576 | round | tostring) + " MiB") else "" end)] | "| " + join(" | ") + " |"' "$DATA_DIR/baseline.jsonl" | sort
+    echo
+    echo "## Validation (\`validate --check-hashes --profile\`)"
+    echo
+    if [[ -n "$validate_json" ]]; then
+        echo '```json'
+        echo "$validate_json" | jq '{valid, exit_code, hash_summary: .hash_checks.summary, cross_check: .cross_check, profile_drift: (.profile_drift | length)}' 2>/dev/null || echo "$validate_json" | head -40
+        echo '```'
+    else
+        echo "_validate produced no JSON (see stderr)_"
+    fi
+    echo
+    echo "## Doctor"
+    echo
+    echo '```'
+    echo "$doctor_out"
+    echo '```'
+    echo
+    echo "## Failures (stderr tails)"
+    echo
+    jq -r 'select(.kind == "result" and (.status == "failed" or .status == "timedout")) | "### \(.installer_name) — \(.status) (\(.error.category // "unknown"))\n\n```\n\(.stderr | split("\n") | .[-12:] | join("\n"))\n```\n"' "$DATA_DIR/baseline.jsonl"
+    echo
+    echo "_Generated by scripts/baseline_run.sh; raw results in the run's JSONL file under the data dir._"
+} > "$OUT"
+
+echo "Baseline written to $OUT (exit $code, ${elapsed}s)"
+exit "$code"
