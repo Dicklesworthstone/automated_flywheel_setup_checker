@@ -149,8 +149,13 @@ fn check_records_full_attempt_history_for_flaky_installer() {
     assert_eq!(attempts[1]["status"], "Passed");
     assert!(attempts[1]["waited_before_ms"].as_u64().unwrap() >= 1000);
     assert_eq!(r["retries"].as_array().unwrap().len(), 1);
-    assert!(r["duration_ms"].as_u64().unwrap() >= 1000, "total duration includes the wait");
-    assert!(r["last_attempt_ms"].as_u64().unwrap() < 1000);
+    let total = r["duration_ms"].as_u64().unwrap();
+    let last = r["last_attempt_ms"].as_u64().unwrap();
+    let waited = attempts[1]["waited_before_ms"].as_u64().unwrap();
+    let first = attempts[0]["duration_ms"].as_u64().unwrap();
+    assert_eq!(last, attempts[1]["duration_ms"].as_u64().unwrap(), "last_attempt_ms is the final attempt");
+    assert!(total >= first + waited + last, "total {total} must include both attempts and the wait");
+    assert!(total >= 1000, "total duration includes the backoff wait");
 }
 
 #[test]
@@ -183,6 +188,32 @@ fn check_honors_parallel_from_config() {
 
     let cli_override = fx.run(&["check", "--local", "--format", "jsonl", "--parallel", "1"]);
     assert_eq!(jsonl_lines(&cli_override)[0]["parallel"], 1);
+}
+
+#[test]
+fn parallel_fail_fast_cancels_in_flight_and_skips_queued() {
+    let mut fx = Fixture::new();
+    fx.set_execution(3, 0, false);
+    // Sorted by name: a_fail runs first and fails fast; slow ones are in flight or queued.
+    fx.add_installer("a_fail", "#!/bin/bash\nsleep 1\necho 'E: Unable to locate package foo' >&2\nexit 100\n");
+    fx.add_sleeper("b_slow", 20);
+    fx.add_sleeper("c_slow", 20);
+    fx.add_sleeper("d_queued", 20);
+    let start = Instant::now();
+    let out = fx.run(&["check", "--local", "--fail-fast", "--format", "jsonl"]);
+    let elapsed = start.elapsed();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(elapsed.as_secs() < 12, "fail-fast must stop in-flight installers: {elapsed:?}");
+    let lines = jsonl_lines(&out);
+    assert_eq!(find_result(&lines, "a_fail")["status"], "Failed");
+    for name in ["b_slow", "c_slow", "d_queued"] {
+        let s = find_result(&lines, name)["status"].as_str().unwrap().to_string();
+        assert!(s == "Cancelled" || s == "Skipped", "{name}: {s}");
+    }
+    let summary = lines.last().unwrap();
+    assert_eq!(summary["failed"], 4);
+    assert!(summary["cancelled"].as_u64().unwrap() + summary["skipped"].as_u64().unwrap() == 3);
+    assert_eq!(summary["interrupted"], false, "fail-fast is not an interruption");
 }
 
 #[test]
@@ -247,8 +278,8 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     fx.add_sleeper("slow_b", 30);
     fx.add_pass("queued_c");
 
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("automated_flywheel_setup_checker");
-    let mut child = cmd
+    let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
+    let mut child = std::process::Command::new(bin)
         .env("HOME", &fx.home)
         .arg("--config")
         .arg(&fx.config)
