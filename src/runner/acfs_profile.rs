@@ -101,6 +101,19 @@ pub const TABLE: &[(&str, Profile)] = &[
         },
     ),
     (
+        "ubs",
+        Profile {
+            interpreter: Interpreter::Bash,
+            args: &[],
+            env: &[],
+            // The installer falls back to `cargo install ast-grep` (a full Rust build) when no
+            // prebuilt ast-grep is present: 300 s is not enough in a fresh container.
+            min_timeout_seconds: Some(900),
+            version_cmd: Some("ubs --version"),
+            source: "scripts/lib/stack.sh: install_ubs (dynamic runner; cargo install ast-grep fallback)",
+        },
+    ),
+    (
         "bun",
         Profile {
             interpreter: Interpreter::Bash,
