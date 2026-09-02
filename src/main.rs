@@ -15,21 +15,25 @@
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use automated_flywheel_setup_checker::{
-    checksums::{parse_checksums, validate_checksums},
+    checksums::{
+        cross_check, is_acfs_repo, parse_checksums, profile_drift, scan_acfs_repo,
+        validate_checksums, validate_url_policy,
+    },
     config::{env_map, resolve, CliOverrides, Settings},
     error::{AfscError, Signal},
     logging::LogFormat,
     parser::classify_error,
     reporting::{ResultPersister, RunHeader},
     runner::{
-        ContainerConfig, ContainerManager, ExecutionBackend, InstallerTest, InstallerTestRunner,
-        PullPolicy, RetryConfig, RunnerConfig, TestResult, TestStatus,
+        parse_memory_limit, resolve_spec, ContainerConfig, ContainerManager, ExecutionBackend,
+        GlobalDefaults, InstallerSpec, InstallerTest, InstallerTestRunner, PullPolicy,
+        RetryConfig, RunnerConfig, TestResult, TestStatus,
     },
     SystemdWatchdog,
 };
@@ -142,6 +146,18 @@ enum Commands {
         /// Only remove orphaned afsc-managed containers, then exit
         #[arg(long)]
         reap: bool,
+
+        /// Confirm running installers on this host with --local when not attached to a terminal
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Run even if another check holds the run lock (results still get distinct files)
+        #[arg(long)]
+        allow_concurrent: bool,
+
+        /// Rebuild the prepared Docker image before running (pulls the base, no cache)
+        #[arg(long)]
+        rebuild_base: bool,
     },
 
     /// Serve monitoring health and metrics endpoints
@@ -157,13 +173,9 @@ enum Commands {
 
     /// List known installers from checksums.yaml
     List {
-        /// Show only enabled installers
+        /// Show only installers that would run (excludes [installers.<name>].skip = true)
         #[arg(long)]
-        enabled_only: bool,
-
-        /// Filter by tag
-        #[arg(long)]
-        tag: Option<String>,
+        runnable: bool,
     },
 
     /// Show results of the last run (or a selected run)
@@ -194,6 +206,10 @@ enum Commands {
         /// Also download installer bytes and verify pinned SHA-256 values
         #[arg(long)]
         check_hashes: bool,
+
+        /// Compare ACFS installer call sites with the built-in execution profiles
+        #[arg(long)]
+        profile: bool,
     },
 
     /// Classify an error message (for testing)
@@ -248,19 +264,7 @@ struct CheckOptions {
     format: OutputFormat,
     quiet: bool,
     retries: u32,
-}
-
-const HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS: u64 = 900;
-
-fn base_image_timeout_seconds(requested: u64) -> u64 {
-    requested.max(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS)
-}
-
-fn installer_timeout_seconds(installer_name: &str, requested: u64) -> u64 {
-    match installer_name {
-        "mdwb" => requested.max(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS),
-        _ => requested,
-    }
+    rebuild_base: bool,
 }
 
 /// Build the CLI override set from parsed flags (only flags actually passed).
@@ -282,6 +286,24 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
 
 fn infra(e: impl std::fmt::Display) -> AfscError {
     AfscError::Infra(e.to_string())
+}
+
+/// `--local` executes upstream installer scripts on this host (inside a temporary HOME with a
+/// minimal PATH, but with no container isolation). Interactive shells get a warning; scripts and
+/// services must opt in with `--yes` or `AFSC_ALLOW_LOCAL=1`.
+fn local_consent(yes: bool) -> CmdResult {
+    use std::io::IsTerminal;
+    tracing::warn!(
+        "--local runs upstream installer scripts on THIS host (temporary HOME, no container isolation); prefer the Docker backend"
+    );
+    let allowed_by_env = std::env::var("AFSC_ALLOW_LOCAL").map(|v| v == "1").unwrap_or(false);
+    if yes || allowed_by_env || std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    Err(AfscError::Usage(
+        "--local executes installer scripts on this host; not attached to a terminal, so pass --yes (or set AFSC_ALLOW_LOCAL=1) to confirm"
+            .to_string(),
+    ))
 }
 
 /// Install SIGINT/SIGTERM handlers that cancel the run token. Returns the signal that fired.
@@ -397,10 +419,30 @@ async fn run_command(
     match &cli.command {
         Commands::Check { reap: true, .. } => cmd_reap(settings, cli.format).await,
 
-        Commands::Check { installers, dry_run, remediate, local, .. } => {
+        Commands::Check { installers, dry_run, remediate, local, yes, allow_concurrent, rebuild_base, .. } => {
             if let Some(wd) = watchdog {
                 wd.notify_status("Running installer checks");
             }
+            if *local && !*dry_run {
+                local_consent(*yes)?;
+            }
+            // One check per data dir at a time unless explicitly allowed; dry runs never lock.
+            let _run_lock = if *dry_run || *allow_concurrent {
+                None
+            } else {
+                let lock_dir = config.general.data_dir_path().join("locks");
+                match automated_flywheel_setup_checker::lock::RunLock::try_acquire(&lock_dir, "run")
+                    .map_err(infra)?
+                {
+                    Ok(lock) => Some(lock),
+                    Err(holder) => {
+                        return Err(AfscError::Infra(format!(
+                            "another check is running (pid {}, since {}); wait for it or pass --allow-concurrent",
+                            holder.pid, holder.since
+                        )))
+                    }
+                }
+            };
             cmd_check(
                 settings,
                 CheckOptions {
@@ -414,6 +456,7 @@ async fn run_command(
                     format: cli.format,
                     quiet: cli.quiet,
                     retries: config.execution.retry_transient,
+                    rebuild_base: *rebuild_base,
                 },
             )
             .await
@@ -442,16 +485,15 @@ async fn run_command(
             })
         }
 
-        Commands::List { enabled_only, tag } => {
-            cmd_list(settings, *enabled_only, tag.clone(), cli.format)
-        }
+        Commands::List { runnable } => cmd_list(settings, *runnable, cli.format),
 
         Commands::Status { detailed, list, run } => {
             cmd_status(settings, *detailed, *list, run.as_deref(), cli.format)
         }
 
-        Commands::Validate { path, check_urls, check_hashes } => {
-            cmd_validate(settings, path.clone(), *check_urls, *check_hashes, cli.format).await
+        Commands::Validate { path, check_urls, check_hashes, profile } => {
+            cmd_validate(settings, path.clone(), *check_urls, *check_hashes, *profile, cli.format)
+                .await
         }
 
         Commands::ClassifyError { stderr, exit_code, explain } => {
@@ -499,10 +541,15 @@ fn print_error_line(result: &TestResult) {
     }
 }
 
+/// A result that counts as a failure of the run (skips are not failures).
+fn is_failure(r: &TestResult) -> bool {
+    matches!(r.status, TestStatus::Failed | TestStatus::TimedOut | TestStatus::Cancelled)
+}
+
 fn summary_counts(results: &[TestResult]) -> serde_json::Value {
     let count = |s: TestStatus| results.iter().filter(|r| r.status == s).count();
     let passed = results.iter().filter(|r| r.success).count();
-    let failed = results.iter().filter(|r| !r.success).count();
+    let failed = results.iter().filter(|r| is_failure(r)).count();
     serde_json::json!({
         "total": results.len(),
         "passed": passed,
@@ -576,6 +623,32 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         .collect();
     enabled.sort_by(|a, b| a.0.cmp(b.0));
 
+    // URL policy: https always; file:// only when allowed; http:// never.
+    let policy_errors = validate_url_policy(&checksums, config.general.allow_file_urls);
+    let policy_errors: Vec<_> = policy_errors
+        .into_iter()
+        .filter(|e| {
+            let text = e.to_string();
+            options.installers.is_empty() || options.installers.iter().any(|n| text.contains(n.as_str()))
+        })
+        .collect();
+    if !policy_errors.is_empty() {
+        let list: Vec<String> = policy_errors.iter().map(|e| e.to_string()).collect();
+        return Err(AfscError::Config(format!(
+            "{} installer URL(s) violate the URL policy:\n  {}",
+            list.len(),
+            list.join("\n  ")
+        )));
+    }
+
+    let globals = GlobalDefaults { timeout_seconds: options.timeout, retries: options.retries };
+    let specs: Vec<InstallerSpec> = enabled
+        .iter()
+        .map(|(name, entry)| {
+            resolve_spec(name.as_str(), entry, config.installers.get(name.as_str()), globals)
+        })
+        .collect();
+
     let backend_name = if options.local { "local" } else { "docker" };
     let header = RunHeader {
         run_id: run_id.clone(),
@@ -585,7 +658,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         image: if options.local { None } else { Some(config.docker.image.clone()) },
         user: if options.local {
             None
-        } else if config.docker.run_as_root {
+        } else if config.docker.run_as_root || !config.docker.prepare {
             Some("root".to_string())
         } else {
             Some("afsc-user".to_string())
@@ -601,6 +674,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         installers_requested: options.installers.clone(),
         installer_count: enabled.len(),
         dry_run: options.dry_run,
+        allow_file_urls: config.general.allow_file_urls,
     };
     let run_header = with_kind("run", &header)?;
 
@@ -608,31 +682,57 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         match options.format {
             OutputFormat::Human => {
                 println!(
-                    "Would check {} installer(s) with {} parallel workers:",
-                    enabled.len(),
-                    options.parallel
+                    "Would check {} installer(s) with {} parallel workers (backend: {}{}):",
+                    specs.iter().filter(|s| s.skip_reason.is_none()).count(),
+                    options.parallel,
+                    backend_name,
+                    if options.local { String::new() } else { format!(", image {}", config.docker.image) }
                 );
-                println!("Timeout: {}s per installer", options.timeout);
-                println!("Retries: {} (transient failures only)", options.retries);
                 println!(
-                    "Heavy setup floor: {}s for Docker base image and known slow installers",
-                    HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS
+                    "Defaults: timeout {}s, {} retries (transient failures only), image build timeout {}s",
+                    options.timeout, options.retries, config.docker.build_timeout_seconds
                 );
-                println!("Backend: {}", backend_name);
                 println!();
-                for (name, entry) in &enabled {
-                    if let Some(ver) = &entry.version {
-                        println!("  - {} (v{})", name, ver);
-                    } else {
-                        println!("  - {}", name);
+                println!("  {:<16} {:<5} {:>8} {:>7} {:<7} command", "installer", "sha", "timeout", "retries", "checks");
+                for spec in &specs {
+                    if let Some(reason) = &spec.skip_reason {
+                        println!("  {:<16} (skipped: {})", spec.name, reason);
+                        continue;
+                    }
+                    let mut checks = Vec::new();
+                    if spec.expect_binary.is_some() { checks.push("bin"); }
+                    if spec.verify_cmd.is_some() { checks.push("verify"); }
+                    if spec.version_cmd.is_some() { checks.push("version"); }
+                    let overrides = spec.overridden_fields();
+                    println!(
+                        "  {:<16} {:<5} {:>7}s {:>7} {:<7} {}{}",
+                        spec.name,
+                        if spec.sha256.is_some() { "yes" } else { "no" },
+                        spec.timeout_seconds,
+                        spec.retries,
+                        checks.join(","),
+                        spec.command_line(),
+                        if overrides.is_empty() { String::new() } else { format!("  [overrides: {}]", overrides.join(", ")) }
+                    );
+                    if !spec.env.is_empty() {
+                        let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                        println!("  {:<16} env: {}", "", env.join(" "));
                     }
                 }
             }
             OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus => {
                 let mut output = run_header.clone();
-                output["installers"] =
-                    serde_json::json!(enabled.iter().map(|(n, _)| n).collect::<Vec<_>>());
-                output["heavy_setup_timeout_floor"] = serde_json::json!(HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
+                let installers: Vec<serde_json::Value> = specs
+                    .iter()
+                    .map(|spec| {
+                        let mut v = serde_json::to_value(spec).unwrap_or_default();
+                        v["command_line"] = serde_json::json!(spec.command_line());
+                        v["overrides"] = serde_json::json!(spec.overridden_fields());
+                        v
+                    })
+                    .collect();
+                output["installers"] = serde_json::json!(installers);
+                output["build_timeout_seconds"] = serde_json::json!(config.docker.build_timeout_seconds);
                 println!("{}", to_json(&output, matches!(options.format, OutputFormat::Json)));
             }
         }
@@ -671,11 +771,19 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             image: config.docker.image.clone(),
             memory_limit: parse_memory_limit(&config.docker.memory_limit),
             cpu_quota: Some(config.docker.cpu_quota),
-            timeout_seconds: base_image_timeout_seconds(options.timeout)
-                .max(config.docker.build_timeout_seconds),
+            timeout_seconds: options.timeout,
             volumes: Vec::new(),
             environment: Vec::new(),
             labels: vec![("afsc.run_id".to_string(), run_id.clone())],
+            prepare: config.docker.prepare,
+            build_timeout_seconds: config.docker.build_timeout_seconds,
+            rebuild: options.rebuild_base,
+            network_mode: if config.docker.network.trim().is_empty() || config.docker.network == "bridge" {
+                None
+            } else {
+                Some(config.docker.network.clone())
+            },
+            run_as_root: config.docker.run_as_root,
         };
         ExecutionBackend::Docker {
             container_config,
@@ -690,29 +798,27 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         backend,
         retry: RetryConfig::executor_default(options.retries),
         cancel: cancel.clone(),
+        max_capture_bytes: config.execution.max_capture_bytes as usize,
         ..Default::default()
     };
     let runner = InstallerTestRunner::new(runner_config.clone());
 
-    // Convert checksums entries to InstallerTest objects
-    let max_attempts = options.retries.saturating_add(1).max(1);
-    let tests: Vec<InstallerTest> = enabled
+    // Skipped installers produce results without running anything.
+    let mut skipped_results: Vec<TestResult> = specs
         .iter()
-        .filter_map(|(name, entry)| {
-            // Skip entries without URLs
-            let url = entry.url.as_ref()?;
-            let timeout = installer_timeout_seconds(name.as_str(), options.timeout);
-            let mut test = InstallerTest::new(name.as_str(), url)
-                .with_timeout(Duration::from_secs(timeout))
-                .with_retry_count(max_attempts);
-
-            // Add checksum if available
-            if let Some(sha256) = &entry.sha256 {
-                test = test.with_sha256(sha256);
-            }
-
-            Some(test)
+        .filter_map(|spec| {
+            spec.skip_reason.as_ref().map(|reason| {
+                tracing::info!(installer = %spec.name, reason = %reason, "Skipping installer");
+                TestResult::new(&spec.name).skipped(format!("skipped: {reason}"))
+            })
         })
+        .collect();
+
+    // Runnable specs become executor inputs (interpreter, args, env, checks, limits).
+    let tests: Vec<InstallerTest> = specs
+        .iter()
+        .filter(|spec| spec.skip_reason.is_none() && !spec.url.is_empty())
+        .map(|spec| spec.to_test())
         .collect();
 
     // In JSONL mode the run header is the first line.
@@ -743,8 +849,12 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         sequential_results
     };
 
+    let mut results = results;
+    results.append(&mut skipped_results);
+    results.sort_by(|a, b| a.installer_name.cmp(&b.installer_name));
+
     let interrupted = cancel.is_cancelled();
-    let any_failed = results.iter().any(|r| !r.success);
+    let any_failed = results.iter().any(is_failure);
 
     // Print per-result output
     for result in &results {
@@ -793,7 +903,8 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     match options.format {
         OutputFormat::Human => {
             let passed = results.iter().filter(|r| r.success).count();
-            let failed = results.len() - passed;
+            let failed = results.iter().filter(|r| is_failure(r)).count();
+            let skipped = results.iter().filter(|r| r.status == TestStatus::Skipped).count();
             if !options.quiet {
                 println!();
             }
@@ -807,9 +918,10 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                 );
             }
             println!(
-                "Results: {} passed, {} failed out of {} total",
+                "Results: {} passed, {} failed{} out of {} total",
                 passed,
                 failed,
+                if skipped > 0 { format!(", {skipped} skipped") } else { String::new() },
                 results.len()
             );
         }
@@ -852,7 +964,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         };
         let remediation = ClaudeRemediation::new(config.general.acfs_repo.clone(), rem_config);
 
-        for result in results.iter().filter(|r| !r.success) {
+        for result in results.iter().filter(|r| is_failure(r)) {
             // Classification is always attached to failures; fall back defensively.
             let classification = result.error.clone().unwrap_or_else(|| {
                 automated_flywheel_setup_checker::parser::classify_error(
@@ -953,7 +1065,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     }
     if any_failed {
         return Err(AfscError::InstallerFailures {
-            failed: results.iter().filter(|r| !r.success).count(),
+            failed: results.iter().filter(|r| is_failure(r)).count(),
             total: results.len(),
         });
     }
@@ -961,12 +1073,7 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     Ok(())
 }
 
-fn cmd_list(
-    settings: &Settings,
-    enabled_only: bool,
-    tag: Option<String>,
-    format: OutputFormat,
-) -> CmdResult {
+fn cmd_list(settings: &Settings, runnable: bool, format: OutputFormat) -> CmdResult {
     let config = &settings.config;
     let checksums_path = config.general.acfs_repo.join("checksums.yaml");
 
@@ -975,55 +1082,62 @@ fn cmd_list(
     }
 
     let checksums = parse_checksums(&checksums_path)?;
+    let globals = GlobalDefaults {
+        timeout_seconds: config.docker.timeout_seconds,
+        retries: config.execution.retry_transient,
+    };
 
-    let mut filtered: Vec<_> = checksums
-        .installers
-        .iter()
-        .filter(|(_, entry)| {
-            if enabled_only && !entry.enabled {
-                return false;
-            }
-            if let Some(ref t) = tag {
-                if !entry.tags.contains(t) {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-    filtered.sort_by(|a, b| a.0.cmp(b.0));
+    let mut rows: Vec<(String, &automated_flywheel_setup_checker::checksums::InstallerEntry, InstallerSpec)> =
+        checksums
+            .installers
+            .iter()
+            .map(|(name, entry)| {
+                let spec = resolve_spec(name, entry, config.installers.get(name), globals);
+                (name.clone(), entry, spec)
+            })
+            .filter(|(_, entry, spec)| !runnable || (entry.enabled && spec.skip_reason.is_none()))
+            .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     match format {
         OutputFormat::Human => {
-            println!("Installers ({}):", filtered.len());
-            for (name, entry) in &filtered {
-                let status = if entry.enabled { "enabled" } else { "disabled" };
-                let tags = if entry.tags.is_empty() {
+            println!("Installers ({}):", rows.len());
+            for (name, entry, spec) in &rows {
+                let has_checksum = if entry.sha256.is_some() { " sha256" } else { "" };
+                let skip = spec
+                    .skip_reason
+                    .as_ref()
+                    .map(|r| format!(" [skip: {r}]"))
+                    .unwrap_or_default();
+                let overrides = spec.overridden_fields();
+                let ov = if overrides.is_empty() {
                     String::new()
                 } else {
-                    format!(" [{}]", entry.tags.join(", "))
+                    format!(" [overrides: {}]", overrides.join(", "))
                 };
-                let has_checksum = if entry.sha256.is_some() { " sha256" } else { "" };
-                println!("  {} - {}{}{}", name, status, has_checksum, tags);
+                println!("  {} - {}{}{}{}", name, spec.command_line(), has_checksum, skip, ov);
             }
         }
         OutputFormat::Json => {
-            let output: Vec<_> = filtered
+            let output: Vec<_> = rows
                 .iter()
-                .map(|(name, entry)| {
+                .map(|(name, entry, spec)| {
                     serde_json::json!({
                         "name": name,
                         "url": entry.url,
                         "sha256": entry.sha256,
                         "enabled": entry.enabled,
-                        "tags": entry.tags,
+                        "interpreter": spec.interpreter,
+                        "args": spec.args,
+                        "skip_reason": spec.skip_reason,
+                        "overrides": spec.overridden_fields(),
                     })
                 })
                 .collect();
             println!("{}", to_json(&serde_json::Value::Array(output), true));
         }
         OutputFormat::Jsonl | OutputFormat::Prometheus => {
-            for (name, entry) in &filtered {
+            for (name, entry, spec) in &rows {
                 let output = serde_json::json!({
                     "kind": "installer",
                     "schema_version": SCHEMA_VERSION,
@@ -1031,7 +1145,10 @@ fn cmd_list(
                     "url": entry.url,
                     "sha256": entry.sha256,
                     "enabled": entry.enabled,
-                    "tags": entry.tags,
+                    "interpreter": spec.interpreter,
+                    "args": spec.args,
+                    "skip_reason": spec.skip_reason,
+                    "overrides": spec.overridden_fields(),
                 });
                 println!("{}", to_json(&output, false));
             }
@@ -1258,6 +1375,7 @@ async fn cmd_validate(
     path: Option<PathBuf>,
     check_urls_flag: bool,
     check_hashes_flag: bool,
+    profile_flag: bool,
     format: OutputFormat,
 ) -> CmdResult {
     use automated_flywheel_setup_checker::checksums::{check_hashes, check_urls};
@@ -1270,7 +1388,52 @@ async fn cmd_validate(
     }
 
     let checksums = parse_checksums(&checksums_path)?;
-    let result = validate_checksums(&checksums, false); // format validation only
+    let mut result = validate_checksums(&checksums, false); // format validation only
+    for error in validate_url_policy(&checksums, config.general.allow_file_urls) {
+        result.add_error(error);
+    }
+
+    // Cross-check against the ACFS repository when it is available next to checksums.yaml.
+    let repo_root = checksums_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut cross = None;
+    let mut drift = Vec::new();
+    if is_acfs_repo(&repo_root) {
+        match scan_acfs_repo(&repo_root) {
+            Ok(scan) => {
+                let cc = cross_check(&checksums, &scan.known_installers);
+                for name in &cc.missing_from_checksums {
+                    result.add_error(automated_flywheel_setup_checker::checksums::ValidationError::MissingUrl(
+                        format!("{name} (in KNOWN_INSTALLERS but not in checksums.yaml)"),
+                    ));
+                }
+                for (name, yaml_url, known_url) in &cc.url_mismatches {
+                    result.add_error(automated_flywheel_setup_checker::checksums::ValidationError::InvalidUrl(
+                        name.clone(),
+                        format!("checksums.yaml has {yaml_url} but KNOWN_INSTALLERS has {known_url}"),
+                    ));
+                }
+                for name in &cc.extra_in_checksums {
+                    result.add_warning(format!("{name} is in checksums.yaml but not in KNOWN_INSTALLERS"));
+                }
+                if profile_flag {
+                    drift = profile_drift(&scan.call_sites);
+                    for d in &drift {
+                        result.add_warning(format!(
+                            "profile drift for {}: ACFS {} = {:?} but built-in profile has {:?} ({}:{})",
+                            d.name, d.field, d.acfs, d.profile, d.file, d.line
+                        ));
+                    }
+                }
+                cross = Some(cc);
+            }
+            Err(e) => result.add_warning(format!("ACFS repo scan failed: {e:#}")),
+        }
+    } else if profile_flag {
+        result.add_warning(format!(
+            "--profile: no ACFS checkout found at {} (scripts/lib/security.sh missing)",
+            repo_root.display()
+        ));
+    }
 
     let format_report = serde_json::json!({
         "valid": result.valid,
@@ -1301,6 +1464,8 @@ async fn cmd_validate(
         "schema_version": SCHEMA_VERSION,
         "path": checksums_path.to_string_lossy(),
         "format": format_report,
+        "cross_check": cross,
+        "profile_drift": drift,
     });
     // 2 = format errors, 4 = drift or unreachable URLs, 0 = clean
     let mut exit_code = if result.valid { 0 } else { 2 };
@@ -1583,24 +1748,6 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
     Ok(())
 }
 
-/// Parse a human-readable memory limit string (e.g., "2G", "512M") into bytes
-fn parse_memory_limit(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
-        (&s[..s.len() - 1], 1024 * 1024 * 1024u64)
-    } else if s.ends_with('M') || s.ends_with('m') {
-        (&s[..s.len() - 1], 1024 * 1024u64)
-    } else if s.ends_with('K') || s.ends_with('k') {
-        (&s[..s.len() - 1], 1024u64)
-    } else {
-        (s, 1u64)
-    };
-    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
-}
-
 fn persist_metrics_snapshot(
     path: &std::path::Path,
     results: &[automated_flywheel_setup_checker::runner::TestResult],
@@ -1674,23 +1821,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_image_timeout_has_heavy_setup_floor() {
-        assert_eq!(base_image_timeout_seconds(60), HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
-        assert_eq!(base_image_timeout_seconds(1_200), 1_200);
-    }
-
-    #[test]
-    fn mdwb_timeout_has_heavy_setup_floor() {
-        assert_eq!(installer_timeout_seconds("mdwb", 300), HEAVY_SETUP_TIMEOUT_FLOOR_SECONDS);
-        assert_eq!(installer_timeout_seconds("mdwb", 1_200), 1_200);
-    }
-
-    #[test]
-    fn ordinary_installer_timeout_is_unchanged() {
-        assert_eq!(installer_timeout_seconds("dcg", 300), 300);
-    }
-
-    #[test]
     fn with_kind_adds_discriminator_and_schema_version() {
         let v = with_kind("result", &serde_json::json!({"a": 1})).unwrap();
         assert_eq!(v["kind"], "result");
@@ -1710,7 +1840,7 @@ mod tests {
         let s = summary_counts(&results);
         assert_eq!(s["total"], 5);
         assert_eq!(s["passed"], 1);
-        assert_eq!(s["failed"], 4);
+        assert_eq!(s["failed"], 3, "skips are not failures");
         assert_eq!(s["timed_out"], 1);
         assert_eq!(s["skipped"], 1);
         assert_eq!(s["cancelled"], 1);

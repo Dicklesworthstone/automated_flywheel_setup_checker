@@ -13,3 +13,6 @@ mod status;
 
 #[path = "cli/misc.rs"]
 mod misc;
+
+#[path = "cli/spec.rs"]
+mod spec;

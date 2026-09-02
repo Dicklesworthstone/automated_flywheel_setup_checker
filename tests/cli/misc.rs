@@ -41,14 +41,44 @@ fn list_jsonl_lines_carry_kind_and_are_sorted() {
     let mut fx = Fixture::new();
     fx.add_pass("zeta");
     fx.add_pass("alpha");
+    fx.add_pass("skipped_one");
+    fx.add_override("skipped_one", "skip = true\nskip_reason = \"broken upstream\"");
+    fx.add_override("zeta", "args = [\"--quiet\"]");
     let out = fx.run(&["list", "--format", "jsonl"]);
     let lines = jsonl_lines(&out);
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 3);
     assert_eq!(lines[0]["kind"], "installer");
     assert_eq!(lines[0]["name"], "alpha");
-    assert_eq!(lines[1]["name"], "zeta");
+    assert_eq!(lines[1]["name"], "skipped_one");
+    assert_eq!(lines[1]["skip_reason"], "broken upstream");
+    assert_eq!(lines[2]["name"], "zeta");
+    assert_eq!(lines[2]["args"], serde_json::json!(["--quiet"]));
     let json = fx.run(&["list", "--format", "json"]);
-    assert_eq!(json_doc(&json).as_array().unwrap().len(), 2);
+    assert_eq!(json_doc(&json).as_array().unwrap().len(), 3);
+    let runnable = jsonl_lines(&fx.run(&["list", "--runnable", "--format", "jsonl"]));
+    assert_eq!(runnable.len(), 2, "skipped installers are not runnable");
+    let human = stdout(&fx.run(&["list"]));
+    assert!(human.contains("[skip: broken upstream]") && human.contains("[overrides: args]"), "{human}");
+    let rejected = fx.run(&["list", "--tag", "essential"]);
+    assert!(!rejected.status.success(), "--tag was removed (ACFS has no tags)");
+}
+
+#[test]
+fn local_mode_requires_consent_when_not_interactive() {
+    let mut fx = Fixture::new();
+    fx.add_pass("good_tool");
+    // No terminal, no --yes, no AFSC_ALLOW_LOCAL: refused with exit 2 before anything runs.
+    let out = fx.run_with(&["check", "--local"], &[], &["AFSC_ALLOW_LOCAL"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--yes"), "{}", stderr(&out));
+    assert!(!fx.home.join(".local/share/afsc/results").exists(), "nothing ran");
+    // --yes confirms; the warning is still logged.
+    let out = fx.run_with(&["check", "--local", "--yes", "--format", "jsonl"], &[], &["AFSC_ALLOW_LOCAL"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no container isolation"));
+    // Dry runs never need consent.
+    let out = fx.run_with(&["check", "--local", "--dry-run"], &[], &["AFSC_ALLOW_LOCAL"]);
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]
@@ -96,4 +126,65 @@ fn log_format_json_emits_json_lines_on_stderr() {
     let v: serde_json::Value = serde_json::from_str(first).unwrap();
     assert!(v.get("timestamp").is_some() || v.get("fields").is_some(), "{first}");
     assert_no_log_noise(&out);
+}
+
+#[test]
+fn url_policy_rejects_http_and_gates_file_urls() {
+    let mut fx = Fixture::new();
+    fx.add_pass("good_tool");
+    fx.add_entry("plain_http", "http://example.com/install.sh", &"3".repeat(64));
+
+    // validate: http is a format error (exit 2) regardless of file:// permission.
+    let out = fx.run(&["validate", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let doc = json_doc(&out);
+    let errors = doc["format"]["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|e| e.as_str().unwrap().contains("plain_http") && e.as_str().unwrap().contains("https")), "{errors:?}");
+
+    // check refuses to run a policy-violating installer (exit 2), even when only it is selected.
+    let out = fx.run(&["check", "--local", "plain_http"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("URL policy"), "{}", stderr(&out));
+    // Selecting only the compliant installer still works.
+    let out = fx.run(&["check", "--local", "good_tool", "--format", "jsonl"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(jsonl_lines(&out)[0]["allow_file_urls"], true);
+
+    // file:// without the opt-in is refused; the CLI flag re-enables it.
+    let mut strict = Fixture::new();
+    strict.add_pass("file_tool");
+    strict.set_allow_file_urls(false);
+    let out = strict.run(&["check", "--local"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("allow-file-urls"), "{}", stderr(&out));
+    let out = strict.run(&["--allow-file-urls", "check", "--local", "--format", "jsonl"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = strict.run(&["validate"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = strict.run(&["--allow-file-urls", "validate"]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn secrets_in_installer_output_are_redacted_everywhere() {
+    let mut fx = Fixture::new();
+    fx.add_installer(
+        "leaky_tool",
+        "#!/bin/bash\necho \"GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\"\necho \"webhook https://hooks.slack.com/services/T0/B0/XYZXYZXYZ\" >&2\nexit 0\n",
+    );
+    let out = fx.run(&["check", "--local", "--format", "jsonl"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = stdout(&out);
+    assert!(!text.contains("ghp_abcdefghij"), "token leaked into JSONL: {text}");
+    assert!(!text.contains("T0/B0/XYZ"), "webhook leaked into JSONL: {text}");
+    let lines = jsonl_lines(&out);
+    let r = find_result(&lines, "leaky_tool");
+    assert!(r["stdout"].as_str().unwrap().contains("GITHUB_TOKEN=[redacted:"), "{}", r["stdout"]);
+    assert!(r["stderr"].as_str().unwrap().contains("[redacted:slack_webhook]"), "{}", r["stderr"]);
+
+    let status = fx.run(&["status", "--format", "json"]);
+    let doc = json_doc(&status);
+    let entry = &doc["results"][0];
+    assert!(!entry["stdout_tail"].as_str().unwrap().contains("ghp_abcdefghij"));
+    assert!(!stdout(&status).contains("T0/B0/XYZ"));
 }

@@ -18,6 +18,8 @@ pub struct Fixture {
     pub config: PathBuf,
     entries: Vec<(String, String, String)>,
     execution: Option<(usize, u32, bool)>,
+    extra_toml: String,
+    allow_file_urls: bool,
 }
 
 impl Fixture {
@@ -30,10 +32,60 @@ impl Fixture {
         std::fs::create_dir_all(&acfs).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let config = root.path().join("config.toml");
-        let mut f = Self { root, acfs, home, config, entries: Vec::new(), execution: None };
+        let mut f = Self {
+            root,
+            acfs,
+            home,
+            config,
+            entries: Vec::new(),
+            execution: None,
+            extra_toml: String::new(),
+            allow_file_urls: true,
+        };
         f.set_execution(1, 1, false);
         f.write_files();
         f
+    }
+
+    /// Toggle `[general].allow_file_urls` (fixtures default to true because they use file:// URLs).
+    pub fn set_allow_file_urls(&mut self, allow: bool) {
+        self.allow_file_urls = allow;
+        self.write_files();
+    }
+
+    /// Append an `[installers.<name>]` override section (TOML body without the header).
+    pub fn add_override(&mut self, name: &str, body: &str) {
+        self.extra_toml.push_str(&format!("\n[installers.{name}]\n{body}\n"));
+        self.write_files();
+    }
+
+    /// Append raw TOML to the config (e.g. an extra section) and rewrite it.
+    pub fn add_config_toml(&mut self, toml: &str) {
+        self.extra_toml.push('\n');
+        self.extra_toml.push_str(toml);
+        self.extra_toml.push('\n');
+        self.write_files();
+    }
+
+    /// Make the fixture ACFS repo look like a real checkout: `scripts/lib/security.sh` with a
+    /// `KNOWN_INSTALLERS` block, plus optional module files with call sites.
+    pub fn write_acfs_scripts(&self, known: &[(&str, &str)], modules: &[(&str, &str)]) {
+        let lib = self.acfs.join("scripts").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut sec = String::from("#!/bin/bash\ndeclare -gA KNOWN_INSTALLERS=(\n");
+        for (name, url) in known {
+            sec.push_str(&format!("    [{name}]=\"{url}\"\n"));
+        }
+        sec.push_str(")\n");
+        std::fs::write(lib.join("security.sh"), sec).unwrap();
+        for (file, content) in modules {
+            std::fs::write(lib.join(file), content).unwrap();
+        }
+    }
+
+    /// URL of a previously added installer.
+    pub fn url_of(&self, name: &str) -> String {
+        self.entries.iter().find(|(n, _, _)| n == name).map(|(_, u, _)| u.clone()).unwrap()
     }
 
     /// Set `[execution]` values (parallel, retry_transient, fail_fast) and rewrite files.
@@ -127,22 +179,32 @@ impl Fixture {
 
         let (parallel, retries, fail_fast) = self.execution.unwrap_or((1, 1, false));
         let config = format!(
-            "[general]\nacfs_repo = \"{}\"\nlog_level = \"info\"\n\n[execution]\nparallel = {parallel}\nretry_transient = {retries}\nfail_fast = {fail_fast}\n",
-            self.acfs.display()
+            "[general]\nacfs_repo = \"{}\"\nlog_level = \"info\"\nallow_file_urls = {}\n\n[execution]\nparallel = {parallel}\nretry_transient = {retries}\nfail_fast = {fail_fast}\n{}",
+            self.acfs.display(),
+            self.allow_file_urls,
+            self.extra_toml
         );
         std::fs::write(&self.config, config).unwrap();
     }
 
-    /// Run the binary with the fixture's HOME and config; prints diagnostics on non-zero exit
-    /// only when `expect_success` is true.
+    /// Run the binary with the fixture's HOME and config (local runs pre-approved via
+    /// `AFSC_ALLOW_LOCAL=1`); prints the command, stdout, and stderr for diagnosis.
     pub fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("automated_flywheel_setup_checker");
-        cmd.env("HOME", &self.home)
-            .env("AFSC_ALLOW_LOCAL", "1")
-            .env_remove("RUST_LOG")
-            .arg("--config")
-            .arg(&self.config)
-            .args(args);
+        self.run_with(args, &[("AFSC_ALLOW_LOCAL", "1")], &[])
+    }
+
+    /// Run with extra environment variables set and/or removed. stdin is never a terminal.
+    pub fn run_with(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> Output {
+        let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
+        let mut cmd = std::process::Command::new(bin);
+        cmd.env("HOME", &self.home).env_remove("RUST_LOG").env_remove("AFSC_ALLOW_LOCAL");
+        for (k, v) in set {
+            cmd.env(k, v);
+        }
+        for k in remove {
+            cmd.env_remove(k);
+        }
+        cmd.stdin(std::process::Stdio::null()).arg("--config").arg(&self.config).args(args);
         let output = cmd.output().expect("failed to execute binary");
         eprintln!(
             "--- cli: {} ---\nexit: {:?}\nstdout:\n{}\nstderr:\n{}\n--- end ---",

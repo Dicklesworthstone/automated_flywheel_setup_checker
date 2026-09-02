@@ -40,6 +40,8 @@ run_as_root = false
 reap_orphans = true
 # Container network mode: bridge or none
 network = "bridge"
+# Derive a prepared image (ACFS prerequisites + non-root afsc-user) from `image`; false runs it as-is (root)
+prepare = true
 
 [execution]
 # Number of parallel installer tests: an integer or "auto" (= max(1, min(4, cores / 2)))

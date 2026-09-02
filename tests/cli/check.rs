@@ -211,8 +211,10 @@ fn parallel_fail_fast_cancels_in_flight_and_skips_queued() {
         assert!(s == "Cancelled" || s == "Skipped", "{name}: {s}");
     }
     let summary = lines.last().unwrap();
-    assert_eq!(summary["failed"], 4);
-    assert!(summary["cancelled"].as_u64().unwrap() + summary["skipped"].as_u64().unwrap() == 3);
+    let cancelled = summary["cancelled"].as_u64().unwrap();
+    let skipped = summary["skipped"].as_u64().unwrap();
+    assert_eq!(cancelled + skipped, 3, "{summary}");
+    assert_eq!(summary["failed"].as_u64().unwrap(), 1 + cancelled, "skips are not failures: {summary}");
     assert_eq!(summary["interrupted"], false, "fail-fast is not an interruption");
 }
 
@@ -236,7 +238,8 @@ fn check_dry_run_json_lists_installers() {
     assert_eq!(out.status.code(), Some(0));
     let doc = json_doc(&out);
     assert_eq!(doc["dry_run"], true);
-    assert_eq!(doc["installers"][0], "good_tool");
+    assert_eq!(doc["installers"][0]["name"], "good_tool");
+    assert_eq!(doc["installers"][0]["command_line"], "bash /tmp/installer_good_tool.sh");
     assert_eq!(doc["backend"], "local");
 }
 
@@ -304,14 +307,55 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     assert_eq!(summary["kind"], "summary");
     assert_eq!(summary["interrupted"], true);
     assert!(summary["cancelled"].as_u64().unwrap() >= 2, "{summary}");
-    for r in results_of_kind(&lines, "result") {
-        assert!(matches!(r["status"].as_str().unwrap(), "Cancelled" | "Skipped"), "{r}");
-        if r["status"] == "Cancelled" {
-            assert_eq!(r["error"]["category"], "cancelled");
-        }
+    // The two 30 s sleepers were in flight when the signal arrived and must be cancelled. The
+    // fast third installer may have grabbed a worker slot first (task polling order is not
+    // submission order), so it is allowed to have passed, been cancelled, or been skipped.
+    for name in ["slow_a", "slow_b"] {
+        let r = find_result(&lines, name);
+        assert_eq!(r["status"], "Cancelled", "{r}");
+        assert_eq!(r["error"]["category"], "cancelled");
     }
+    let third = find_result(&lines, "zz_queued");
+    assert!(matches!(third["status"].as_str().unwrap(), "Passed" | "Cancelled" | "Skipped"), "{third}");
 
     // Persisted too.
     let status_doc = json_doc(&fx.run(&["status", "--format", "json"]));
     assert_eq!(status_doc["summary"]["interrupted"], true);
+}
+
+#[test]
+fn concurrent_checks_are_refused_unless_allowed() {
+    use std::time::Duration;
+    let mut fx = Fixture::new();
+    fx.add_sleeper("slow", 6);
+    let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
+    let mut first = std::process::Command::new(&bin)
+        .env("HOME", &fx.home)
+        .env("AFSC_ALLOW_LOCAL", "1")
+        .arg("--config")
+        .arg(&fx.config)
+        .args(["check", "--local", "--format", "jsonl"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Second run: refused immediately with exit 3 and the holder's pid.
+    let second = fx.run(&["check", "--local", "--format", "jsonl"]);
+    assert_eq!(second.status.code(), Some(3), "{}", stderr(&second));
+    assert!(stderr(&second).contains(&format!("pid {}", first.id())), "{}", stderr(&second));
+    assert!(stderr(&second).contains("--allow-concurrent"));
+
+    // With --allow-concurrent both complete and both runs are persisted.
+    let third = fx.run(&["check", "--local", "--allow-concurrent", "--format", "jsonl"]);
+    assert_eq!(third.status.code(), Some(0), "{}", stderr(&third));
+    let out = first.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let runs = json_doc(&fx.run(&["status", "--list", "--format", "json"]));
+    assert_eq!(runs["runs"].as_array().unwrap().len(), 2);
+    // Lock released: a plain run works again.
+    let fourth = fx.run(&["check", "--local", "--dry-run"]);
+    assert_eq!(fourth.status.code(), Some(0));
+    assert!(!fx.home.join(".local/share/afsc/locks/run.lock").exists());
 }

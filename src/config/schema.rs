@@ -137,6 +137,9 @@ pub struct DockerConfig {
     pub reap_orphans: bool,
     /// Container network mode: bridge or none
     pub network: String,
+    /// Derive a prepared image (ACFS prerequisites + non-root user) from `image`; when false the
+    /// image runs as-is (root, no prerequisites)
+    pub prepare: bool,
 }
 
 impl Default for DockerConfig {
@@ -151,6 +154,7 @@ impl Default for DockerConfig {
             run_as_root: false,
             reap_orphans: true,
             network: "bridge".to_string(),
+            prepare: true,
         }
     }
 }
