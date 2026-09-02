@@ -1,0 +1,114 @@
+name: Release
+
+# Tag `vX.Y.Z` → build release binaries on the STABLE toolchain for four targets, attach them
+# (plus SHA-256 sums) to the GitHub release, and smoke-test `cargo install --git` on stable.
+# The local `-Z threads` rustflag in .cargo/config.toml is nightly-only; RUSTFLAGS overrides it here.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Smoke the binary
+        run: |
+          set -euo pipefail
+          bin=target/${{ matrix.target }}/release/automated_flywheel_setup_checker
+          "$bin" --version
+          "$bin" config default > /dev/null
+          "$bin" classify-error --stderr "E: Unable to locate package foo" --exit-code 100 --format json | grep -q '"dependency"'
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name=automated_flywheel_setup_checker-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p dist/$name
+          cp target/${{ matrix.target }}/release/automated_flywheel_setup_checker dist/$name/
+          cp README.md CHANGELOG.md LICENSE* dist/$name/ 2>/dev/null || true
+          tar -C dist -czf dist/$name.tar.gz $name
+          (cd dist && shasum -a 256 $name.tar.gz > $name.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  install-smoke:
+    name: cargo install --git (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install from git at this ref
+        run: cargo install --git https://github.com/${{ github.repository }} --rev ${{ github.sha }} --locked automated_flywheel_setup_checker
+
+      - name: Run it
+        run: |
+          automated_flywheel_setup_checker --version
+          automated_flywheel_setup_checker doctor --local || true
+
+  release:
+    name: Publish GitHub release
+    needs: [build, install-smoke]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Release notes from CHANGELOG
+        run: |
+          awk '/^## \[/{n++} n==1' CHANGELOG.md > notes.md || true
+          test -s notes.md || echo "Release ${{ github.ref_name }}" > notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          fail_on_unmatched_files: true

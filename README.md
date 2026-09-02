@@ -516,6 +516,11 @@ cargo fmt && cargo clippy --all-targets --all-features -- -D warnings
 scripts/e2e/run_all_tests.sh                 # bash E2E scripts
 ```
 
+Local development pins nightly (`rust-toolchain.toml`, parallel front-end flag in
+`.cargo/config.toml`); the code itself needs no nightly features — CI also tests on stable, and
+`.github/workflows/release.yml` builds the tagged releases (`vX.Y.Z`) on stable for
+x86_64/aarch64 Linux and macOS with SHA-256 sums and a `cargo install --git` smoke test.
+
 Remediation tests use the checked-in fake `claude` (`tests/fixtures/bin/claude`, scenarios via
 `AFSC_FAKE_CLAUDE=success|unsafe|error|rate_limit|timeout`). Its envelope shape was pinned from
 `claude --print --output-format json` on Claude Code 2.1.x — re-check it against a real run each

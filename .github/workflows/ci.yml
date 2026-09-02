@@ -41,22 +41,32 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            toolchain: nightly
+          - os: macos-latest
+            toolchain: nightly
+          # Stable baseline: the code has no nightly features; only the local
+          # `-Z threads` rustflag in .cargo/config.toml is nightly, and RUSTFLAGS overrides it.
+          - os: ubuntu-latest
+            toolchain: stable
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
+          key: ${{ matrix.os }}-${{ matrix.toolchain }}
 
       - name: Run tests
         run: cargo test --all-features --verbose
