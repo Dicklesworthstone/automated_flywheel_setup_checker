@@ -48,6 +48,48 @@ impl Default for ValidationResult {
     }
 }
 
+/// URL policy shared by `validate` and `check`: `https://` always; `file://` only when explicitly
+/// allowed (tests and local fixtures); plain `http://` and anything else rejected, mirroring
+/// ACFS's `enforce_https`. Returns the reason when the URL is not allowed.
+pub fn url_policy_violation(url: &str, allow_file_urls: bool) -> Option<String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        None
+    } else if lower.starts_with("file://") {
+        if allow_file_urls {
+            None
+        } else {
+            Some(
+                "file:// URLs are only allowed with --allow-file-urls or [general].allow_file_urls = true"
+                    .to_string(),
+            )
+        }
+    } else if lower.starts_with("http://") {
+        Some("plain http:// is not allowed; ACFS enforces https".to_string())
+    } else {
+        Some("unsupported URL scheme; ACFS enforces https".to_string())
+    }
+}
+
+/// Apply the URL policy to every enabled installer, returning one error per violation.
+pub fn validate_url_policy(checksums: &ChecksumsFile, allow_file_urls: bool) -> Vec<ValidationError> {
+    let mut names: Vec<&String> = checksums.installers.keys().collect();
+    names.sort();
+    let mut errors = Vec::new();
+    for name in names {
+        let entry = &checksums.installers[name];
+        if !entry.enabled {
+            continue;
+        }
+        if let Some(url) = &entry.url {
+            if let Some(reason) = url_policy_violation(url, allow_file_urls) {
+                errors.push(ValidationError::InvalidUrl(name.clone(), format!("{url}: {reason}")));
+            }
+        }
+    }
+    errors
+}
+
 /// Validate the structure and content of a checksums file
 pub fn validate_checksums(checksums: &ChecksumsFile, check_urls: bool) -> ValidationResult {
     let mut result = ValidationResult::new();
@@ -164,7 +206,15 @@ pub async fn check_urls(checksums: &ChecksumsFile) -> Vec<UrlCheckResult> {
             };
             let start = Instant::now();
 
-            match client.head(&url).send().await {
+            // HEAD first; some hosts reject HEAD (405/403/501) while GET works, so fall back
+            // to a ranged GET before declaring a URL broken.
+            let mut response = client.head(&url).send().await;
+            if let Ok(resp) = &response {
+                if matches!(resp.status().as_u16(), 403 | 405 | 501) {
+                    response = client.get(&url).header("Range", "bytes=0-0").send().await;
+                }
+            }
+            match response {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -368,6 +418,74 @@ mod tests {
         let result = validate_checksums(&checksums, false);
         assert!(result.valid);
         assert!(result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_urls_falls_back_to_get_when_head_is_rejected() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD")).and(path("/no-head.sh")).respond_with(ResponseTemplate::new(405)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/no-head.sh")).respond_with(ResponseTemplate::new(206).set_body_string("#")).mount(&server).await;
+        Mock::given(method("HEAD")).and(path("/gone.sh")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("HEAD")).and(path("/ok.sh")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+
+        let mut installers = HashMap::new();
+        for (name, p) in [("a_nohead", "/no-head.sh"), ("b_gone", "/gone.sh"), ("c_ok", "/ok.sh")] {
+            installers.insert(
+                name.to_string(),
+                InstallerEntry {
+                    url: Some(format!("{}{}", server.uri(), p)),
+                    sha256: Some("x".into()),
+                    version: None,
+                    enabled: true,
+                    tags: vec![],
+                    extra: HashMap::new(),
+                },
+            );
+        }
+        let results = check_urls(&ChecksumsFile { installers }).await;
+        let by_name: HashMap<_, _> = results.iter().map(|r| (r.name.as_str(), r)).collect();
+        assert!(by_name["a_nohead"].reachable, "GET fallback: {:?}", by_name["a_nohead"]);
+        assert_eq!(by_name["a_nohead"].status, Some(206));
+        assert!(!by_name["b_gone"].reachable);
+        assert!(by_name["c_ok"].reachable);
+    }
+
+    #[test]
+    fn test_url_policy() {
+        assert!(url_policy_violation("https://example.com/i.sh", false).is_none());
+        assert!(url_policy_violation("HTTPS://example.com/i.sh", false).is_none());
+        assert!(url_policy_violation("file:///tmp/i.sh", true).is_none());
+        assert!(url_policy_violation("file:///tmp/i.sh", false).unwrap().contains("allow-file-urls"));
+        assert!(url_policy_violation("http://example.com/i.sh", true).unwrap().contains("https"));
+        assert!(url_policy_violation("ftp://example.com/i.sh", true).is_some());
+
+        let mut installers = HashMap::new();
+        for (name, url, enabled) in [
+            ("a_https", "https://x/i.sh", true),
+            ("b_http", "http://x/i.sh", true),
+            ("c_file", "file:///x/i.sh", true),
+            ("d_disabled_http", "http://x/i.sh", false),
+        ] {
+            installers.insert(
+                name.to_string(),
+                InstallerEntry {
+                    url: Some(url.to_string()),
+                    sha256: Some("abc".into()),
+                    version: None,
+                    enabled,
+                    tags: vec![],
+                    extra: HashMap::new(),
+                },
+            );
+        }
+        let checksums = ChecksumsFile { installers };
+        let errors = validate_url_policy(&checksums, false);
+        let names: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        assert_eq!(errors.len(), 2, "{names:?}");
+        assert!(names[0].contains("b_http") && names[1].contains("c_file"), "{names:?}");
+        assert_eq!(validate_url_policy(&checksums, true).len(), 1, "file allowed");
     }
 
     #[test]
