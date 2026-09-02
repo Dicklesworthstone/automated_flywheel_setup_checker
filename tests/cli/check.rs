@@ -227,7 +227,9 @@ fn check_honors_fail_fast_from_config_in_sequential_mode() {
     let out = fx.run(&["check", "--local", "--format", "jsonl"]);
     let lines = jsonl_lines(&out);
     assert_eq!(lines[0]["fail_fast"], true);
-    assert_eq!(results_of_kind(&lines, "result").len(), 1, "stops after the first failure");
+    let results = results_of_kind(&lines, "result");
+    assert_eq!(results.len(), 2, "every requested installer is accounted for");
+    assert_eq!(results.iter().filter(|r| r["status"] == "skipped").count(), 1, "stops after the first failure: {lines:?}");
 }
 
 #[test]

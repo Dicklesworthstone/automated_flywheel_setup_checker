@@ -16,3 +16,6 @@ mod misc;
 
 #[path = "cli/spec.rs"]
 mod spec;
+
+#[path = "cli/history.rs"]
+mod history;

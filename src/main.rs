@@ -21,6 +21,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use automated_flywheel_setup_checker::config::RunOrder;
+use automated_flywheel_setup_checker::reporting::RunInfo;
+use automated_flywheel_setup_checker::config::Config;
 use automated_flywheel_setup_checker::reporting::{diff_runs, render_diff, render_run, render_timeline, History};
 
 use automated_flywheel_setup_checker::{
@@ -977,18 +979,29 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             .with_fail_fast(options.fail_fast);
         pool.run_all(tests).await?
     } else {
-        // Sequential execution
+        // Sequential execution: same result shape as the pool (queued work after a cancellation
+        // is Cancelled, after a fail-fast stop it is Skipped) so every requested installer is
+        // accounted for in the summary.
         let mut sequential_results = Vec::new();
-        for test in &tests {
+        let mut queue = tests.iter();
+        for test in queue.by_ref() {
             let result = runner.run_test_with_retry(test).await?;
             let failed = !result.success;
             sequential_results.push(result);
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || (options.fail_fast && failed) {
                 break;
             }
-            if options.fail_fast && failed {
-                break;
-            }
+        }
+        for test in queue {
+            let r = if cancel.is_cancelled() {
+                let mut r = TestResult::new(&test.name)
+                    .cancelled(format!("{} before start", automated_flywheel_setup_checker::parser::CANCELLED_MARKER));
+                automated_flywheel_setup_checker::runner::finalize_failure(&mut r, None);
+                r
+            } else {
+                TestResult::new(&test.name).skipped("Skipped due to fail-fast")
+            };
+            sequential_results.push(r);
         }
         sequential_results
     };
