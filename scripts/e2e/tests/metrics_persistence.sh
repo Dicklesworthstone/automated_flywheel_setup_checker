@@ -43,6 +43,7 @@ cat > "$TEST_TMP/config.toml" << EOF
 [general]
 acfs_repo = "$ACFS_REPO"
 log_level = "info"
+allow_file_urls = true
 
 [docker]
 image = "ubuntu:22.04"
@@ -67,7 +68,7 @@ CONFIG_PATH="$TEST_TMP/config.toml"
 METRICS_PATH="$HOME_DIR/.local/share/afsc/metrics.json"
 
 run_check() {
-    HOME="$HOME_DIR" "$CHECKER_BINARY" --config "$CONFIG_PATH" check --local
+    HOME="$HOME_DIR" "$CHECKER_BINARY" --config "$CONFIG_PATH" check --local --yes
 }
 
 echo "  [1/2] Running first local check..."

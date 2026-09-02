@@ -348,6 +348,8 @@ pub struct RunHeader {
     pub installers_requested: Vec<String>,
     pub installer_count: usize,
     pub dry_run: bool,
+    /// Whether file:// installer URLs were permitted for this run
+    pub allow_file_urls: bool,
 }
 
 impl RunHeader {
@@ -394,6 +396,9 @@ pub struct ResultEntry {
     /// One entry per attempt, oldest first
     #[serde(default)]
     pub attempts: Vec<AttemptEntry>,
+    /// First line of `version_cmd` output after a passing install
+    #[serde(default)]
+    pub installed_version: Option<String>,
 }
 
 /// Persisted view of one execution attempt
@@ -604,6 +609,7 @@ impl ResultPersister {
             stdout_tail: tail(&result.stdout, PERSISTED_TAIL_BYTES),
             stderr_tail: tail(&result.stderr, PERSISTED_TAIL_BYTES),
             container_id: result.container_id.clone(),
+            installed_version: result.installed_version.clone(),
             last_attempt_ms: result.last_attempt_ms,
             attempts: result
                 .attempts

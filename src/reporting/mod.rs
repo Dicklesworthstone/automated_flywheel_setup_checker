@@ -3,6 +3,7 @@
 mod jsonl;
 mod metrics;
 mod notify;
+mod redact;
 mod summary;
 
 pub use jsonl::{
@@ -11,4 +12,5 @@ pub use jsonl::{
 };
 pub use metrics::{MetricsExporter, MetricsSnapshot};
 pub use notify::{GitHubConfig, NotificationConfig, Notifier, SlackConfig};
+pub use redact::{contains_secret, redact};
 pub use summary::{FailureSummary, RunSummary, SummaryGenerator};

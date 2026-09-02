@@ -45,10 +45,10 @@ impl Default for MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
-    /// Save metrics snapshot to a JSON file
+    /// Save metrics snapshot to a JSON file (atomically: temp file + rename)
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        crate::lock::write_atomic(path, json.as_bytes())?;
         Ok(())
     }
 
