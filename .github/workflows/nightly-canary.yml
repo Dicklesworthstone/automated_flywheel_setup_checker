@@ -1,0 +1,144 @@
+name: Nightly Canary
+
+# Runs the full ACFS installer catalog in the prepared image every night and keeps ONE rolling
+# GitHub issue up to date through the checker's own notification lifecycle:
+#   failures → create or comment (mode on_change: only when the failing set changes),
+#   clean run → "recovered" comment + close.
+# The per-run Markdown table lands in the job summary; results/logs are uploaded as artifacts.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      installers:
+        description: "Space-separated installer names (empty = whole catalog)"
+        required: false
+        default: ""
+      acfs_ref:
+        description: "ACFS git ref to test"
+        required: false
+        default: "main"
+
+concurrency:
+  group: nightly-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  canary:
+    name: Full catalog in Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out ACFS
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/agentic_coding_flywheel_setup
+          ref: ${{ github.event.inputs.acfs_ref || 'main' }}
+          path: acfs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Restore prepared image cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/afsc-image.tar
+          key: afsc-base-${{ hashFiles('docker/Dockerfile.base') }}
+
+      - name: Load cached image
+        run: test -f /tmp/afsc-image.tar && docker load -i /tmp/afsc-image.tar || echo "no cached image; the run builds it"
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Write canary config
+        run: |
+          mkdir -p /tmp/afsc-data
+          cat > /tmp/canary.toml <<TOML
+          [general]
+          acfs_repo = "${GITHUB_WORKSPACE}/acfs"
+          data_dir = "/tmp/afsc-data"
+          results_retention = 50
+
+          [docker]
+          timeout_seconds = 900
+          build_timeout_seconds = 1200
+
+          [execution]
+          parallel = 4
+          retry_transient = 2
+          run_deadline_seconds = 9000
+          order = "longest-first"
+
+          [notifications]
+          enabled = true
+          mode = "on_change"
+          github_token_env = "GITHUB_TOKEN"
+          github_issue_repo = "${GITHUB_REPOSITORY}"
+          github_issue_title = "AFSC canary: installer failures"
+          TOML
+
+      - name: Doctor
+        run: ./target/release/automated_flywheel_setup_checker --config /tmp/canary.toml doctor
+
+      - name: Validate checksums and profiles against the checkout
+        run: ./target/release/automated_flywheel_setup_checker --config /tmp/canary.toml validate --check-hashes --profile || echo "::warning::checksum/profile drift detected (exit $?)"
+
+      - name: Run the catalog
+        id: run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          ./target/release/automated_flywheel_setup_checker --config /tmp/canary.toml --format jsonl \
+            check ${{ github.event.inputs.installers }} | tee /tmp/afsc-run.jsonl
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always()
+        run: |
+          ./target/release/automated_flywheel_setup_checker --config /tmp/canary.toml status --format markdown >> "$GITHUB_STEP_SUMMARY" || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ./target/release/automated_flywheel_setup_checker --config /tmp/canary.toml status --detailed >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results and event log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            /tmp/afsc-run.jsonl
+            /tmp/afsc-data/results/
+            /tmp/afsc-data/logs/
+            /tmp/afsc-data/validate.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Save prepared image for the cache
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ ! -f /tmp/afsc-image.tar ]]; then
+            tags=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^afsc-base:[0-9a-f]{12}$' || true)
+            if [[ -n "$tags" ]]; then docker save -o /tmp/afsc-image.tar $tags; fi
+          fi
+
+      - name: Fail the job when installers failed
+        if: steps.run.outputs.exit_code != '0'
+        run: |
+          echo "::error::check exited ${{ steps.run.outputs.exit_code }} (1 = installer failures, 3 = infrastructure)"
+          exit 1

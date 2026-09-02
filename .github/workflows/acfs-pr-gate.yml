@@ -1,0 +1,121 @@
+name: ACFS PR Gate
+
+# Reusable gate for pull requests in the ACFS repository (or anyone testing an ACFS ref):
+# validates checksums.yaml + execution profiles against that ref and runs the named installers
+# in the prepared image. Call it from ACFS with:
+#
+#   jobs:
+#     gate:
+#       uses: Dicklesworthstone/automated_flywheel_setup_checker/.github/workflows/acfs-pr-gate.yml@main
+#       with:
+#         acfs_ref: ${{ github.event.pull_request.head.sha }}
+#         installers: "zoxide uv"        # empty = everything enabled
+#
+# Exit codes are the checker's: 1 installer failures, 2 invalid checksums.yaml, 4 drift.
+
+on:
+  workflow_call:
+    inputs:
+      acfs_ref:
+        description: "ACFS git ref (branch, tag or sha) to validate and run"
+        required: true
+        type: string
+      acfs_repository:
+        description: "ACFS repository (owner/name)"
+        required: false
+        type: string
+        default: "Dicklesworthstone/agentic_coding_flywheel_setup"
+      installers:
+        description: "Space-separated installer names to run (empty = all enabled)"
+        required: false
+        type: string
+        default: ""
+      check_hashes:
+        description: "Download every installer and verify the pinned SHA-256 (exit 4 on drift)"
+        required: false
+        type: boolean
+        default: true
+      parallel:
+        description: "Concurrent containers"
+        required: false
+        type: number
+        default: 4
+  workflow_dispatch:
+    inputs:
+      acfs_ref:
+        description: "ACFS git ref"
+        required: true
+        default: "main"
+      installers:
+        description: "Space-separated installer names (empty = all)"
+        required: false
+        default: "zoxide uv"
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Validate + run ${{ inputs.installers || 'all enabled' }} @ ${{ inputs.acfs_ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the checker
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/automated_flywheel_setup_checker
+          ref: main
+
+      - name: Check out ACFS at the requested ref
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.acfs_repository || 'Dicklesworthstone/agentic_coding_flywheel_setup' }}
+          ref: ${{ inputs.acfs_ref }}
+          path: acfs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Restore prepared image cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/afsc-image.tar
+          key: afsc-base-${{ hashFiles('docker/Dockerfile.base') }}
+
+      - name: Load cached image
+        run: test -f /tmp/afsc-image.tar && docker load -i /tmp/afsc-image.tar || echo "no cached image; the run builds it"
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Validate checksums.yaml, KNOWN_INSTALLERS and execution profiles
+        run: |
+          set -euo pipefail
+          args=(--acfs-repo "$PWD/acfs" validate --profile --format json)
+          if [[ "${{ inputs.check_hashes }}" == "true" ]]; then args+=(--check-hashes); fi
+          ./target/release/automated_flywheel_setup_checker "${args[@]}" | tee /tmp/validate.json
+          jq -e '.valid == true' /tmp/validate.json > /dev/null
+
+      - name: Run installers in the prepared image
+        run: |
+          set -euo pipefail
+          ./target/release/automated_flywheel_setup_checker --acfs-repo "$PWD/acfs" --data-dir /tmp/afsc-data \
+            check ${{ inputs.installers }} --parallel ${{ inputs.parallel || 4 }} --format jsonl | tee /tmp/afsc-run.jsonl
+
+      - name: Job summary
+        if: always()
+        run: ./target/release/automated_flywheel_setup_checker --data-dir /tmp/afsc-data status --format markdown >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acfs-gate-${{ github.run_id }}
+          path: |
+            /tmp/validate.json
+            /tmp/afsc-run.jsonl
+            /tmp/afsc-data/results/
+          retention-days: 14
+          if-no-files-found: ignore
