@@ -41,7 +41,7 @@ fn test_notifications_config_defaults() {
 #[test]
 fn test_notifications_config_from_toml() {
     let config: Config = toml::from_str(
-        r#"
+        r##"
 [notifications]
 enabled = true
 slack_webhook_env = "SLACK_WEBHOOK_URL"
@@ -50,7 +50,7 @@ github_token_env = "GITHUB_TOKEN"
 github_issue_repo = "owner/repo"
 notify_on_failure = true
 notify_on_success = true
-"#,
+"##,
     )
     .unwrap();
 
@@ -193,10 +193,8 @@ fn test_notify_on_failure_only() {
         ..configured_notifications()
     };
 
-    let slack = notifications
-        .to_internal()
-        .slack
-        .expect("expected slack provider for failure-only config");
+    let slack =
+        notifications.to_internal().slack.expect("expected slack provider for failure-only config");
 
     assert!(slack.notify_on_failure);
     assert!(!slack.notify_on_success);

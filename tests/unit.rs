@@ -9,6 +9,9 @@ mod checksums_tests;
 #[path = "unit/config_tests.rs"]
 mod config_tests;
 
+#[path = "unit/notify_tests.rs"]
+mod notify_tests;
+
 #[path = "unit/parser_tests.rs"]
 mod parser_tests;
 
