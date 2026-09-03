@@ -526,7 +526,8 @@ and are capped per run. See "remediate checksums" above for the gates and the bu
 
 Through [dsr](https://github.com/Dicklesworthstone/doodlestein_self_releaser), not GitHub Actions
 (Actions is disabled on this repository). The gate recipe ships with the source in
-`.dsr/repos.yaml`: `cargo fmt --check`, clippy with `-D warnings`, the full test suite, the Docker
+`.dsr/repos.yaml`: `cargo fmt --check`, a RustSec audit (`cargo-audit`), clippy with `-D warnings`,
+the full test suite, the Docker
 suite (`scripts/quality/docker_suite.sh` builds the test executable on an rch worker and runs it
 against the gate host's daemon) and the bash E2E scripts, in that order. Every run leaves a
 receipt under `~/.local/state/dsr/quality-logs/`.

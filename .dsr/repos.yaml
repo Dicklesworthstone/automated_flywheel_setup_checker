@@ -36,6 +36,7 @@ tools:
       - darwin/arm64
     checks:
       - cargo fmt --check
+      - cargo-audit audit
       - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 rch exec -- cargo clippy --locked --all-targets --all-features -- -D warnings
       - RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --no-fail-fast
       - bash scripts/quality/docker_suite.sh
