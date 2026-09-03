@@ -1000,8 +1000,21 @@ executing).
 
 ### Still open
 
-- `C12c` Claude propose/apply (P3, owner sign-off); checksum propose/apply exists and is tested.
 - Cutting the first `v0.1.0` tag (the release workflow is in place).
+
+Update 2026-09-03 00:50 UTC: `C12c` is implemented and proven. `[remediation].mode = propose|apply`
+runs a Claude edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits`,
+edit tools limited to the worktree, Bash only with `allow_bash`), then applies three gates before
+anything is committed: no High/Critical command in the transcript, every changed path inside the
+edit policy (`checksums.yaml`, the `KNOWN_INSTALLERS` block, `scripts/generated/`), and a re-run of
+the installer against the worktree; a rejected session leaves no worktree or branch. Fake-claude
+scenarios and a fake `gh` cover the branch/PR, rejection and push paths (CLI suite 64). With the
+real `claude` CLI (2.1.259) against the real checkout, a propose session on fsfs investigated and
+made no changes ("cannot be fixed within the allowed files, and the pin is already correct"),
+cost $1.27, cleanup verified. Two real-CLI facts fixed along the way: a budget or turn cap comes
+back as exit 1 with an `is_error` envelope (`result: null`) and nothing on stderr, which used to
+surface as an empty error after three blind retries; and one invocation costs about $0.13 before
+it reads anything, so the default `cost_limit_usd` is now 3.0.
 - Findings from the full baseline worth acting on in ACFS: 12 pins drifted upstream (atuin, bv, caam, casr, cass, ee, grok, mcp_agent_mail, pi, rust, ubs, uv); the ACFS checkout regenerated its checksums later on 2026-09-02, leaving cass and ubs, and the tool's propose mode created branch `afsc/checksum-refresh-20260902-213449` (ubs pin, verified) for the owner to push.
 
 Update 2026-09-02 22:00 UTC: `C14b` is closed (bollard 0.21, reqwest 0.13, similar 3; Docker suite 9/9 and the
