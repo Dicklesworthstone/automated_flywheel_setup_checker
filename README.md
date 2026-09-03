@@ -25,7 +25,7 @@
 | Feature | What It Does |
 |---------|--------------|
 | **Isolated Docker Testing** | Each installer runs in a fresh `ubuntu:24.04` container (the ACFS target release) — no host contamination |
-| **Error Classification** | Automatically categorizes failures: network, permission, dependency, configuration, resource |
+| **Error Classification** | Automatically categorizes failures: checksum or bootstrap mismatch, network, dependency, permission, resource, timeout, syntax error, apt repair, post-install and more (12 categories, golden corpus from real runs) |
 | **Parallel Execution** | Run N installer tests concurrently with configurable worker count |
 | **Retry with Backoff** | Transient failures (network timeouts, rate limits) are retried automatically |
 | **Claude Remediation** | Read-only advice, or a verified branch/PR from a policy-gated edit session (`advisory` / `propose` / `apply`) |
@@ -78,7 +78,7 @@ automated_flywheel_setup_checker status --format prometheus
 |---------|-----------|-------------------|----------------|
 | Isolation | Docker containers | Real VPS (risky) | VM-based (slow) |
 | Parallelism | Configurable workers | Sequential | Limited |
-| Error Classification | Automatic (6 categories) | Human reads logs | Grep patterns |
+| Error Classification | Automatic (12 categories) | Human reads logs | Grep patterns |
 | Auto-Remediation | Claude-powered suggestions | N/A | N/A |
 | Cost per run | Free (local Docker) | VPS hourly cost | GH Actions minutes |
 | Setup time | `cargo build` | Provision VPS | Write workflow |
