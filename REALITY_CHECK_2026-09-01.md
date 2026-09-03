@@ -1009,6 +1009,13 @@ are gone from the README, `.dsr/repos.yaml` carries the quality-gate recipe (fmt
 four targets; `dsr repos validate` passes and `dsr build --dry-run` plans v0.1.0. The workflow
 files under `.github/` are inert until the owner gives the deletion command.
 
+Update 2026-09-03 04:30 UTC: the dsr gate passes 5/5 (fmt, clippy, full tests, Docker suite,
+release build plus bash E2E; receipt `quality-logs/automated_flywheel_setup_checker/20260903T000959-1618699`).
+Getting there fixed things the never-run CI would also have hit: the tree was not rustfmt-clean,
+two timing tests flaked on loaded workers, seven notification tests had never compiled, and the
+Docker suite cannot build its images on rch workers, so it now runs on the gate host from a
+worker-built executable.
+
 Update 2026-09-03 00:50 UTC: `C12c` is implemented and proven. `[remediation].mode = propose|apply`
 runs a Claude edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits`,
 edit tools limited to the worktree, Bash only with `allow_bash`), then applies three gates before
