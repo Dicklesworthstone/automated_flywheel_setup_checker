@@ -307,7 +307,8 @@ pub struct RemediationResult {
 /// The `claude --print --output-format json` envelope (fields we rely on).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ClaudeEnvelope {
-    #[serde(default)]
+    /// `null` on budget/turn-cap envelopes (Claude Code 2.1.x); read as empty
+    #[serde(default, deserialize_with = "null_as_default")]
     pub result: String,
     #[serde(default)]
     pub is_error: bool,
@@ -322,8 +323,17 @@ pub struct ClaudeEnvelope {
     #[serde(default)]
     pub subtype: Option<String>,
     /// Error strings the CLI attaches to `is_error` envelopes (e.g. "Reached maximum budget ($0.05)")
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub errors: Vec<String>,
+}
+
+/// Accept JSON `null` where the CLI leaves a field empty instead of omitting it.
+fn null_as_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 impl ClaudeEnvelope {
