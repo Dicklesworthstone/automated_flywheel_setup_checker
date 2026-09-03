@@ -1015,6 +1015,15 @@ cost $1.27, cleanup verified. Two real-CLI facts fixed along the way: a budget o
 back as exit 1 with an `is_error` envelope (`result: null`) and nothing on stderr, which used to
 surface as an empty error after three blind retries; and one invocation costs about $0.13 before
 it reads anything, so the default `cost_limit_usd` is now 3.0.
+
+Update 2026-09-03 01:45 UTC, live proofs of paths that had only fixture coverage: (1) the checker
+ran as a transient `Type=notify` user unit with `WatchdogSec=60` and sent READY plus watchdog
+pings before exiting with the run's own status; (2) a second full 24.04 baseline (44 of 48, 279 s
+at parallel 3) gave real history: `status --history` shows the Beta pass-probability per
+installer, `status --diff` reports `mcp_agent_mail` recovered after the minisign fix, and the
+markdown report renders both runs. Advisory runs now use `--permission-mode default` (plan mode
+made the CLI waste turns on a plan file it could not write; $1.00 became $0.23 for the same
+question) and session branches carry a random suffix after two sessions in one second collided.
 - Findings from the full baseline worth acting on in ACFS: 12 pins drifted upstream (atuin, bv, caam, casr, cass, ee, grok, mcp_agent_mail, pi, rust, ubs, uv); the ACFS checkout regenerated its checksums later on 2026-09-02, leaving cass and ubs, and the tool's propose mode created branch `afsc/checksum-refresh-20260902-213449` (ubs pin, verified) for the owner to push.
 
 Update 2026-09-02 22:00 UTC: `C14b` is closed (bollard 0.21, reqwest 0.13, similar 3; Docker suite 9/9 and the
