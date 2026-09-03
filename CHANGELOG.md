@@ -33,6 +33,9 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   `scripts/generated/`) and a re-run of the installer before anything is committed; rejected
   sessions leave no worktree or branch behind. Fake `gh` and new fake-claude scenarios cover
   the branch/PR, rejection and push paths.
+- Advisory runs use `--permission-mode default` with the read-only tool list (plan mode made the
+  real CLI spend turns on a plan file it could not write) and open with an advice-only preamble
+  asking for the root cause and exact commands.
 - Claude CLI envelopes are read even on non-zero exits: a `--max-budget-usd` / `--max-turns`
   cap is reported with the CLI's own reason and cost and is never retried (the real CLI
   previously surfaced as an empty error after three blind retries). Default
