@@ -75,7 +75,7 @@ preflight_check() {
     log_debug "jq: OK"
 
     # Check binary exists
-    local binary="$PROJECT_ROOT/target/release/automated_flywheel_setup_checker"
+    local binary="${CHECKER_BINARY:-${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}/release/automated_flywheel_setup_checker}"
     if [[ ! -f "$binary" ]]; then
         log_warn "Binary not found, building..."
         if ! cargo build --release --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>&1; then

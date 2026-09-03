@@ -15,7 +15,7 @@ E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TEST_TMP=""
 TEST_NAME=""
-CHECKER_BINARY="${CHECKER_BINARY:-${E2E_PROJECT_ROOT}/target/release/automated_flywheel_setup_checker}"
+CHECKER_BINARY="${CHECKER_BINARY:-${CARGO_TARGET_DIR:-${E2E_PROJECT_ROOT}/target}/release/automated_flywheel_setup_checker}"
 
 _helper_log() {
     echo -e "\033[90m[HELPER]\033[0m $*"
