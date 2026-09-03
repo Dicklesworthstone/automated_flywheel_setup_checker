@@ -214,11 +214,14 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
     };
     let fail = |reason: String, cost: f64| {
         discard_worktree(req.acfs_repo, &session);
-        RemediationOutcome::Failed { reason, cost_usd: cost }
+        RemediationOutcome::Failed { reason, cost_usd: spent() }
     };
 
     let attempts = req.max_attempts.max(1);
-    let mut cost = 0.0f64;
+    // Cost is what the client accounted for this session's invocations, including ones that
+    // ended in an error envelope (a budget or turn cap still costs money).
+    let spent_before = req.claude.get_total_cost_usd();
+    let spent = || (req.claude.get_total_cost_usd() - spent_before).max(0.0) as f64;
     let mut previous: Option<String> = None;
     let mut summary = String::new();
     let mut verified = false;
@@ -233,25 +236,24 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
         tracing::info!(installer = req.installer, attempt, branch = %session.branch, "Claude edit session");
         let res = match req.claude.execute_edit_session(&prompt, &session.worktree, req.allow_bash).await {
             Ok(r) => r,
-            Err(e) => return fail(format!("claude edit session (attempt {attempt}): {e}"), cost),
+            Err(e) => return fail(format!("claude edit session (attempt {attempt}): {e}"), spent()),
         };
-        cost += res.envelope.as_ref().map(|e| e.total_cost_usd).unwrap_or(res.estimated_cost_usd as f64);
         summary = crate::reporting::redact(&res.claude_output);
 
         let risks = annotate_risks(&summary);
         if !risks.is_empty() {
             let list = risks.iter().map(|r| format!("{} [{}]", r.command, r.risk)).collect::<Vec<_>>().join("; ");
-            return fail(format!("unsafe command in Claude's transcript: {list}"), cost);
+            return fail(format!("unsafe command in Claude's transcript: {list}"), spent());
         }
         let verdict = match check_policy(&session.worktree) {
             Ok(v) => v,
-            Err(e) => return fail(format!("inspecting the worktree: {e:#}"), cost),
+            Err(e) => return fail(format!("inspecting the worktree: {e:#}"), spent()),
         };
         if !verdict.violations.is_empty() {
-            return fail(format!("edit policy violated: {}", verdict.violations.join("; ")), cost);
+            return fail(format!("edit policy violated: {}", verdict.violations.join("; ")), spent());
         }
         if verdict.changed.is_empty() {
-            return fail(format!("Claude made no changes: {}", first_line(&summary)), cost);
+            return fail(format!("Claude made no changes: {}", first_line(&summary)), spent());
         }
         match verify_in_worktree(&req, &session.worktree).await {
             Ok(v) if v.passed => {
@@ -271,7 +273,7 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
                 "installer still fails after {attempts} edit session(s): {}",
                 first_line(previous.as_deref().unwrap_or("no verification result"))
             ),
-            cost,
+            spent(),
         );
     }
 
@@ -281,18 +283,18 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
     );
     let sha = match commit_worktree(&session.worktree, &format!("{title}\n\n{body}")) {
         Ok(s) => s,
-        Err(e) => return fail(format!("commit: {e:#}"), cost),
+        Err(e) => return fail(format!("commit: {e:#}"), spent()),
     };
     if req.apply {
         if let Err(e) = git(&session.worktree, &["push", "-u", "origin", &session.branch]) {
-            return RemediationOutcome::Failed { reason: format!("branch {} committed but push failed: {e:#}", session.branch), cost_usd: cost };
+            return RemediationOutcome::Failed { reason: format!("branch {} committed but push failed: {e:#}", session.branch), cost_usd: spent() };
         }
     }
     let pr_url = if req.create_pr { open_pr(&session.worktree, &session.branch, &title, &body) } else { None };
     if req.apply {
-        RemediationOutcome::Applied { branch: session.branch.clone(), sha, pr_url, cost_usd: cost }
+        RemediationOutcome::Applied { branch: session.branch.clone(), sha, pr_url, cost_usd: spent() }
     } else {
-        RemediationOutcome::Proposed { branch: session.branch.clone(), commit: Some(sha), pr_url, cost_usd: cost }
+        RemediationOutcome::Proposed { branch: session.branch.clone(), commit: Some(sha), pr_url, cost_usd: spent() }
     }
 }
 
