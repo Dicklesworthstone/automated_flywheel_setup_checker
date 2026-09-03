@@ -46,6 +46,11 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
+    # rust-toolchain.toml pins nightly and outranks the action's `rustup default`, so the
+    # matrix toolchain only takes effect through RUSTUP_TOOLCHAIN (verified 2026-09-03: the
+    # crate builds on stable 1.98 with -Dwarnings).
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     timeout-minutes: 25
     strategy:
       fail-fast: false

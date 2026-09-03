@@ -33,6 +33,9 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   `scripts/generated/`) and a re-run of the installer before anything is committed; rejected
   sessions leave no worktree or branch behind. Fake `gh` and new fake-claude scenarios cover
   the branch/PR, rejection and push paths.
+- CI's stable matrix job and the release builds now really use stable: `rust-toolchain.toml`
+  pins nightly and outranks the action's `rustup default`, so the toolchain is selected with
+  `RUSTUP_TOOLCHAIN` (the crate builds on stable 1.98 with `-Dwarnings`).
 - Advisory runs use `--permission-mode default` with the read-only tool list (plan mode made the
   real CLI spend turns on a plan file it could not write) and open with an advice-only preamble
   asking for the root cause and exact commands.
