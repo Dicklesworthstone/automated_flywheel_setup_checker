@@ -1,0 +1,47 @@
+# dsr build authority for automated_flywheel_setup_checker (copy to
+# ~/.config/dsr/repos.d/automated_flywheel_setup_checker.yaml on the release operator's machine;
+# `local_path` is the only host-specific key). Keys shared with .dsr/repos.yaml must stay
+# identical — `dsr repos validate` checks that. No act/GitHub-workflow builds: Linux amd64 is a
+# native build on the Linux host, everything else cross-compiles with cargo-zigbuild or builds
+# natively on the platform host.
+tool_name: automated_flywheel_setup_checker
+repo: Dicklesworthstone/automated_flywheel_setup_checker
+local_path: /data/projects/automated_flywheel_setup_checker
+
+language: rust
+binary_name: automated_flywheel_setup_checker
+build_cmd: cargo build --release
+build_profile: release
+
+targets:
+  - linux/amd64
+  - linux/arm64
+  - darwin/amd64
+  - darwin/arm64
+
+# null = native build on the platform host (no act)
+act_job_map:
+  linux/amd64: null
+  linux/arm64: null
+  darwin/amd64: null
+  darwin/arm64: null
+
+cross_compile:
+  linux/arm64:
+    method: cargo-zigbuild
+    target: aarch64-unknown-linux-gnu
+
+# Portable glibc floor for the Linux binaries (ACFS hosts are Ubuntu 24.04+, but 2.28 costs nothing).
+linux_glibc_floor: "2.28"
+
+checks:
+  - cargo fmt --check
+  - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 rch exec -- cargo clippy --locked --all-targets --all-features -- -D warnings
+  - RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --no-fail-fast
+  - AFSC_DOCKER_TESTS=1 RCH_ENV_ALLOWLIST=AFSC_DOCKER_TESTS RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --test docker -- --test-threads=1
+  - bash scripts/e2e/run_all_tests.sh
+
+artifact_naming: "${name}-${version}-${os}-${arch}"
+archive_format:
+  linux: tar.gz
+  darwin: tar.gz
