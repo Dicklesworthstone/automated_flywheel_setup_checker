@@ -214,7 +214,7 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
     };
     let fail = |reason: String, cost: f64| {
         discard_worktree(req.acfs_repo, &session);
-        RemediationOutcome::Failed { reason, cost_usd: spent() }
+        RemediationOutcome::Failed { reason, cost_usd: cost }
     };
 
     let attempts = req.max_attempts.max(1);
