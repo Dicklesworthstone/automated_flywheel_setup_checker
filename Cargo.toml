@@ -12,7 +12,6 @@ repository = "https://github.com/Dicklesworthstone/automated_flywheel_setup_chec
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
-async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -50,15 +49,10 @@ regex = "1"
 sha2 = "0.10"
 hex = "0.4"
 url = "2"
-walkdir = "2"
 which = "7"
-indicatif = "0.17"
 rand = "0.9"
 
 [dev-dependencies]
-mockall = "0.12"
 wiremock = "0.6"
-tokio-test = "0.4"
 assert_cmd = "2"
-predicates = "3"
 tempfile = "3"

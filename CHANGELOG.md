@@ -51,6 +51,9 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
 ### Changed
 - Dependencies: bollard 0.16 → 0.21 (query-parameter builders, `ContainerCreateBody`), reqwest
   0.12 → 0.13 (`rustls` feature), similar 2 → 3.
+- Dropped six dependencies nothing referenced (indicatif, which pulled the unmaintained
+  `number_prefix`; async-trait; walkdir; and the dev-only mockall, tokio-test, predicates), so
+  `cargo-audit` in the gate runs clean.
 - Default base image is `ubuntu:24.04` everywhere (config default, canonical `afsc-base` tag,
   `docker/Dockerfile.base`, README examples): ACFS targets 24.04+, and on 22.04 installers that
   ship glibc 2.38+ binaries (cass, fsfs) fall back to source builds that blow the timeout.
