@@ -4,9 +4,11 @@ use automated_flywheel_setup_checker::config::{Config, NotificationsConfig};
 use automated_flywheel_setup_checker::reporting::{
     GitHubConfig, NotificationConfig, Notifier, SlackConfig,
 };
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
+/// Serialises the env-var tests; async-aware because the guard is held across `notify(...).await`.
 fn env_lock() -> &'static Mutex<()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     ENV_LOCK.get_or_init(|| Mutex::new(()))
@@ -113,7 +115,7 @@ async fn test_notifier_skips_when_disabled() {
 
 #[tokio::test]
 async fn test_github_skips_missing_token() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let missing_env = format!("MISSING_GITHUB_TOKEN_{}", uuid::Uuid::new_v4().simple());
     std::env::remove_var(&missing_env);
 
@@ -137,7 +139,7 @@ async fn test_github_skips_missing_token() {
 
 #[tokio::test]
 async fn test_slack_skips_missing_webhook() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let missing_env = format!("MISSING_SLACK_WEBHOOK_{}", uuid::Uuid::new_v4().simple());
     std::env::remove_var(&missing_env);
 
