@@ -316,7 +316,9 @@ impl Default for RemediationConfig {
             auto_commit: false,
             create_pr: true,
             max_attempts: 3,
-            cost_limit_usd: 1.0,
+            // One `claude --print` invocation costs ~$0.13 before it reads anything (measured
+            // 2026-09-02 with Claude Code 2.1.259); 1.0 left no room for a real advisory run.
+            cost_limit_usd: 3.0,
             max_turns: 12,
             timeout_seconds: 300,
             allow_bash: false,

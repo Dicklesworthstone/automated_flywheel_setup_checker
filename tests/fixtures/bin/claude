@@ -61,6 +61,11 @@ case "$scenario" in
         echo "API error: rate limit exceeded (429)" >&2
         exit 1
         ;;
+    budget)
+        # Real shape (Claude Code 2.1.259): --max-budget-usd hit → exit 1, empty stderr, this envelope.
+        echo '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"duration_ms":1500,"num_turns":1,"result":null,"session_id":"fake-budget","total_cost_usd":0.128202,"errors":["Reached maximum budget ($0.05)"]}'
+        exit 1
+        ;;
     timeout)
         sleep 30
         envelope "too late" false 0.0

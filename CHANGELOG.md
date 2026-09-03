@@ -27,6 +27,16 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   in-container verification, advisory diff or worktree branch/PR; `check --remediate` attaches
   honest outcomes (`verified`, `advised`, `proposed`, `applied`, `failed`, `skipped`) and invokes
   Claude read-only with safety annotation of suggested commands.
+- Claude `propose` / `apply` modes: an edit session in a git worktree of the ACFS checkout
+  (`acceptEdits`, edit tools limited to the worktree, Bash opt-in via `allow_bash`) gated by a
+  transcript safety scan, an edit policy (`checksums.yaml`, the `KNOWN_INSTALLERS` block,
+  `scripts/generated/`) and a re-run of the installer before anything is committed; rejected
+  sessions leave no worktree or branch behind. Fake `gh` and new fake-claude scenarios cover
+  the branch/PR, rejection and push paths.
+- Claude CLI envelopes are read even on non-zero exits: a `--max-budget-usd` / `--max-turns`
+  cap is reported with the CLI's own reason and cost and is never retried (the real CLI
+  previously surfaced as an empty error after three blind retries). Default
+  `cost_limit_usd` is 3.0: one invocation costs ~$0.13 before it reads anything.
 - `doctor` with fix hints; `--version` with git sha, build date and toolchain.
 - systemd unit templates with an install script, a serve unit and a drift test; nightly canary
   and ACFS PR-gate workflows; Docker suite and real-installer job in CI; bash E2E scripts that

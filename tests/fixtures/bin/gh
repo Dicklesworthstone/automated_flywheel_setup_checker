@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fake `gh` for tests: records argv and cwd, answers `pr create` with a PR URL.
+set -euo pipefail
+if [[ -n "${AFSC_FAKE_GH_LOG:-}" ]]; then
+    {
+        printf 'cwd=%s\n' "$PWD"
+        printf 'argv='
+        printf '%q ' "$@"
+        printf '\n'
+    } >> "$AFSC_FAKE_GH_LOG"
+fi
+if [[ "${1:-}" == "pr" && "${2:-}" == "create" ]]; then
+    echo "https://github.com/example/acfs/pull/${AFSC_FAKE_GH_PR_NUMBER:-42}"
+    exit 0
+fi
+echo "fake gh: unsupported command $*" >&2
+exit 1

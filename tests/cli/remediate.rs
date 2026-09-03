@@ -213,6 +213,27 @@ fn check_remediate_attaches_honest_outcomes() {
 }
 
 #[test]
+fn check_remediate_reports_a_budget_cap_once_without_retrying() {
+    let mut fx = Fixture::new();
+    fx.set_execution(1, 0, false);
+    fx.add_dependency_failure("dep_tool");
+    fx.add_config_toml("[remediation]\nenabled = true\nmode = \"advisory\"\ntimeout_seconds = 20\nmax_attempts = 3\n");
+    let log = fx.root.path().join("claude.log");
+    let out = fx.run_with(
+        &["check", "--local", "--remediate", "--format", "jsonl"],
+        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_CLAUDE_BIN", &fake_claude_bin()), ("AFSC_FAKE_CLAUDE", "budget"), ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap())],
+        &[],
+    );
+    let lines = jsonl_lines(&out);
+    let dep = find_result(&lines, "dep_tool");
+    assert_eq!(dep["remediation"]["outcome"], "failed", "{dep}");
+    let reason = dep["remediation"]["reason"].as_str().unwrap();
+    assert!(reason.contains("Reached maximum budget ($0.05)"), "{reason}");
+    assert!(reason.contains("1 turn(s)"), "{reason}");
+    assert_eq!(std::fs::read_to_string(&log).unwrap().matches("argv=").count(), 1, "a cap is not retried");
+}
+
+#[test]
 fn check_remediate_flags_unsafe_advice_and_reports_claude_errors() {
     let mut fx = Fixture::new();
     fx.set_execution(1, 0, false);

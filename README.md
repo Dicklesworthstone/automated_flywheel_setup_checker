@@ -226,10 +226,25 @@ automated_flywheel_setup_checker check --remediate                    # same ref
 
 Entries that fail verification are excluded from proposals and reported (exit 1). `check --remediate`
 records an honest outcome on every failing result (`verified`, `advised`, `proposed`, `applied`,
-`failed`, `skipped`): the word "succeeded" only ever appears for a verified or applied fix. Claude is
-invoked read-only (`--permission-mode plan --tools Read,Grep,Glob`, budget and turn limits from
-`[remediation]`); any command it suggests is run through the safety checker and flagged, never
-executed.
+`failed`, `skipped`): the word "succeeded" only ever appears for a verified or applied fix.
+
+For failures that are not checksum drift, `[remediation].mode` decides how far Claude may go:
+
+| mode | what Claude gets | what lands |
+|---|---|---|
+| `advisory` | read-only (`--permission-mode plan --tools Read,Grep,Glob`) | advice on the result; commands it suggests are safety-flagged, never run |
+| `propose` | an edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits --tools Read,Grep,Glob,Edit,Write --add-dir <worktree>`) | a commit on `afsc/remediate-<installer>-<date>` plus a PR when `create_pr = true` |
+| `apply` | same as propose | the branch is also pushed (never `main`) |
+
+An edit session only lands if every gate passes, otherwise the worktree and branch are discarded
+and the result says `failed` with the reason: (1) no High/Critical command in Claude's summary,
+(2) every changed path is `checksums.yaml`, the `KNOWN_INSTALLERS` block of
+`scripts/lib/security.sh` or something under `scripts/generated/`, (3) the installer passes again
+when re-run through the executor against the worktree's `checksums.yaml`. Up to `max_attempts`
+sessions, each told what still fails; costs are summed from the CLI envelopes. Bash is off unless
+`allow_bash = true` (needed for `bun run generate`). Budget note: one `claude --print` invocation
+costs about $0.13 before it reads anything, so `cost_limit_usd` below ~1 cannot finish a run; a
+budget or turn cap is reported once (`failed: Reached maximum budget …`) and never retried.
 
 Committed baselines of the whole ACFS catalog running in the prepared image live under
 `docs/baseline/` (`scripts/baseline_run.sh` regenerates one: per-installer verdicts, versions,
@@ -304,9 +319,13 @@ fail_fast = false       # Stop on first failure?
 
 [remediation]
 enabled = false          # Enable Claude auto-remediation
-auto_commit = false      # Auto-commit suggested fixes
-create_pr = true         # Create PRs for fixes
-max_attempts = 3         # Max remediation attempts per failure
+mode = "advisory"        # advisory | propose | apply (see "remediate checksums" above)
+create_pr = true         # Open a PR for propose/apply branches (needs gh)
+max_attempts = 3         # Edit sessions per failure (propose/apply)
+cost_limit_usd = 3.0     # Per-run Claude spend cap; one invocation costs ~$0.13 before any work
+max_turns = 12           # Agent turns per invocation
+timeout_seconds = 300    # Per invocation
+allow_bash = false       # Let edit sessions run shell commands (bun run generate)
 
 [notifications]
 enabled = false
