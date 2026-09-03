@@ -71,11 +71,13 @@ create_pr = true
 # Maximum remediation attempts per failure
 max_attempts = 3
 # Per-run Claude spend cap in USD
-cost_limit_usd = 1.0
+cost_limit_usd = 3.0
 # Maximum agent turns per Claude invocation
 max_turns = 12
 # Timeout per Claude invocation in seconds
 timeout_seconds = 300
+# Let propose/apply edit sessions run shell commands (needed for `bun run generate`)
+allow_bash = false
 
 [notifications]
 # Enable failure notifications
