@@ -84,7 +84,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// `git worktree add -b afsc/remediate-<installer>-<date> <worktrees_dir>/… HEAD`.
 pub fn open_worktree(acfs_repo: &Path, worktrees_dir: &Path, installer: &str) -> Result<EditSession> {
     git(acfs_repo, &["rev-parse", "--git-dir"]).context("acfs_repo is not a git repository")?;
-    let branch = format!("afsc/remediate-{installer}-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    // Seconds alone collide when the same installer is remediated twice in quick succession
+    // (two runs, or a retry): add a short random suffix so `worktree add -b` never fails on it.
+    let suffix: String = uuid::Uuid::new_v4().simple().to_string().chars().take(6).collect();
+    let branch = format!("afsc/remediate-{installer}-{}-{suffix}", Utc::now().format("%Y%m%d-%H%M%S"));
     let worktree = worktrees_dir.join(branch.replace('/', "-"));
     std::fs::create_dir_all(worktrees_dir)?;
     git(acfs_repo, &["worktree", "add", "-b", &branch, &worktree.to_string_lossy(), "HEAD"])?;
