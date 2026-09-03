@@ -33,9 +33,9 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   `scripts/generated/`) and a re-run of the installer before anything is committed; rejected
   sessions leave no worktree or branch behind. Fake `gh` and new fake-claude scenarios cover
   the branch/PR, rejection and push paths.
-- CI's stable matrix job and the release builds now really use stable: `rust-toolchain.toml`
-  pins nightly and outranks the action's `rustup default`, so the toolchain is selected with
-  `RUSTUP_TOOLCHAIN` (the crate builds on stable 1.98 with `-Dwarnings`).
+- Quality gates, builds and releases run through dsr; GitHub Actions is not used and is
+  disabled on the repository (the workflow files under `.github/` are inert). The crate builds
+  on stable 1.98 with `-Dwarnings`, which is what dsr releases use.
 - Advisory runs use `--permission-mode default` with the read-only tool list (plan mode made the
   real CLI spend turns on a plan file it could not write) and open with an advice-only preamble
   asking for the root cause and exact commands.
@@ -44,9 +44,9 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
   previously surfaced as an empty error after three blind retries). Default
   `cost_limit_usd` is 3.0: one invocation costs ~$0.13 before it reads anything.
 - `doctor` with fix hints; `--version` with git sha, build date and toolchain.
-- systemd unit templates with an install script, a serve unit and a drift test; nightly canary
-  and ACFS PR-gate workflows; Docker suite and real-installer job in CI; bash E2E scripts that
-  drive the binary.
+- systemd unit templates with an install script, a serve unit and a drift test; a dsr quality
+  gate recipe (`.dsr/repos.yaml`: fmt, clippy, tests, Docker suite, bash E2E) and bash E2E
+  scripts that drive the binary.
 
 ### Changed
 - Dependencies: bollard 0.16 → 0.21 (query-parameter builders, `ContainerCreateBody`), reqwest

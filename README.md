@@ -2,8 +2,6 @@
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/automated_flywheel_setup_checker/ci.yml?style=for-the-badge&label=CI)](https://github.com/Dicklesworthstone/automated_flywheel_setup_checker/actions/workflows/ci.yml)
-[![E2E Tests](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/automated_flywheel_setup_checker/e2e-tests.yml?style=for-the-badge&label=E2E)](https://github.com/Dicklesworthstone/automated_flywheel_setup_checker/actions/workflows/e2e-tests.yml)
 ![Version](https://img.shields.io/badge/Version-0.1.0-bd93f9?style=for-the-badge)
 ![Language](https://img.shields.io/badge/Language-Rust-f74c00?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
@@ -91,7 +89,7 @@ automated_flywheel_setup_checker status --format prometheus
 - Running as a scheduled check (via systemd timer) to catch regressions
 
 **When this tool might not be ideal:**
-- Testing the full ACFS install experience end-to-end (use the [installer canary workflow](https://github.com/Dicklesworthstone/agentic_coding_flywheel_setup/actions/workflows/installer-canary-strict.yml) for that)
+- Testing the full ACFS install experience end-to-end (use ACFS's own installer canary, run through dsr, for that)
 - Verifying post-install configuration (this tests downloads + execution, not full system setup)
 
 ---
@@ -406,7 +404,7 @@ This tool is a **companion testing layer** for [Agentic Coding Flywheel Setup (A
 | Layer | Tool | What It Tests |
 |-------|------|---------------|
 | **Unit** | This tool (`check`) | Individual installers in Docker isolation |
-| **Integration** | ACFS canary workflows | Full install flow in Ubuntu VMs |
+| **Integration** | ACFS canaries (dsr) | Full install flow in Ubuntu VMs |
 | **Production** | ACFS `acfs doctor` | Health of a live ACFS installation |
 
 This tool reads ACFS's `checksums.yaml` as its source of truth for what installers exist and what their expected checksums are.
@@ -507,9 +505,9 @@ locks from dead processes are reclaimed automatically.
 
 ## FAQ
 
-### How is this different from the ACFS canary workflows?
+### How is this different from the ACFS canaries?
 
-The canary workflows in ACFS test the **full install experience** end-to-end in a VM. This tool tests **individual installers** in lightweight Docker containers, giving faster feedback and better error isolation.
+The ACFS canaries test the **full install experience** end-to-end in a VM. This tool tests **individual installers** in lightweight Docker containers, giving faster feedback and better error isolation.
 
 ### Does it actually run Docker containers?
 
@@ -524,9 +522,21 @@ lets Claude edit inside a git worktree of the ACFS checkout and only commits a b
 installer passes again; `apply` also pushes that branch. Costs come from the CLI's own envelope
 and are capped per run. See "remediate checksums" above for the gates and the budget note.
 
-### Can I run this in CI?
+### How are quality gates and releases run?
 
-Yes. The E2E workflow already demonstrates this. You need a runner with Docker access. See `.github/workflows/e2e-tests.yml`.
+Through [dsr](https://github.com/Dicklesworthstone/doodlestein_self_releaser), not GitHub Actions
+(Actions is disabled on this repository). The gate recipe ships with the source in
+`.dsr/repos.yaml`: `cargo fmt --check`, clippy with `-D warnings`, the full test suite, the Docker
+suite and the bash E2E scripts, in that order.
+
+```bash
+DSR_REPOS_FILE=.dsr/repos.yaml dsr quality --tool automated_flywheel_setup_checker
+dsr build automated_flywheel_setup_checker --version X.Y.Z    # on the release operator's machine
+dsr release automated_flywheel_setup_checker X.Y.Z            # artifacts, checksums, minisign signature
+```
+
+Scheduled runs are a systemd timer (`scripts/install-systemd.sh`), and notifications come from
+`notify` after each run.
 
 ### Why not just use `shellcheck` on the installer scripts?
 
@@ -545,9 +555,9 @@ scripts/e2e/run_all_tests.sh                 # bash E2E scripts
 ```
 
 Local development pins nightly (`rust-toolchain.toml`, parallel front-end flag in
-`.cargo/config.toml`); the code itself needs no nightly features — CI also tests on stable, and
-`.github/workflows/release.yml` builds the tagged releases (`vX.Y.Z`) on stable for
-x86_64/aarch64 Linux and macOS with SHA-256 sums and a `cargo install --git` smoke test.
+`.cargo/config.toml`); the code itself needs no nightly features (it builds on stable 1.98 with
+`-Dwarnings`), and dsr cuts the tagged releases (`vX.Y.Z`) on stable for x86_64/aarch64 Linux and
+macOS with SHA-256 sums and a signature (targets listed in `.dsr/repos.yaml`).
 
 Remediation tests use the checked-in fake `claude` (`tests/fixtures/bin/claude`, scenarios via
 `AFSC_FAKE_CLAUDE=success|unsafe|error|rate_limit|timeout`). Its envelope shape was pinned from

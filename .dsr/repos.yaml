@@ -1,0 +1,42 @@
+# Portable dsr (Doodlestein Self-Releaser) registry entry for automated_flywheel_setup_checker.
+#
+# dsr is the only quality/build/release authority for this repository: GitHub Actions is not
+# used (the workflows under .github/ are inert; Actions is disabled on the repo). `dsr quality`
+# reads its checks from the registry only, so this file ships the recipe with the source:
+#
+#   # one-off, no registry merge:
+#   DSR_REPOS_FILE=.dsr/repos.yaml dsr quality --tool automated_flywheel_setup_checker
+#
+#   # or merge it into the host registry once (yq >= 4):
+#   yq -i '.tools.automated_flywheel_setup_checker = load(".dsr/repos.yaml").tools.automated_flywheel_setup_checker' \
+#     ~/.config/dsr/repos.yaml
+#
+# Builds/releases additionally need ~/.config/dsr/repos.d/automated_flywheel_setup_checker.yaml
+# on the release operator's machine (dsr README "Config precedence"); keys that overlap must be
+# identical to the ones below.
+#
+# Check list = what the retired CI did, in the order that fails fastest. Cargo runs through rch
+# so a shared host never compiles locally; RCH_REQUIRE_REMOTE=1 makes rch fail closed instead
+# of silently building on the host. The Docker suite needs a worker with a Docker daemon
+# (AFSC_DOCKER_TESTS must be forwarded via RCH_ENV_ALLOWLIST; the suite self-skips without it).
+# The bash E2E scripts drive the release binary and need Docker on the host running them.
+
+schema_version: "1.0.0"
+
+tools:
+  automated_flywheel_setup_checker:
+    repo: Dicklesworthstone/automated_flywheel_setup_checker
+    local_path: /data/projects/automated_flywheel_setup_checker
+    language: rust
+    binary_name: automated_flywheel_setup_checker
+    targets:
+      - linux/amd64
+      - linux/arm64
+      - darwin/amd64
+      - darwin/arm64
+    checks:
+      - cargo fmt --check
+      - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 rch exec -- cargo clippy --locked --all-targets --all-features -- -D warnings
+      - RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --no-fail-fast
+      - AFSC_DOCKER_TESTS=1 RCH_ENV_ALLOWLIST=AFSC_DOCKER_TESTS RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --test docker -- --test-threads=1
+      - bash scripts/e2e/run_all_tests.sh
