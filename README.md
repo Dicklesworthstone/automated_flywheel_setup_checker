@@ -16,7 +16,7 @@
 
 ## TL;DR
 
-**The Problem:** ACFS ships 41 installer scripts that download, verify, and configure tools on fresh Ubuntu VPS instances. Any upstream URL change, checksum drift, or dependency issue silently breaks the installer for all users. Manual testing across all tools is tedious and error-prone.
+**The Problem:** ACFS ships 48 installer scripts (as of September 2026) that download, verify, and configure tools on fresh Ubuntu VPS instances. Any upstream URL change, checksum drift, or dependency issue silently breaks the installer for all users. Manual testing across all tools is tedious and error-prone.
 
 **The Solution:** This tool runs each installer inside an isolated Docker container, classifies any failures automatically, retries transient errors with exponential backoff, can optionally ask Claude to suggest fixes, and can expose the latest persisted health and metrics snapshot for monitoring.
 
@@ -40,7 +40,7 @@
 ## Quick Example
 
 ```bash
-# List all 41 ACFS installers
+# List all ACFS installers (48 today)
 automated_flywheel_setup_checker list
 
 # Validate checksums.yaml format, URL reachability, and pinned hashes
