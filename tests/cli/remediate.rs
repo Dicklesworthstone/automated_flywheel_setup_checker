@@ -212,6 +212,196 @@ fn check_remediate_attaches_honest_outcomes() {
     assert!(!text.contains("Remediation succeeded"), "{text}");
 }
 
+/// Turn the fixture ACFS dir into a git repo on `main` (the propose path needs one).
+fn git_init_fixture(fx: &Fixture) -> impl Fn(&[&str]) -> String + '_ {
+    let git = move |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(&fx.acfs).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    git
+}
+
+/// PATH with the fixture bin dir first so the fake `gh` answers `pr create`.
+fn path_with_fixtures() -> String {
+    format!("{}:{}", fake_claude_dir().display(), std::env::var("PATH").unwrap_or_default())
+}
+
+/// A checksums.yaml that repoints `dep_tool` at a passing script (what "Claude" will write).
+fn fixed_checksums(fx: &Fixture) -> PathBuf {
+    let fixed_script = fx.scripts_dir().join("dep_tool_fixed.sh");
+    std::fs::write(&fixed_script, "#!/bin/bash\necho fixed\nexit 0\n").unwrap();
+    let yaml = format!(
+        "# synthetic checksums.yaml (current ACFS format)\ninstallers:\n  dep_tool:\n    url: \"file://{}\"\n    sha256: \"{}\"\n\n",
+        fixed_script.display(),
+        sha256_file(&fixed_script)
+    );
+    let path = fx.root.path().join("fixed-checksums.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    path
+}
+
+#[test]
+fn check_remediate_propose_lands_verified_edits_on_a_branch_with_a_pr() {
+    let mut fx = Fixture::new();
+    fx.set_execution(1, 0, false);
+    fx.add_dependency_failure("dep_tool");
+    fx.add_config_toml("[remediation]\nenabled = true\nmode = \"propose\"\ncreate_pr = true\ncost_limit_usd = 5.0\ntimeout_seconds = 20\nmax_attempts = 2\nmax_turns = 4\n");
+    let git = git_init_fixture(&fx);
+    let fixed_yaml = fixed_checksums(&fx);
+    let claude_log = fx.root.path().join("claude.log");
+    let gh_log = fx.root.path().join("gh.log");
+    let path = path_with_fixtures();
+
+    let out = fx.run_with(
+        &["check", "--local", "--remediate", "--format", "jsonl"],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE", "edits_in_policy"),
+            ("AFSC_FAKE_CLAUDE_EDIT_FROM", fixed_yaml.to_str().unwrap()),
+            ("AFSC_FAKE_CLAUDE_LOG", claude_log.to_str().unwrap()),
+            ("AFSC_FAKE_GH_LOG", gh_log.to_str().unwrap()),
+            ("PATH", &path),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(1), "a proposal does not turn the run green: {}", stderr(&out));
+    let lines = jsonl_lines(&out);
+    let dep = find_result(&lines, "dep_tool");
+    assert_eq!(dep["remediation"]["outcome"], "proposed", "{dep}");
+    let branch = dep["remediation"]["branch"].as_str().unwrap().to_string();
+    assert!(branch.starts_with("afsc/remediate-dep_tool-"), "{branch}");
+    assert_eq!(dep["remediation"]["pr_url"], "https://github.com/example/acfs/pull/42");
+    assert_eq!(dep["remediation"]["cost_usd"], 0.30, "cost from the envelope");
+    let commit = dep["remediation"]["commit"].as_str().unwrap().to_string();
+    // The branch carries exactly the in-policy edit; main and the checkout are untouched.
+    assert_eq!(git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(git(&["rev-parse", &branch]), commit);
+    assert_eq!(git(&["diff", "--name-only", "main", &branch]), "checksums.yaml");
+    assert!(git(&["show", &format!("{branch}:checksums.yaml")]).contains("dep_tool_fixed.sh"));
+    assert!(std::fs::read_to_string(fx.acfs.join("checksums.yaml")).unwrap().contains("dep_tool.sh"));
+    let msg = git(&["log", "-1", "--format=%B", &branch]);
+    assert!(msg.starts_with("fix(dep_tool): remediate installer failure (dependency)"), "{msg}");
+    assert!(msg.contains("re-run against this branch and passed"), "{msg}");
+    // Invocation shape: edits accepted only inside the worktree, no Bash, no permission skipping.
+    let invocations = std::fs::read_to_string(&claude_log).unwrap().replace('\\', "");
+    assert!(invocations.contains("--permission-mode acceptEdits"), "{invocations}");
+    assert!(invocations.contains("--tools Read,Grep,Glob,Edit,Write "), "{invocations}");
+    assert!(!invocations.contains("Bash"), "{invocations}");
+    assert!(invocations.contains("--add-dir "), "{invocations}");
+    assert!(!invocations.contains("dangerously"), "{invocations}");
+    assert!(invocations.contains("cwd=") && invocations.contains("worktrees"), "{invocations}");
+    // PR opened from the worktree on the session branch with a rendered body.
+    let gh = std::fs::read_to_string(&gh_log).unwrap().replace('\\', "");
+    assert!(gh.contains(&format!("pr create --head {branch}")), "{gh}");
+    assert!(gh.contains("--title fix(dep_tool):") && gh.contains("--body"), "{gh}");
+    // Human wording says proposed, never succeeded.
+    let human = fx.run_with(
+        &["check", "--local", "--remediate"],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE", "edits_in_policy"),
+            ("AFSC_FAKE_CLAUDE_EDIT_FROM", fixed_yaml.to_str().unwrap()),
+            ("PATH", &path),
+        ],
+        &[],
+    );
+    let text = stdout(&human);
+    assert!(text.contains("proposed on branch afsc/remediate-dep_tool-"), "{text}");
+    assert!(!text.contains("succeeded"), "{text}");
+}
+
+#[test]
+fn check_remediate_propose_rejects_policy_violations_unsafe_transcripts_and_unverified_edits() {
+    let mut fx = Fixture::new();
+    fx.set_execution(1, 0, false);
+    fx.add_dependency_failure("dep_tool");
+    fx.add_config_toml("[remediation]\nenabled = true\nmode = \"propose\"\ncreate_pr = false\ntimeout_seconds = 20\nmax_attempts = 2\n");
+    let git = git_init_fixture(&fx);
+    let bin = fake_claude_bin();
+    let run = |scenario: &str, extra: &[(&str, &str)]| -> serde_json::Value {
+        let mut set: Vec<(&str, &str)> = vec![("AFSC_ALLOW_LOCAL", "1"), ("AFSC_FAKE_CLAUDE", scenario), ("AFSC_CLAUDE_BIN", &bin)];
+        set.extend_from_slice(extra);
+        let out = fx.run_with(&["check", "--local", "--remediate", "--format", "jsonl"], &set, &[]);
+        let lines = jsonl_lines(&out);
+        find_result(&lines, "dep_tool")["remediation"].clone()
+    };
+    let clean = |what: &str| {
+        // No worktree and no session branch survive a rejected session.
+        let wt = git(&["worktree", "list", "--porcelain"]);
+        assert_eq!(wt.matches("worktree ").count(), 1, "{what}: {wt}");
+        let branches = git(&["branch", "--list", "afsc/remediate-*"]);
+        assert!(branches.is_empty(), "{what}: {branches}");
+    };
+
+    // Out-of-policy edit (README.md) → rejected, nothing committed.
+    let r = run("edits_out_of_policy", &[]);
+    assert_eq!(r["outcome"], "failed", "{r}");
+    let reason = r["reason"].as_str().unwrap();
+    assert!(reason.contains("policy") && reason.contains("README.md"), "{reason}");
+    assert_eq!(r["cost_usd"], 0.30, "cost is still reported");
+    clean("out of policy");
+
+    // Unsafe command in the transcript → rejected even though the edit was in policy.
+    let r = run("edits_unsafe_transcript", &[]);
+    assert_eq!(r["outcome"], "failed", "{r}");
+    assert!(r["reason"].as_str().unwrap().contains("unsafe command"), "{r}");
+    clean("unsafe transcript");
+
+    // In-policy placeholder edit that removes the installer → verification cannot pass →
+    // rejected after max_attempts sessions.
+    let log = fx.root.path().join("claude.log");
+    let r = run("edits_in_policy", &[("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap())]);
+    assert_eq!(r["outcome"], "failed", "{r}");
+    assert!(r["reason"].as_str().unwrap().contains("still fails after 2 edit session(s)"), "{r}");
+    assert_eq!(r["cost_usd"], 0.60, "both sessions' cost is summed");
+    let sessions = std::fs::read_to_string(&log).unwrap().matches("argv=").count();
+    assert_eq!(sessions, 2, "one session per attempt");
+    clean("unverified");
+    assert_eq!(git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+}
+
+#[test]
+fn check_remediate_apply_pushes_the_verified_branch() {
+    let mut fx = Fixture::new();
+    fx.set_execution(1, 0, false);
+    fx.add_dependency_failure("dep_tool");
+    fx.add_config_toml("[remediation]\nenabled = true\nmode = \"apply\"\ncreate_pr = false\ntimeout_seconds = 20\nmax_attempts = 1\n");
+    let git = git_init_fixture(&fx);
+    let bare = fx.root.path().join("origin.git");
+    let init = std::process::Command::new("git").args(["init", "-q", "--bare", bare.to_str().unwrap()]).output().unwrap();
+    assert!(init.status.success());
+    git(&["remote", "add", "origin", bare.to_str().unwrap()]);
+    let fixed_yaml = fixed_checksums(&fx);
+    let env = [
+        ("AFSC_ALLOW_LOCAL", "1"),
+        ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+        ("AFSC_FAKE_CLAUDE", "edits_in_policy"),
+        ("AFSC_FAKE_CLAUDE_EDIT_FROM", fixed_yaml.to_str().unwrap()),
+    ];
+    let out = fx.run_with(&["check", "--local", "--remediate", "--format", "jsonl"], &env, &[]);
+    let lines = jsonl_lines(&out);
+    let dep = find_result(&lines, "dep_tool");
+    assert_eq!(dep["remediation"]["outcome"], "applied", "{dep}");
+    let branch = dep["remediation"]["branch"].as_str().unwrap().to_string();
+    let sha = dep["remediation"]["sha"].as_str().unwrap().to_string();
+    assert!(dep["remediation"]["pr_url"].is_null());
+    // Pushed to origin on the session branch only; origin has no main.
+    let remote = std::process::Command::new("git").arg("-C").arg(&bare).args(["branch", "--list"]).output().unwrap();
+    let remote_branches = String::from_utf8_lossy(&remote.stdout).to_string();
+    assert!(remote_branches.contains(&branch), "{remote_branches}");
+    assert!(!remote_branches.contains("main"), "{remote_branches}");
+    let remote_sha = std::process::Command::new("git").arg("-C").arg(&bare).args(["rev-parse", &branch]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&remote_sha.stdout).trim(), sha);
+    let text = stdout(&fx.run_with(&["check", "--local", "--remediate"], &env, &[]));
+    assert!(text.contains("succeeded: pushed afsc/remediate-dep_tool-"), "{text}");
+}
+
 #[test]
 fn check_remediate_reports_a_budget_cap_once_without_retrying() {
     let mut fx = Fixture::new();
