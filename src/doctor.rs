@@ -46,7 +46,13 @@ pub struct Check {
 
 impl Check {
     fn new(name: &str, status: Status, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), status, detail: detail.into(), hint: None, data: serde_json::Value::Null }
+        Self {
+            name: name.into(),
+            status,
+            detail: detail.into(),
+            hint: None,
+            data: serde_json::Value::Null,
+        }
     }
     fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
@@ -122,7 +128,8 @@ fn gib(bytes: u64) -> String {
 fn tool_version(bin: &str) -> Option<String> {
     let path = which::which(bin).ok()?;
     let out = std::process::Command::new(&path).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(if out.stdout.is_empty() { &out.stderr } else { &out.stdout });
+    let text =
+        String::from_utf8_lossy(if out.stdout.is_empty() { &out.stderr } else { &out.stdout });
     Some(text.lines().next().unwrap_or("").trim().to_string())
 }
 
@@ -143,13 +150,21 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
     // Config
     if opts.unknown_keys.is_empty() {
         checks.push(
-            Check::new("config", Status::Pass, opts.config_path.clone().unwrap_or_else(|| "built-in defaults".into()))
-                .data(serde_json::json!({ "path": opts.config_path })),
+            Check::new(
+                "config",
+                Status::Pass,
+                opts.config_path.clone().unwrap_or_else(|| "built-in defaults".into()),
+            )
+            .data(serde_json::json!({ "path": opts.config_path })),
         );
     } else {
         checks.push(
-            Check::new("config", Status::Warn, format!("unknown keys ignored: {}", opts.unknown_keys.join(", ")))
-                .hint("Compare with `config default` and remove or rename the keys"),
+            Check::new(
+                "config",
+                Status::Warn,
+                format!("unknown keys ignored: {}", opts.unknown_keys.join(", ")),
+            )
+            .hint("Compare with `config default` and remove or rename the keys"),
         );
     }
 
@@ -246,7 +261,9 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
                         Ok(scan) => {
                             let cc = cross_check(&checksums, &scan.known_installers);
                             let drift = profile_drift(&scan.call_sites);
-                            let problems = cc.missing_from_checksums.len() + cc.url_mismatches.len() + drift.len();
+                            let problems = cc.missing_from_checksums.len()
+                                + cc.url_mismatches.len()
+                                + drift.len();
                             let detail = format!(
                                 "{} KNOWN_INSTALLERS; {} missing from checksums, {} stale, {} URL mismatch(es), {} profile drift(s)",
                                 scan.known_installers.len(),
@@ -255,21 +272,37 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
                                 cc.url_mismatches.len(),
                                 drift.len()
                             );
-                            let mut c = Check::new("acfs_cross_check", if problems == 0 { Status::Pass } else { Status::Warn }, detail);
+                            let mut c = Check::new(
+                                "acfs_cross_check",
+                                if problems == 0 { Status::Pass } else { Status::Warn },
+                                detail,
+                            );
                             if problems > 0 {
                                 c = c.hint("Run `validate --profile` for details; update checksums.yaml or the built-in profile table");
                             }
                             checks.push(c);
                         }
-                        Err(e) => checks.push(Check::new("acfs_cross_check", Status::Warn, format!("cannot scan repo: {e:#}"))),
+                        Err(e) => checks.push(Check::new(
+                            "acfs_cross_check",
+                            Status::Warn,
+                            format!("cannot scan repo: {e:#}"),
+                        )),
                     }
                 } else {
-                    checks.push(Check::new("acfs_cross_check", Status::Skip, "not a full ACFS checkout (no scripts/lib/security.sh)"));
+                    checks.push(Check::new(
+                        "acfs_cross_check",
+                        Status::Skip,
+                        "not a full ACFS checkout (no scripts/lib/security.sh)",
+                    ));
                 }
             }
             Err(e) => checks.push(
-                Check::new("acfs_repo", Status::Fail, format!("{} does not parse: {e}", checksums_path.display()))
-                    .hint("Run `validate` for the format errors"),
+                Check::new(
+                    "acfs_repo",
+                    Status::Fail,
+                    format!("{} does not parse: {e}", checksums_path.display()),
+                )
+                .hint("Run `validate` for the format errors"),
             ),
         }
     }
@@ -277,13 +310,21 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
     // Data / log dirs and disk
     let data_dir = config.general.data_dir_path();
     match writable(&data_dir) {
-        Ok(()) => checks.push(Check::new("data_dir", Status::Pass, data_dir.display().to_string()).data(serde_json::json!({ "path": data_dir }))),
-        Err(e) => checks.push(Check::new("data_dir", Status::Fail, e).hint("Fix permissions or set [general].data_dir / --data-dir")),
+        Ok(()) => checks.push(
+            Check::new("data_dir", Status::Pass, data_dir.display().to_string())
+                .data(serde_json::json!({ "path": data_dir })),
+        ),
+        Err(e) => checks.push(
+            Check::new("data_dir", Status::Fail, e)
+                .hint("Fix permissions or set [general].data_dir / --data-dir"),
+        ),
     }
     let log_dir = config.general.log_dir_path();
     match writable(&log_dir) {
         Ok(()) => checks.push(Check::new("log_dir", Status::Pass, log_dir.display().to_string())),
-        Err(e) => checks.push(Check::new("log_dir", Status::Fail, e).hint("Fix permissions or set [general].log_dir")),
+        Err(e) => checks.push(
+            Check::new("log_dir", Status::Fail, e).hint("Fix permissions or set [general].log_dir"),
+        ),
     }
     let mut disk_targets = vec![("data dir", data_dir.clone())];
     if let Some(root) = docker_root.as_deref() {
@@ -306,10 +347,19 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
     // External tools
     let needs_claude = config.remediation.effective_mode() != RemediationMode::Off;
     match (needs_claude, tool_version("claude")) {
-        (true, Some(v)) => checks.push(Check::new("claude", Status::Pass, v.clone()).data(serde_json::json!({ "version": v }))),
-        (true, None) => checks.push(Check::new("claude", Status::Fail, "claude CLI not found but remediation is enabled").hint("Install Claude Code or set [remediation].mode = \"off\"")),
-        (false, Some(v)) => checks.push(Check::new("claude", Status::Pass, format!("{v} (remediation off)"))),
-        (false, None) => checks.push(Check::new("claude", Status::Skip, "not installed (remediation off)")),
+        (true, Some(v)) => checks.push(
+            Check::new("claude", Status::Pass, v.clone()).data(serde_json::json!({ "version": v })),
+        ),
+        (true, None) => checks.push(
+            Check::new("claude", Status::Fail, "claude CLI not found but remediation is enabled")
+                .hint("Install Claude Code or set [remediation].mode = \"off\""),
+        ),
+        (false, Some(v)) => {
+            checks.push(Check::new("claude", Status::Pass, format!("{v} (remediation off)")))
+        }
+        (false, None) => {
+            checks.push(Check::new("claude", Status::Skip, "not installed (remediation off)"))
+        }
     }
     let n = &config.notifications;
     let needs_gh = n.enabled && !n.github_issue_repo.trim().is_empty();
@@ -328,11 +378,19 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
             }
         }
         if missing.is_empty() {
-            checks.push(Check::new("notifications", Status::Pass, format!("enabled (mode {:?})", n.mode)));
+            checks.push(Check::new(
+                "notifications",
+                Status::Pass,
+                format!("enabled (mode {:?})", n.mode),
+            ));
         } else {
             checks.push(
-                Check::new("notifications", Status::Warn, format!("env var(s) not set: {}", missing.join(", ")))
-                    .hint("Export them for the service (systemd: Environment= or an EnvironmentFile)"),
+                Check::new(
+                    "notifications",
+                    Status::Warn,
+                    format!("env var(s) not set: {}", missing.join(", ")),
+                )
+                .hint("Export them for the service (systemd: Environment= or an EnvironmentFile)"),
             );
         }
     } else {
@@ -344,7 +402,10 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
     if unit.exists() {
         checks.push(Check::new("systemd", Status::Pass, format!("{} installed", unit.display())));
     } else {
-        checks.push(Check::new("systemd", Status::Skip, "units not installed").hint("scripts/install-systemd.sh (see README: Deployment)"));
+        checks.push(
+            Check::new("systemd", Status::Skip, "units not installed")
+                .hint("scripts/install-systemd.sh (see README: Deployment)"),
+        );
     }
 
     // Runs and validation
@@ -364,9 +425,14 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
                 }
                 checks.push(c);
             }
-            None => checks.push(Check::new("last_run", Status::Warn, "no runs recorded").hint("Run: automated_flywheel_setup_checker check")),
+            None => checks.push(
+                Check::new("last_run", Status::Warn, "no runs recorded")
+                    .hint("Run: automated_flywheel_setup_checker check"),
+            ),
         },
-        Err(e) => checks.push(Check::new("last_run", Status::Warn, format!("cannot read results: {e:#}"))),
+        Err(e) => {
+            checks.push(Check::new("last_run", Status::Warn, format!("cannot read results: {e:#}")))
+        }
     }
     match ValidationReport::load(&data_dir) {
         Some(v) => {
@@ -374,10 +440,21 @@ pub async fn run_doctor(config: &Config, opts: &DoctorOptions) -> DoctorReport {
             checks.push(Check::new(
                 "validate",
                 if drift == 0 { Status::Pass } else { Status::Warn },
-                format!("last check-hashes {}: {} matched, {} mismatched, {} unreachable", v.checked_at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default(), v.matched, v.mismatched.len(), v.unreachable.len()),
+                format!(
+                    "last check-hashes {}: {} matched, {} mismatched, {} unreachable",
+                    v.checked_at
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default(),
+                    v.matched,
+                    v.mismatched.len(),
+                    v.unreachable.len()
+                ),
             ));
         }
-        None => checks.push(Check::new("validate", Status::Skip, "no hash check recorded").hint("Run: validate --check-hashes")),
+        None => checks.push(
+            Check::new("validate", Status::Skip, "no hash check recorded")
+                .hint("Run: validate --check-hashes"),
+        ),
     }
 
     DoctorReport {
@@ -446,7 +523,11 @@ mod tests {
         let mut config = Config::default();
         config.general.acfs_repo = dir.path().join("missing");
         config.general.data_dir = dir.path().join("data").to_string_lossy().to_string();
-        let opts = DoctorOptions { skip_docker: true, unknown_keys: vec!["docker.imgae".into()], config_path: None };
+        let opts = DoctorOptions {
+            skip_docker: true,
+            unknown_keys: vec!["docker.imgae".into()],
+            config_path: None,
+        };
         let report = run_doctor(&config, &opts).await;
         let by = |n: &str| report.checks.iter().find(|c| c.name == n).unwrap();
         assert_eq!(by("docker").status, Status::Skip);

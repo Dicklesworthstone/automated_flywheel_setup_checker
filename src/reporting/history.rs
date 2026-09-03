@@ -200,12 +200,8 @@ fn category_of(entry: &ResultEntry) -> Option<String> {
 
 /// Compare two runs installer by installer.
 pub fn diff_runs(from: &LoadedRun, to: &LoadedRun) -> RunDiff {
-    let names: BTreeSet<&str> = from
-        .entries
-        .iter()
-        .chain(to.entries.iter())
-        .map(|e| e.installer_name.as_str())
-        .collect();
+    let names: BTreeSet<&str> =
+        from.entries.iter().chain(to.entries.iter()).map(|e| e.installer_name.as_str()).collect();
     let mut changes = Vec::new();
     let mut unchanged = 0;
     for name in names {
@@ -273,10 +269,11 @@ impl History {
         let persister = ResultPersister::new(results_dir);
         let mut runs = Vec::new();
         for info in persister.list_runs()?.into_iter().take(limit) {
-            let RunFile { header, entries, summary } = match ResultPersister::read_run_file(&info.path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
+            let RunFile { header, entries, summary } =
+                match ResultPersister::read_run_file(&info.path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
             runs.push(LoadedRun { info, header, entries, summary });
         }
         Ok(Self { runs })
@@ -526,15 +523,26 @@ mod tests {
         let a = run(
             "a",
             20,
-            vec![entry("x", "passed", 1, "s"), entry("y", "failed", 1, "s"), entry("gone", "passed", 1, "s"), entry("same", "passed", 1, "s")],
+            vec![
+                entry("x", "passed", 1, "s"),
+                entry("y", "failed", 1, "s"),
+                entry("gone", "passed", 1, "s"),
+                entry("same", "passed", 1, "s"),
+            ],
         );
         let b = run(
             "b",
             10,
-            vec![entry("x", "failed", 1, "s"), entry("y", "passed", 1, "s"), entry("new", "passed", 1, "s"), entry("same", "passed", 1, "s")],
+            vec![
+                entry("x", "failed", 1, "s"),
+                entry("y", "passed", 1, "s"),
+                entry("new", "passed", 1, "s"),
+                entry("same", "passed", 1, "s"),
+            ],
         );
         let d = diff_runs(&a, &b);
-        let by: BTreeMap<&str, &str> = d.changes.iter().map(|c| (c.installer.as_str(), c.change.as_str())).collect();
+        let by: BTreeMap<&str, &str> =
+            d.changes.iter().map(|c| (c.installer.as_str(), c.change.as_str())).collect();
         assert_eq!(by["x"], "regressed");
         assert_eq!(by["y"], "recovered");
         assert_eq!(by["gone"], "removed");

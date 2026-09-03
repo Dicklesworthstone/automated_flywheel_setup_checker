@@ -171,7 +171,8 @@ impl Fixture {
     }
 
     fn write_files(&self) {
-        let mut yaml = String::from("# synthetic checksums.yaml (current ACFS format)\ninstallers:\n");
+        let mut yaml =
+            String::from("# synthetic checksums.yaml (current ACFS format)\ninstallers:\n");
         for (name, url, sha) in &self.entries {
             yaml.push_str(&format!("  {name}:\n    url: \"{url}\"\n    sha256: \"{sha}\"\n\n"));
         }
@@ -194,7 +195,12 @@ impl Fixture {
     }
 
     /// Build (without running) a command against the fixture: HOME, config, env, null stdin.
-    pub fn command(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> std::process::Command {
+    pub fn command(
+        &self,
+        args: &[&str],
+        set: &[(&str, &str)],
+        remove: &[&str],
+    ) -> std::process::Command {
         let bin = assert_cmd::cargo::cargo_bin!("automated_flywheel_setup_checker").to_path_buf();
         let mut cmd = std::process::Command::new(bin);
         cmd.env("HOME", &self.home).env_remove("RUST_LOG").env_remove("AFSC_ALLOW_LOCAL");
@@ -214,7 +220,8 @@ impl Fixture {
     pub fn spawn_check_until_header(
         &self,
         args: &[&str],
-    ) -> (std::process::Child, std::io::BufReader<std::process::ChildStdout>, serde_json::Value) {
+    ) -> (std::process::Child, std::io::BufReader<std::process::ChildStdout>, serde_json::Value)
+    {
         use std::io::BufRead;
         let mut child = self
             .command(args, &[("AFSC_ALLOW_LOCAL", "1")], &[])
@@ -301,7 +308,10 @@ pub fn assert_no_log_noise(output: &Output) {
     }
 }
 
-pub fn results_of_kind<'a>(lines: &'a [serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
+pub fn results_of_kind<'a>(
+    lines: &'a [serde_json::Value],
+    kind: &str,
+) -> Vec<&'a serde_json::Value> {
     lines.iter().filter(|v| v["kind"] == kind).collect()
 }
 

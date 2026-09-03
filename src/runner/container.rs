@@ -96,7 +96,9 @@ pub const CANONICAL_BASE: &str = "ubuntu:24.04";
 fn sanitize_for_tag(image: &str) -> String {
     image
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+        .map(
+            |c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' },
+        )
         .collect::<String>()
         .trim_matches('-')
         .to_string()
@@ -312,7 +314,9 @@ impl ContainerManager {
             let mut first_cpu: Option<u64> = None;
             let mut last_cpu: u64 = 0;
             loop {
-                if let Some((mem, cpu, rx, tx)) = sample_container_stats(&docker, &container_id).await {
+                if let Some((mem, cpu, rx, tx)) =
+                    sample_container_stats(&docker, &container_id).await
+                {
                     t.samples += 1;
                     t.peak_memory_bytes = t.peak_memory_bytes.max(mem);
                     first_cpu.get_or_insert(cpu);
@@ -341,7 +345,10 @@ impl ContainerManager {
 }
 
 /// One stats sample: (memory bytes, cumulative cpu ns, rx bytes, tx bytes).
-async fn sample_container_stats(docker: &Docker, container_id: &str) -> Option<(u64, u64, u64, u64)> {
+async fn sample_container_stats(
+    docker: &Docker,
+    container_id: &str,
+) -> Option<(u64, u64, u64, u64)> {
     let opts = StatsOptionsBuilder::default().stream(false).one_shot(false).build();
     let mut stream = docker.stats(container_id, Some(opts));
     {
@@ -421,7 +428,8 @@ impl ContainerManager {
         }
         // Keep the human-friendly alias pointing at the current canonical build.
         if plan.base == CANONICAL_BASE {
-            let (repo, tag) = Self::AFSC_BASE_IMAGE.split_once(':').unwrap_or((Self::AFSC_BASE_IMAGE, "latest"));
+            let (repo, tag) =
+                Self::AFSC_BASE_IMAGE.split_once(':').unwrap_or((Self::AFSC_BASE_IMAGE, "latest"));
             let opts = TagImageOptionsBuilder::default().repo(repo).tag(tag).build();
             if let Err(e) = self.docker.tag_image(&plan.run_image, Some(opts)).await {
                 warn!(error = %e, "Failed to update the afsc-base:latest alias");
@@ -432,7 +440,8 @@ impl ContainerManager {
 
     /// Pull a raw image according to the pull policy.
     async fn ensure_pulled(&self, image: &str) -> Result<()> {
-        if self.pull_policy != PullPolicy::Always && self.docker.inspect_image(image).await.is_ok() {
+        if self.pull_policy != PullPolicy::Always && self.docker.inspect_image(image).await.is_ok()
+        {
             debug!(image = %image, "Image already present locally");
             return Ok(());
         }
@@ -494,7 +503,9 @@ impl ContainerManager {
 
         // Build using the docker CLI (Bollard's build API needs a tar context).
         let output = match tokio::time::timeout(build_timeout, command.output()).await {
-            Ok(result) => result.context("Failed to run docker build (is the docker CLI installed?)")?,
+            Ok(result) => {
+                result.context("Failed to run docker build (is the docker CLI installed?)")?
+            }
             Err(_) => {
                 anyhow::bail!(
                     "Timed out after {}s building {} (raise [docker].build_timeout_seconds)",
@@ -509,7 +520,9 @@ impl ContainerManager {
             // Drop the legacy-builder deprecation banner so the real error is visible first.
             let relevant: Vec<&str> = stderr
                 .lines()
-                .filter(|l| !l.contains("DEPRECATED") && !l.contains("buildx") && !l.trim().is_empty())
+                .filter(|l| {
+                    !l.contains("DEPRECATED") && !l.contains("buildx") && !l.trim().is_empty()
+                })
                 .collect();
             anyhow::bail!(
                 "Failed to build {} from {}:\n{}",
@@ -840,11 +853,8 @@ impl ContainerManager {
         let mut filters: HashMap<String, Vec<String>> = HashMap::new();
         filters.insert("label".to_string(), vec![format!("{LABEL_MANAGED}=true")]);
         let opts = ListContainersOptionsBuilder::default().all(true).filters(&filters).build();
-        let containers = self
-            .docker
-            .list_containers(Some(opts))
-            .await
-            .context("Failed to list containers")?;
+        let containers =
+            self.docker.list_containers(Some(opts)).await.context("Failed to list containers")?;
         Ok(containers
             .into_iter()
             .map(|c| {
@@ -1002,8 +1012,14 @@ mod tests {
         assert_ne!(h1, h3);
         assert_eq!(h1, template_hash(b"FROM x", "ubuntu:22.04"));
         assert_eq!(prepared_image_tag("ubuntu:24.04", &h2), format!("afsc-base:{}", &h2[..12]));
-        assert_eq!(prepared_image_tag("ubuntu:22.04", &h1), format!("afsc-prepared:ubuntu-22.04-{}", &h1[..12]));
-        assert_eq!(prepared_image_tag("ghcr.io/org/img:1.0", &h2), format!("afsc-prepared:ghcr.io-org-img-1.0-{}", &h2[..12]));
+        assert_eq!(
+            prepared_image_tag("ubuntu:22.04", &h1),
+            format!("afsc-prepared:ubuntu-22.04-{}", &h1[..12])
+        );
+        assert_eq!(
+            prepared_image_tag("ghcr.io/org/img:1.0", &h2),
+            format!("afsc-prepared:ghcr.io-org-img-1.0-{}", &h2[..12])
+        );
     }
 
     #[test]
@@ -1015,12 +1031,19 @@ mod tests {
         assert!(plan.run_image.starts_with("afsc-base:"));
         assert_ne!(plan.run_image, ContainerManager::AFSC_BASE_IMAGE, "hash tag, not the alias");
 
-        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:22.04".into(), ..Default::default() });
+        let mgr = ContainerManager::new(ContainerConfig {
+            image: "ubuntu:22.04".into(),
+            ..Default::default()
+        });
         let plan = mgr.image_plan().unwrap();
         assert_eq!(plan.base, "ubuntu:22.04");
         assert!(plan.run_image.starts_with("afsc-prepared:ubuntu-22.04-"));
 
-        let mgr = ContainerManager::new(ContainerConfig { image: "ubuntu:24.04".into(), prepare: false, ..Default::default() });
+        let mgr = ContainerManager::new(ContainerConfig {
+            image: "ubuntu:24.04".into(),
+            prepare: false,
+            ..Default::default()
+        });
         let plan = mgr.image_plan().unwrap();
         assert!(!plan.prepared);
         assert_eq!(plan.run_image, "ubuntu:24.04");

@@ -90,7 +90,9 @@ fn mount_github(api: &Api) {
         Mock::given(method("POST"))
             .and(path(issues_path()))
             .and(body_partial_json(serde_json::json!({ "labels": ["afsc-automated"] })))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({ "number": 7, "html_url": "https://example.test/7" }))),
+            .respond_with(ResponseTemplate::new(201).set_body_json(
+                serde_json::json!({ "number": 7, "html_url": "https://example.test/7" }),
+            )),
     );
     api.mount(
         Mock::given(method("POST"))
@@ -101,7 +103,10 @@ fn mount_github(api: &Api) {
         Mock::given(method("PATCH"))
             .and(path(format!("{}/7", issues_path())))
             .and(body_partial_json(serde_json::json!({ "state": "closed" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "number": 7, "state": "closed" }))),
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "number": 7, "state": "closed" })),
+            ),
     );
     api.mount(
         Mock::given(method("POST"))
@@ -125,13 +130,21 @@ fn github_issue_is_created_then_commented_then_closed_and_slack_gets_blocks() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(api.count("POST", &issues_path()), 1, "issue created once");
     assert_eq!(api.count("POST", &format!("{}/7/comments", issues_path())), 0);
-    let create = api.requests().into_iter().find(|r| r.method == "POST" && r.url.path() == issues_path()).unwrap();
+    let create = api
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.url.path() == issues_path())
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&create.body).unwrap();
     assert_eq!(body["title"], "AFSC canary: installer failures");
     let md = body["body"].as_str().unwrap();
     assert!(md.contains("| wobbly_tool | ❌ failed | network |"), "{md}");
     assert!(md.contains("Results file:"), "{md}");
-    let slack = api.requests().into_iter().find(|r| r.url.path().starts_with("/slack/")).expect("slack posted");
+    let slack = api
+        .requests()
+        .into_iter()
+        .find(|r| r.url.path().starts_with("/slack/"))
+        .expect("slack posted");
     let payload: serde_json::Value = serde_json::from_slice(&slack.body).unwrap();
     assert_eq!(payload["channel"], "#ops");
     assert_eq!(payload["blocks"][0]["type"], "header");
@@ -157,8 +170,13 @@ fn github_issue_is_created_then_commented_then_closed_and_slack_gets_blocks() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(api.count("POST", &format!("{}/7/comments", issues_path())), 2);
     assert_eq!(api.count("PATCH", &format!("{}/7", issues_path())), 1);
-    assert_eq!(api.requests().iter().filter(|r| r.url.path().starts_with("/slack/")).count(), 2, "no Slack on success");
-    let comment = api.requests().into_iter().filter(|r| r.url.path().ends_with("/comments")).last().unwrap();
+    assert_eq!(
+        api.requests().iter().filter(|r| r.url.path().starts_with("/slack/")).count(),
+        2,
+        "no Slack on success"
+    );
+    let comment =
+        api.requests().into_iter().filter(|r| r.url.path().ends_with("/comments")).last().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&comment.body).unwrap();
     assert!(body["body"].as_str().unwrap().starts_with("Recovered:"), "{body}");
 
@@ -166,8 +184,10 @@ fn github_issue_is_created_then_commented_then_closed_and_slack_gets_blocks() {
     let log_dir = fx.home.join(".local/share/afsc/logs");
     let log = std::fs::read_dir(&log_dir).unwrap().flatten().next().unwrap().path();
     let text = std::fs::read_to_string(log).unwrap();
-    let events: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    let notes: Vec<&serde_json::Value> = events.iter().filter(|e| e["event"] == "notification").collect();
+    let events: Vec<serde_json::Value> =
+        text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let notes: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "notification").collect();
     assert_eq!(notes.len(), 3, "{text}");
     assert_eq!(notes[0]["data"]["github"], "created");
     assert_eq!(notes[1]["data"]["github"], "commented");
@@ -261,13 +281,20 @@ fn daily_digest_queues_runs_and_sends_once() {
     assert_eq!(doc["decision"], "sent");
     assert_eq!(doc["runs"], 2);
     assert_eq!(doc["github"], "created");
-    let create = api.requests().into_iter().find(|r| r.method == "POST" && r.url.path() == issues_path()).unwrap();
+    let create = api
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.url.path() == issues_path())
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&create.body).unwrap();
     let md = body["body"].as_str().unwrap();
     assert!(md.contains("## AFSC daily digest — 2 run(s)"), "{md}");
     assert!(md.contains("dep_fail_tool"), "{md}");
     assert!(!pending.exists(), "queue rotated after sending");
-    assert!(std::fs::read_dir(pending.parent().unwrap()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("sent_")));
+    assert!(std::fs::read_dir(pending.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("sent_")));
 
     let again = fx.run_with(&["notify", "--digest", "--format", "json"], &set, &[]);
     assert_eq!(again.status.code(), Some(0));

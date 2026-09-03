@@ -143,7 +143,8 @@ pub fn scan_acfs_repo(root: &Path) -> Result<AcfsScan> {
     let sec = security_sh(root);
     let text = std::fs::read_to_string(&sec)
         .with_context(|| format!("Failed to read {}", sec.display()))?;
-    let mut scan = AcfsScan { known_installers: parse_known_installers(&text), ..Default::default() };
+    let mut scan =
+        AcfsScan { known_installers: parse_known_installers(&text), ..Default::default() };
 
     let mut files: Vec<PathBuf> = Vec::new();
     for dir in ["scripts/lib", "scripts/modules"] {
@@ -170,7 +171,8 @@ pub fn scan_acfs_repo(root: &Path) -> Result<AcfsScan> {
             scan.scanned_files.push(rel);
         }
     }
-    scan.call_sites.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)).then(a.line.cmp(&b.line)));
+    scan.call_sites
+        .sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)).then(a.line.cmp(&b.line)));
     Ok(scan)
 }
 
@@ -308,7 +310,8 @@ cmd+="fetch_and_run_with_runner bash $url_q $expected_sha256_q $tool_q"
         let drift = profile_drift(&sites);
         assert!(drift.is_empty(), "{drift:?}");
         // A changed call site is detected.
-        let changed = parse_call_sites("fetch_and_run_with_runner bash $u $s rust --quiet\n", "m.sh");
+        let changed =
+            parse_call_sites("fetch_and_run_with_runner bash $u $s rust --quiet\n", "m.sh");
         let drift = profile_drift(&changed);
         let fields: Vec<&str> = drift.iter().map(|d| d.field.as_str()).collect();
         assert!(fields.contains(&"interpreter") && fields.contains(&"args"), "{drift:?}");
@@ -327,7 +330,10 @@ cmd+="fetch_and_run_with_runner bash $url_q $expected_sha256_q $tool_q"
             tags: vec![],
             extra: HashMap::new(),
         };
-        installers.insert("zoxide".to_string(), mk("https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"));
+        installers.insert(
+            "zoxide".to_string(),
+            mk("https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"),
+        );
         installers.insert("rust".to_string(), mk("https://example.com/other"));
         installers.insert("stale".to_string(), mk("https://example.com/stale"));
         let checksums = ChecksumsFile { installers };

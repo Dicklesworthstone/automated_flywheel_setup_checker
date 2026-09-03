@@ -114,7 +114,12 @@ impl Settings {
     }
 }
 
-fn render_table(value: &toml::Value, prefix: &str, sources: &BTreeMap<String, Source>, out: &mut String) {
+fn render_table(
+    value: &toml::Value,
+    prefix: &str,
+    sources: &BTreeMap<String, Source>,
+    out: &mut String,
+) {
     let Some(table) = value.as_table() else { return };
     // Scalars first, then nested tables (TOML requires scalars before sub-tables).
     for (k, v) in table {
@@ -185,9 +190,8 @@ fn set_path(root: &mut toml::Table, key: &str, value: toml::Value) {
     let parts: Vec<&str> = key.split('.').collect();
     let mut cur = root;
     for part in &parts[..parts.len() - 1] {
-        let entry = cur
-            .entry(part.to_string())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let entry =
+            cur.entry(part.to_string()).or_insert_with(|| toml::Value::Table(toml::Table::new()));
         if !entry.is_table() {
             *entry = toml::Value::Table(toml::Table::new());
         }
@@ -303,14 +307,17 @@ pub fn resolve(
         sources.insert(key, Source::Cli);
     }
 
-    let config: Config = toml::Value::Table(merged)
-        .try_into()
-        .with_context(|| match path {
-            Some(p) => format!("Failed to parse config file: {}", p.display()),
-            None => "Failed to resolve configuration".to_string(),
-        })?;
+    let config: Config = toml::Value::Table(merged).try_into().with_context(|| match path {
+        Some(p) => format!("Failed to parse config file: {}", p.display()),
+        None => "Failed to resolve configuration".to_string(),
+    })?;
 
-    Ok(Settings { config, sources, unknown_keys: unknown, config_path: path.map(Path::to_path_buf) })
+    Ok(Settings {
+        config,
+        sources,
+        unknown_keys: unknown,
+        config_path: path.map(Path::to_path_buf),
+    })
 }
 
 /// Snapshot of the process environment restricted to `AFSC_*` variables.
@@ -367,7 +374,10 @@ mod tests {
             "[general]\nbogus = 1\n\n[installers.mdwb]\ntimeout_seconds = 900\nenv = { FOO = \"bar\" }\n\n[installers.x]\nwhat = 1\n",
         );
         let s = resolve(Some(f.path()), &BTreeMap::new(), &CliOverrides::default()).unwrap();
-        assert_eq!(s.unknown_keys, vec!["general.bogus".to_string(), "installers.x.what".to_string()]);
+        assert_eq!(
+            s.unknown_keys,
+            vec!["general.bogus".to_string(), "installers.x.what".to_string()]
+        );
         assert_eq!(s.config.installers["mdwb"].timeout_seconds, Some(900));
         assert_eq!(s.config.installers["mdwb"].env.get("FOO").map(String::as_str), Some("bar"));
     }
@@ -397,7 +407,8 @@ mod tests {
         let f = file_with("");
         let s = resolve(Some(f.path()), &BTreeMap::new(), &CliOverrides::default()).unwrap();
         assert_eq!(s.config.execution.parallel.resolve_with_cores(4), 1);
-        let s = resolve(Some(Path::new("/dev/null")), &BTreeMap::new(), &CliOverrides::default()).unwrap();
+        let s = resolve(Some(Path::new("/dev/null")), &BTreeMap::new(), &CliOverrides::default())
+            .unwrap();
         assert_eq!(s.config.docker.timeout_seconds, 300);
     }
 
@@ -405,7 +416,11 @@ mod tests {
     fn shipped_default_toml_equals_config_default() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml");
         let s = resolve(Some(&path), &BTreeMap::new(), &CliOverrides::default()).unwrap();
-        assert!(s.unknown_keys.is_empty(), "unknown keys in config/default.toml: {:?}", s.unknown_keys);
+        assert!(
+            s.unknown_keys.is_empty(),
+            "unknown keys in config/default.toml: {:?}",
+            s.unknown_keys
+        );
         let shipped = toml::Value::try_from(&s.config).unwrap();
         let defaults = toml::Value::try_from(Config::default()).unwrap();
         assert_eq!(shipped, defaults, "config/default.toml drifted from Config::default()");

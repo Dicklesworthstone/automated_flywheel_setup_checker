@@ -82,12 +82,17 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// `git worktree add -b afsc/remediate-<installer>-<date>-<id> <worktrees_dir>/… HEAD`.
-pub fn open_worktree(acfs_repo: &Path, worktrees_dir: &Path, installer: &str) -> Result<EditSession> {
+pub fn open_worktree(
+    acfs_repo: &Path,
+    worktrees_dir: &Path,
+    installer: &str,
+) -> Result<EditSession> {
     git(acfs_repo, &["rev-parse", "--git-dir"]).context("acfs_repo is not a git repository")?;
     // Seconds alone collide when the same installer is remediated twice in quick succession
     // (two runs, or a retry): add a short random suffix so `worktree add -b` never fails on it.
     let suffix: String = uuid::Uuid::new_v4().simple().to_string().chars().take(6).collect();
-    let branch = format!("afsc/remediate-{installer}-{}-{suffix}", Utc::now().format("%Y%m%d-%H%M%S"));
+    let branch =
+        format!("afsc/remediate-{installer}-{}-{suffix}", Utc::now().format("%Y%m%d-%H%M%S"));
     let worktree = worktrees_dir.join(branch.replace('/', "-"));
     std::fs::create_dir_all(worktrees_dir)?;
     git(acfs_repo, &["worktree", "add", "-b", &branch, &worktree.to_string_lossy(), "HEAD"])?;
@@ -107,7 +112,8 @@ pub struct PolicyVerdict {
 pub fn check_policy(worktree: &Path) -> Result<PolicyVerdict> {
     git(worktree, &["add", "-A"])?;
     let names = git(worktree, &["diff", "--cached", "--name-only"])?;
-    let changed: Vec<String> = names.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let changed: Vec<String> =
+        names.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let diff = git(worktree, &["diff", "--cached", "-U0"])?;
     let mut violations = Vec::new();
     for path in &changed {
@@ -129,7 +135,9 @@ pub fn check_policy(worktree: &Path) -> Result<PolicyVerdict> {
 
 /// Remove the worktree and delete its branch (best effort; nothing was committed to main).
 pub fn discard_worktree(acfs_repo: &Path, session: &EditSession) {
-    if let Err(e) = git(acfs_repo, &["worktree", "remove", "--force", &session.worktree.to_string_lossy()]) {
+    if let Err(e) =
+        git(acfs_repo, &["worktree", "remove", "--force", &session.worktree.to_string_lossy()])
+    {
         tracing::warn!(error = %e, "could not remove the worktree");
     }
     if let Err(e) = git(acfs_repo, &["branch", "-D", &session.branch]) {
@@ -142,7 +150,16 @@ pub fn commit_worktree(worktree: &Path, message: &str) -> Result<String> {
     git(worktree, &["add", "-A"])?;
     git(
         worktree,
-        &["-c", "user.name=automated_flywheel_setup_checker", "-c", "user.email=afsc@localhost", "commit", "-q", "-m", message],
+        &[
+            "-c",
+            "user.name=automated_flywheel_setup_checker",
+            "-c",
+            "user.email=afsc@localhost",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
     )?;
     git(worktree, &["rev-parse", "HEAD"])
 }
@@ -154,7 +171,9 @@ pub fn open_pr(worktree: &Path, branch: &str, title: &str, body: &str) -> Option
         .args(["pr", "create", "--head", branch, "--title", title, "--body", body])
         .output();
     match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().last().map(|s| s.trim().to_string()),
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).lines().last().map(|s| s.trim().to_string())
+        }
         Ok(o) => {
             tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr).trim(), "gh pr create failed");
             None
@@ -184,7 +203,10 @@ pub struct ClaudeEditRequest<'a> {
     pub globals: GlobalDefaults,
 }
 
-async fn verify_in_worktree(req: &ClaudeEditRequest<'_>, worktree: &Path) -> std::result::Result<Verification, String> {
+async fn verify_in_worktree(
+    req: &ClaudeEditRequest<'_>,
+    worktree: &Path,
+) -> std::result::Result<Verification, String> {
     let path = worktree.join("checksums.yaml");
     let checksums = parse_checksums(&path).map_err(|e| format!("worktree checksums.yaml: {e}"))?;
     let entry = checksums
@@ -213,7 +235,9 @@ fn first_line(s: &str) -> String {
 pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOutcome {
     let session = match open_worktree(req.acfs_repo, req.worktrees_dir, req.installer) {
         Ok(s) => s,
-        Err(e) => return RemediationOutcome::Failed { reason: format!("worktree: {e:#}"), cost_usd: 0.0 },
+        Err(e) => {
+            return RemediationOutcome::Failed { reason: format!("worktree: {e:#}"), cost_usd: 0.0 }
+        }
     };
     let fail = |reason: String, cost: f64| {
         discard_worktree(req.acfs_repo, &session);
@@ -237,15 +261,23 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
             previous.as_deref(),
         );
         tracing::info!(installer = req.installer, attempt, branch = %session.branch, "Claude edit session");
-        let res = match req.claude.execute_edit_session(&prompt, &session.worktree, req.allow_bash).await {
-            Ok(r) => r,
-            Err(e) => return fail(format!("claude edit session (attempt {attempt}): {e}"), spent()),
-        };
+        let res =
+            match req.claude.execute_edit_session(&prompt, &session.worktree, req.allow_bash).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return fail(format!("claude edit session (attempt {attempt}): {e}"), spent())
+                }
+            };
         summary = crate::reporting::redact(&res.claude_output);
 
         let risks = annotate_risks(&summary);
         if !risks.is_empty() {
-            let list = risks.iter().map(|r| format!("{} [{}]", r.command, r.risk)).collect::<Vec<_>>().join("; ");
+            let list = risks
+                .iter()
+                .map(|r| format!("{} [{}]", r.command, r.risk))
+                .collect::<Vec<_>>()
+                .join("; ");
             return fail(format!("unsafe command in Claude's transcript: {list}"), spent());
         }
         let verdict = match check_policy(&session.worktree) {
@@ -253,7 +285,10 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
             Err(e) => return fail(format!("inspecting the worktree: {e:#}"), spent()),
         };
         if !verdict.violations.is_empty() {
-            return fail(format!("edit policy violated: {}", verdict.violations.join("; ")), spent());
+            return fail(
+                format!("edit policy violated: {}", verdict.violations.join("; ")),
+                spent(),
+            );
         }
         if verdict.changed.is_empty() {
             return fail(format!("Claude made no changes: {}", first_line(&summary)), spent());
@@ -265,7 +300,10 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
             }
             Ok(v) => {
                 tracing::warn!(installer = req.installer, attempt, status = %v.status, "still failing after Claude's edits");
-                previous = Some(format!("status {} (exit {:?})\n{}", v.status, v.exit_code, v.stderr_tail));
+                previous = Some(format!(
+                    "status {} (exit {:?})\n{}",
+                    v.status, v.exit_code, v.stderr_tail
+                ));
             }
             Err(e) => previous = Some(e),
         }
@@ -290,14 +328,31 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
     };
     if req.apply {
         if let Err(e) = git(&session.worktree, &["push", "-u", "origin", &session.branch]) {
-            return RemediationOutcome::Failed { reason: format!("branch {} committed but push failed: {e:#}", session.branch), cost_usd: spent() };
+            return RemediationOutcome::Failed {
+                reason: format!("branch {} committed but push failed: {e:#}", session.branch),
+                cost_usd: spent(),
+            };
         }
     }
-    let pr_url = if req.create_pr { open_pr(&session.worktree, &session.branch, &title, &body) } else { None };
-    if req.apply {
-        RemediationOutcome::Applied { branch: session.branch.clone(), sha, pr_url, cost_usd: spent() }
+    let pr_url = if req.create_pr {
+        open_pr(&session.worktree, &session.branch, &title, &body)
     } else {
-        RemediationOutcome::Proposed { branch: session.branch.clone(), commit: Some(sha), pr_url, cost_usd: spent() }
+        None
+    };
+    if req.apply {
+        RemediationOutcome::Applied {
+            branch: session.branch.clone(),
+            sha,
+            pr_url,
+            cost_usd: spent(),
+        }
+    } else {
+        RemediationOutcome::Proposed {
+            branch: session.branch.clone(),
+            commit: Some(sha),
+            pr_url,
+            cost_usd: spent(),
+        }
     }
 }
 
@@ -320,7 +375,10 @@ mod tests {
         let text = "#!/bin/bash\nset -e\ndeclare -gA KNOWN_INSTALLERS=(\n    [uv]=\"https://a\"\n    [bun]=\"https://b\"\n)\necho done\n";
         assert_eq!(known_installers_block(text), Some((3, 6)));
         // A one-line change inside the block (new-file line 5) passes.
-        assert!(hunks_within("@@ -5 +5 @@\n-    [bun]=\"https://b\"\n+    [bun]=\"https://c\"\n", (3, 6)));
+        assert!(hunks_within(
+            "@@ -5 +5 @@\n-    [bun]=\"https://b\"\n+    [bun]=\"https://c\"\n",
+            (3, 6)
+        ));
         // An insertion right before the closing paren passes; an edit to `echo done` (line 7) fails.
         assert!(hunks_within("@@ -5,0 +6,1 @@\n+    [x]=\"https://x\"\n", (3, 7)));
         assert!(!hunks_within("@@ -7 +7 @@\n-echo done\n+echo nope\n", (3, 6)));

@@ -3,7 +3,12 @@
 use super::support::*;
 
 fn check<'a>(doc: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
-    doc["checks"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap_or_else(|| panic!("no check {name}: {doc}"))
+    doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no check {name}: {doc}"))
 }
 
 #[test]
@@ -48,7 +53,8 @@ fn doctor_reports_each_check_with_hints_and_exit_code() {
     let doc = json_doc(&fx.run(&["doctor", "--local", "--format", "json"]));
     assert_eq!(check(&doc, "config")["status"], "warn");
     assert!(check(&doc, "config")["detail"].as_str().unwrap().contains("docker.imgae"));
-    let out = fx.run(&["--acfs-repo", "/nonexistent/acfs", "doctor", "--local", "--format", "json"]);
+    let out =
+        fx.run(&["--acfs-repo", "/nonexistent/acfs", "doctor", "--local", "--format", "json"]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     let doc = json_doc(&out);
     assert_eq!(check(&doc, "acfs_repo")["status"], "fail");
@@ -66,10 +72,17 @@ fn doctor_flags_missing_notification_secrets_and_claude_when_needed() {
         &["AFSC_DOCTOR_TEST_HOOK"],
     ));
     assert_eq!(check(&doc, "notifications")["status"], "warn");
-    assert!(check(&doc, "notifications")["detail"].as_str().unwrap().contains("AFSC_DOCTOR_TEST_HOOK"));
+    assert!(check(&doc, "notifications")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("AFSC_DOCTOR_TEST_HOOK"));
     let claude = check(&doc, "claude");
     assert!(matches!(claude["status"].as_str().unwrap(), "pass" | "fail"), "{claude}");
-    let doc = json_doc(&fx.run_with(&["doctor", "--local", "--format", "json"], &[("AFSC_DOCTOR_TEST_HOOK", "https://hooks.example/x")], &[]));
+    let doc = json_doc(&fx.run_with(
+        &["doctor", "--local", "--format", "json"],
+        &[("AFSC_DOCTOR_TEST_HOOK", "https://hooks.example/x")],
+        &[],
+    ));
     assert_eq!(check(&doc, "notifications")["status"], "pass");
 }
 

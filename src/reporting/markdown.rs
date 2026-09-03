@@ -54,9 +54,14 @@ pub fn render_run(run: &LoadedRun, assessments: &BTreeMap<String, Assessment>) -
     });
     for e in entries {
         let category = e.error_classification.as_ref().map(|c| c.category.as_str()).unwrap_or("");
-        let mut note = assessments.get(&e.installer_name).and_then(|a| a.label()).unwrap_or_default();
+        let mut note =
+            assessments.get(&e.installer_name).and_then(|a| a.label()).unwrap_or_default();
         if e.checksum_state == "mismatch" {
-            note = if note.is_empty() { "checksum mismatch".into() } else { format!("{note}; checksum mismatch") };
+            note = if note.is_empty() {
+                "checksum mismatch".into()
+            } else {
+                format!("{note}; checksum mismatch")
+            };
         }
         if let Some(v) = &e.installed_version {
             note = if note.is_empty() { v.clone() } else { format!("{note}; {v}") };
@@ -87,7 +92,11 @@ pub fn render_run(run: &LoadedRun, assessments: &BTreeMap<String, Assessment>) -
 }
 
 /// Timeline of one installer, oldest first.
-pub fn render_timeline(installer: &str, entries: &[HistoryEntry], assessment: &Assessment) -> String {
+pub fn render_timeline(
+    installer: &str,
+    entries: &[HistoryEntry],
+    assessment: &Assessment,
+) -> String {
     let mut out = format!("## {installer} — {} runs", entries.len());
     if let Some(label) = assessment.label() {
         out.push_str(&format!(" — **{label}**"));
@@ -104,7 +113,10 @@ pub fn render_timeline(installer: &str, entries: &[HistoryEntry], assessment: &A
             e.category.as_deref().unwrap_or(""),
             seconds(e.duration_ms),
             e.attempts,
-            e.script_sha256.as_deref().map(|s| s.chars().take(8).collect::<String>()).unwrap_or_default(),
+            e.script_sha256
+                .as_deref()
+                .map(|s| s.chars().take(8).collect::<String>())
+                .unwrap_or_default(),
             e.installed_version.as_deref().unwrap_or("")
         ));
     }

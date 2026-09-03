@@ -37,7 +37,10 @@ fn built_in_profiles_match_acfs_call_sites() {
         "built-in ACFS profile table drifted from the checkout:\n{}",
         drift
             .iter()
-            .map(|d| format!("  {} {}: ACFS={:?} profile={:?} ({}:{})", d.name, d.field, d.acfs, d.profile, d.file, d.line))
+            .map(|d| format!(
+                "  {} {}: ACFS={:?} profile={:?} ({}:{})",
+                d.name, d.field, d.acfs, d.profile, d.file, d.line
+            ))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -53,7 +56,11 @@ fn apt_packages(text: &str) -> BTreeSet<String> {
         }
         let rest = &line[idx + "install -y".len()..];
         for tok in rest.split_whitespace() {
-            if tok.starts_with('-') || tok.starts_with('$') || tok.starts_with('"') || tok.contains('(') {
+            if tok.starts_with('-')
+                || tok.starts_with('$')
+                || tok.starts_with('"')
+                || tok.contains('(')
+            {
                 continue;
             }
             if tok == "\\" || tok == "&&" || tok == "||" {
@@ -98,11 +105,15 @@ fn base_image_installs_a_superset_of_acfs_base_packages() {
     let text = std::fs::read_to_string(&base_script)
         .unwrap_or_else(|e| panic!("read {}: {e}", base_script.display()));
     let mut acfs = apt_packages(&text);
-    assert!(acfs.contains("curl") && acfs.contains("build-essential"), "parsed ACFS packages: {acfs:?}");
+    assert!(
+        acfs.contains("curl") && acfs.contains("build-essential"),
+        "parsed ACFS packages: {acfs:?}"
+    );
     // install.sh's "Installing required apt packages" step runs before every tool installer and
     // is where verification tools such as minisign (mcp_agent_mail, caam) come from.
     let installer = repo.join("install.sh");
-    let text = std::fs::read_to_string(&installer).unwrap_or_else(|e| panic!("read {}: {e}", installer.display()));
+    let text = std::fs::read_to_string(&installer)
+        .unwrap_or_else(|e| panic!("read {}: {e}", installer.display()));
     let required: BTreeSet<String> = text
         .lines()
         .filter(|l| l.contains("Installing required apt packages") && l.contains("install -y"))
@@ -128,5 +139,8 @@ fn package_parsers_handle_the_expected_shapes() {
     assert!(pkgs.contains("lsb-release"));
     let docker = "RUN apt-get update -qq && \\\n    apt-get install -y -qq \\\n        curl ca-certificates git \\\n        build-essential sudo gnupg lsb-release \\\n    && rm -rf /var/lib/apt/lists/*\n";
     let ours = dockerfile_packages(docker);
-    assert!(ours.contains("curl") && ours.contains("lsb-release") && !ours.contains("&&"), "{ours:?}");
+    assert!(
+        ours.contains("curl") && ours.contains("lsb-release") && !ours.contains("&&"),
+        "{ours:?}"
+    );
 }

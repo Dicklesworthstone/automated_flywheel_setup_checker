@@ -58,7 +58,10 @@ fn list_jsonl_lines_carry_kind_and_are_sorted() {
     let runnable = jsonl_lines(&fx.run(&["list", "--runnable", "--format", "jsonl"]));
     assert_eq!(runnable.len(), 2, "skipped installers are not runnable");
     let human = stdout(&fx.run(&["list"]));
-    assert!(human.contains("[skip: broken upstream]") && human.contains("[overrides: args]"), "{human}");
+    assert!(
+        human.contains("[skip: broken upstream]") && human.contains("[overrides: args]"),
+        "{human}"
+    );
     let rejected = fx.run(&["list", "--tag", "essential"]);
     assert!(!rejected.status.success(), "--tag was removed (ACFS has no tags)");
 }
@@ -73,7 +76,11 @@ fn local_mode_requires_consent_when_not_interactive() {
     assert!(stderr(&out).contains("--yes"), "{}", stderr(&out));
     assert!(!fx.home.join(".local/share/afsc/results").exists(), "nothing ran");
     // --yes confirms; the warning is still logged.
-    let out = fx.run_with(&["check", "--local", "--yes", "--format", "jsonl"], &[], &["AFSC_ALLOW_LOCAL"]);
+    let out = fx.run_with(
+        &["check", "--local", "--yes", "--format", "jsonl"],
+        &[],
+        &["AFSC_ALLOW_LOCAL"],
+    );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stderr(&out).contains("no container isolation"));
     // Dry runs never need consent.
@@ -100,7 +107,14 @@ fn classify_error_explain_names_the_pattern() {
     assert_eq!(doc["explain"]["category"], "dependency");
     assert!(doc["explain"]["pattern"].as_str().unwrap().contains("unable to locate package"));
 
-    let human = fx.run(&["classify-error", "--stderr", "Test timed out after 300s", "--exit-code", "-1", "--explain"]);
+    let human = fx.run(&[
+        "classify-error",
+        "--stderr",
+        "Test timed out after 300s",
+        "--exit-code",
+        "-1",
+        "--explain",
+    ]);
     let text = stdout(&human);
     assert!(text.contains("Category: timeout"), "{text}");
     assert!(text.contains("Matched: timeout"), "{text}");
@@ -139,7 +153,13 @@ fn url_policy_rejects_http_and_gates_file_urls() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let doc = json_doc(&out);
     let errors = doc["format"]["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|e| e.as_str().unwrap().contains("plain_http") && e.as_str().unwrap().contains("https")), "{errors:?}");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("plain_http")
+                && e.as_str().unwrap().contains("https")),
+        "{errors:?}"
+    );
 
     // check refuses to run a policy-violating installer (exit 2), even when only it is selected.
     let out = fx.run(&["check", "--local", "plain_http"]);
@@ -195,13 +215,23 @@ fn install_systemd_dry_run_renders_units_without_touching_the_system() {
     let out_dir = tempfile::tempdir().unwrap();
     let out = std::process::Command::new("bash")
         .arg(root.join("scripts/install-systemd.sh"))
-        .args(["--dry-run", "--user", "svc", "--data-dir", "/srv/afsc", "--acfs-repo", "/srv/acfs", "--out-dir"])
+        .args([
+            "--dry-run",
+            "--user",
+            "svc",
+            "--data-dir",
+            "/srv/afsc",
+            "--acfs-repo",
+            "/srv/acfs",
+            "--out-dir",
+        ])
         .arg(out_dir.path())
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
-    let unit = std::fs::read_to_string(out_dir.path().join("automated-flywheel-checker.service")).unwrap();
+    let unit =
+        std::fs::read_to_string(out_dir.path().join("automated-flywheel-checker.service")).unwrap();
     assert!(unit.contains("User=svc"), "{unit}");
     assert!(unit.contains("WorkingDirectory=/srv/afsc"), "{unit}");
     assert!(unit.contains("ExecStart=/usr/local/bin/automated_flywheel_setup_checker --config /etc/flywheel-checker/config.toml --format json --watchdog check"), "{unit}");
@@ -219,9 +249,18 @@ fn version_reports_git_sha_build_date_and_toolchain() {
     let out = fx.run(&["--version"]);
     assert_eq!(out.status.code(), Some(0));
     let text = stdout(&out);
-    assert!(text.starts_with(&format!("automated_flywheel_setup_checker {} (", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "automated_flywheel_setup_checker {} (",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{text}"
+    );
     assert!(text.contains(", built 20"), "build date: {text}");
     assert!(text.contains("rustc "), "toolchain: {text}");
     let sha = text.split('(').nth(1).unwrap().split(',').next().unwrap();
-    assert!(sha == "unknown" || sha.trim_end_matches("-dirty").chars().all(|c| c.is_ascii_hexdigit()), "sha: {sha}");
+    assert!(
+        sha == "unknown" || sha.trim_end_matches("-dirty").chars().all(|c| c.is_ascii_hexdigit()),
+        "sha: {sha}"
+    );
 }

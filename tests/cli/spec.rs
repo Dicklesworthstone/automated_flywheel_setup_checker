@@ -67,7 +67,12 @@ fn skip_override_is_reported_without_failing_the_run() {
 
     // Persisted and visible in status.
     let status = json_doc(&fx.run(&["status", "--format", "json"]));
-    let entry = status["results"].as_array().unwrap().iter().find(|r| r["installer_name"] == "broken_upstream").unwrap();
+    let entry = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["installer_name"] == "broken_upstream")
+        .unwrap();
     assert_eq!(entry["status"], "skipped");
 }
 
@@ -96,7 +101,12 @@ fn expect_binary_verify_cmd_and_version_cmd_run_after_install() {
     assert_eq!(vf["error"]["category"], "post_install");
 
     let status = json_doc(&fx.run(&["status", "--format", "json"]));
-    let entry = status["results"].as_array().unwrap().iter().find(|r| r["installer_name"] == "tool_ok").unwrap();
+    let entry = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["installer_name"] == "tool_ok")
+        .unwrap();
     assert_eq!(entry["installed_version"], "mytool 1.2.3");
 }
 
@@ -105,7 +115,10 @@ fn dry_run_shows_the_resolved_spec_with_override_sources() {
     let mut fx = Fixture::new();
     fx.add_pass("plain_tool");
     fx.add_pass("tuned_tool");
-    fx.add_override("tuned_tool", "timeout_seconds = 42\nretry = 0\nargs = [\"--quiet\"]\nexpect_binary = \"bash\"");
+    fx.add_override(
+        "tuned_tool",
+        "timeout_seconds = 42\nretry = 0\nargs = [\"--quiet\"]\nexpect_binary = \"bash\"",
+    );
     let doc = json_doc(&fx.run(&["check", "--local", "--dry-run", "--format", "json"]));
     let installers = doc["installers"].as_array().unwrap();
     let plain = installers.iter().find(|s| s["name"] == "plain_tool").unwrap();
@@ -137,7 +150,10 @@ fn validate_cross_checks_known_installers_when_an_acfs_checkout_is_present() {
     let good_url = fx.url_of("good_tool");
 
     // Missing entry: KNOWN_INSTALLERS has a tool that checksums.yaml lacks → exit 2.
-    fx.write_acfs_scripts(&[("good_tool", &good_url), ("brand_new_tool", "https://example.com/new.sh")], &[]);
+    fx.write_acfs_scripts(
+        &[("good_tool", &good_url), ("brand_new_tool", "https://example.com/new.sh")],
+        &[],
+    );
     let out = fx.run(&["validate", "--format", "json"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let doc = json_doc(&out);
@@ -147,7 +163,10 @@ fn validate_cross_checks_known_installers_when_an_acfs_checkout_is_present() {
     assert!(doc["format"]["errors"][0].as_str().unwrap().contains("brand_new_tool"));
 
     // URL mismatch is an error too.
-    fx.write_acfs_scripts(&[("good_tool", "https://example.com/moved.sh"), ("stale_tool", &fx.url_of("stale_tool"))], &[]);
+    fx.write_acfs_scripts(
+        &[("good_tool", "https://example.com/moved.sh"), ("stale_tool", &fx.url_of("stale_tool"))],
+        &[],
+    );
     let out = fx.run(&["validate", "--format", "json"]);
     assert_eq!(out.status.code(), Some(2));
     let doc = json_doc(&out);
@@ -176,10 +195,17 @@ fn validate_profile_reports_drift_between_acfs_call_sites_and_the_built_in_table
     assert_eq!(out.status.code(), Some(0), "drift is a warning: {}", stderr(&out));
     let doc = json_doc(&out);
     let drift = doc["profile_drift"].as_array().unwrap();
-    assert!(drift.iter().any(|d| d["name"] == "zoxide" && d["field"] == "interpreter"), "{drift:?}");
+    assert!(
+        drift.iter().any(|d| d["name"] == "zoxide" && d["field"] == "interpreter"),
+        "{drift:?}"
+    );
     assert!(drift.iter().any(|d| d["name"] == "zoxide" && d["field"] == "args"), "{drift:?}");
     assert!(!drift.iter().any(|d| d["name"] == "rust"), "rust matches the table: {drift:?}");
-    assert!(doc["format"]["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("profile drift for zoxide")));
+    assert!(doc["format"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("profile drift for zoxide")));
 
     // Without a checkout, --profile only warns.
     let mut plain = Fixture::new();

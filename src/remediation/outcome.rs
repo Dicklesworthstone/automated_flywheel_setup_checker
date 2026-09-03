@@ -28,12 +28,7 @@ pub enum RemediationOutcome {
         drift_score: Option<String>,
     },
     /// Changes landed on a branch (worktree), with an optional PR
-    Proposed {
-        branch: String,
-        commit: Option<String>,
-        pr_url: Option<String>,
-        cost_usd: f64,
-    },
+    Proposed { branch: String, commit: Option<String>, pr_url: Option<String>, cost_usd: f64 },
     /// Branch pushed
     Applied { branch: String, sha: String, pr_url: Option<String>, cost_usd: f64 },
     /// Something went wrong or verification failed
@@ -86,26 +81,38 @@ impl RemediationOutcome {
             RemediationOutcome::NotAttempted => "not attempted".into(),
             RemediationOutcome::Skipped { reason } => format!("skipped: {reason}"),
             RemediationOutcome::Advised { cost_usd, risks, source, .. } => {
-                let flagged = risks.iter().filter(|r| r.risk == "Critical" || r.risk == "High").count();
+                let flagged =
+                    risks.iter().filter(|r| r.risk == "Critical" || r.risk == "High").count();
                 format!(
                     "advice from {source} (${cost_usd:.4}){}",
-                    if flagged > 0 { format!(", {flagged} command(s) flagged — NOT applied") } else { ", not applied".into() }
+                    if flagged > 0 {
+                        format!(", {flagged} command(s) flagged — NOT applied")
+                    } else {
+                        ", not applied".into()
+                    }
                 )
             }
-            RemediationOutcome::Verified { new_sha256, candidate_path, drift_score, .. } => format!(
-                "checksum refresh verified (new sha {}…, candidate {}{})",
-                &new_sha256[..new_sha256.len().min(12)],
-                candidate_path,
-                drift_score.as_ref().map(|s| format!(", drift {s}")).unwrap_or_default()
-            ),
+            RemediationOutcome::Verified { new_sha256, candidate_path, drift_score, .. } => {
+                format!(
+                    "checksum refresh verified (new sha {}…, candidate {}{})",
+                    &new_sha256[..new_sha256.len().min(12)],
+                    candidate_path,
+                    drift_score.as_ref().map(|s| format!(", drift {s}")).unwrap_or_default()
+                )
+            }
             RemediationOutcome::Proposed { branch, pr_url, cost_usd, .. } => format!(
                 "proposed on branch {branch}{} (${cost_usd:.4})",
                 pr_url.as_ref().map(|u| format!(", PR {u}")).unwrap_or_default()
             ),
             RemediationOutcome::Applied { branch, sha, cost_usd, .. } => {
-                format!("succeeded: pushed {branch} @ {} (${cost_usd:.4})", &sha[..sha.len().min(12)])
+                format!(
+                    "succeeded: pushed {branch} @ {} (${cost_usd:.4})",
+                    &sha[..sha.len().min(12)]
+                )
             }
-            RemediationOutcome::Failed { reason, cost_usd } => format!("failed: {reason} (${cost_usd:.4})"),
+            RemediationOutcome::Failed { reason, cost_usd } => {
+                format!("failed: {reason} (${cost_usd:.4})")
+            }
         }
     }
 }
@@ -158,9 +165,15 @@ mod tests {
             "Try:\n\n```bash\nsudo apt-get install -y foo\n{dangerous_rm}\n```\n\nor `$ {dangerous_chmod}`\n$ {dangerous_chmod}\n"
         );
         let notes = annotate_risks(&advice);
-        assert!(notes.iter().any(|n| n.command == dangerous_rm && n.risk == "Critical"), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n.command == dangerous_rm && n.risk == "Critical"),
+            "{notes:?}"
+        );
         assert!(notes.iter().any(|n| n.command == dangerous_chmod), "{notes:?}");
-        assert!(!notes.iter().any(|n| n.command == "sudo apt-get install -y foo"), "benign: {notes:?}");
+        assert!(
+            !notes.iter().any(|n| n.command == "sudo apt-get install -y foo"),
+            "benign: {notes:?}"
+        );
         assert!(annotate_risks("no commands here").is_empty());
     }
 
@@ -172,7 +185,11 @@ mod tests {
             RemediationOutcome::Advised {
                 suggestion: "run apt-get install foo".into(),
                 cost_usd: 0.12,
-                risks: vec![RiskNote { command: "rm -rf /".into(), risk: "Critical".into(), reason: "recursive delete".into() }],
+                risks: vec![RiskNote {
+                    command: "rm -rf /".into(),
+                    risk: "Critical".into(),
+                    reason: "recursive delete".into(),
+                }],
                 source: "claude".into(),
             },
             RemediationOutcome::Verified {
@@ -182,8 +199,18 @@ mod tests {
                 candidate_path: "/tmp/c.yaml".into(),
                 drift_score: Some("routine".into()),
             },
-            RemediationOutcome::Proposed { branch: "afsc/x".into(), commit: Some("abc".into()), pr_url: None, cost_usd: 0.0 },
-            RemediationOutcome::Applied { branch: "afsc/x".into(), sha: "abcdef1234567890".into(), pr_url: Some("u".into()), cost_usd: 1.5 },
+            RemediationOutcome::Proposed {
+                branch: "afsc/x".into(),
+                commit: Some("abc".into()),
+                pr_url: None,
+                cost_usd: 0.0,
+            },
+            RemediationOutcome::Applied {
+                branch: "afsc/x".into(),
+                sha: "abcdef1234567890".into(),
+                pr_url: Some("u".into()),
+                cost_usd: 1.5,
+            },
             RemediationOutcome::Failed { reason: "verification failed".into(), cost_usd: 0.3 },
         ];
         for o in &outcomes {

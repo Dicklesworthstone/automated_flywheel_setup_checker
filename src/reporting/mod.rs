@@ -20,8 +20,8 @@ pub use jsonl::{
 };
 pub use markdown::{render_diff, render_run, render_timeline};
 pub use metrics::{
-    HealthState, InstallerMetric, MetricsExporter, MetricsReport, MetricsSnapshot, ValidationReport,
-    WINDOW,
+    HealthState, InstallerMetric, MetricsExporter, MetricsReport, MetricsSnapshot,
+    ValidationReport, WINDOW,
 };
 pub use notify::{
     slack_payload, FailureLine, GitHubConfig, Notification, NotificationConfig, Notifier,

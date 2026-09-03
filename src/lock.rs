@@ -33,7 +33,8 @@ impl RunLock {
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
-                    let _ = writeln!(f, "{}\n{}", std::process::id(), chrono::Utc::now().to_rfc3339());
+                    let _ =
+                        writeln!(f, "{}\n{}", std::process::id(), chrono::Utc::now().to_rfc3339());
                     return Ok(Ok(RunLock { path }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -48,7 +49,8 @@ impl RunLock {
                     }
                 }
                 Err(e) => {
-                    return Err(e).with_context(|| format!("Failed to create lock {}", path.display()))
+                    return Err(e)
+                        .with_context(|| format!("Failed to create lock {}", path.display()))
                 }
             }
         }
@@ -123,7 +125,11 @@ mod tests {
     #[test]
     fn stale_lock_with_dead_owner_is_reclaimed() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("run.lock"), format!("{}\n2020-01-01T00:00:00Z\n", u32::MAX - 3)).unwrap();
+        std::fs::write(
+            dir.path().join("run.lock"),
+            format!("{}\n2020-01-01T00:00:00Z\n", u32::MAX - 3),
+        )
+        .unwrap();
         let lock = RunLock::try_acquire(dir.path(), "run").unwrap();
         assert!(lock.is_ok(), "dead owner must be reclaimed");
         let garbage = dir.path().join("x.lock");
@@ -138,7 +144,11 @@ mod tests {
         write_atomic(&p, b"one").unwrap();
         write_atomic(&p, b"two").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
         assert!(leftovers.is_empty());
     }
 }

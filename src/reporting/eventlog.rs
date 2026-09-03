@@ -54,7 +54,13 @@ impl EventLog {
         self.entry(LogLevel::Warn, event, data, None);
     }
 
-    fn entry(&mut self, level: LogLevel, event: &str, data: serde_json::Value, installer: Option<&str>) {
+    fn entry(
+        &mut self,
+        level: LogLevel,
+        event: &str,
+        data: serde_json::Value,
+        installer: Option<&str>,
+    ) {
         let mut entry = LogEntry::new(level, "checker", event)
             .with_data(data)
             .with_correlation_id(self.run_id.clone());
@@ -82,12 +88,17 @@ mod tests {
         std::fs::write(&old, "{}\n").unwrap();
         let mut log = EventLog::open(dir.path(), 7, "run-1").unwrap();
         log.event("run_started", serde_json::json!({"installer_count": 2}));
-        log.installer_event("installer_finished", "zoxide", serde_json::json!({"status": "passed"}));
+        log.installer_event(
+            "installer_finished",
+            "zoxide",
+            serde_json::json!({"status": "passed"}),
+        );
         log.warn_event("reaper", serde_json::json!({"removed": 1}));
         log.flush();
         assert!(!old.exists(), "old log pruned");
         let text = std::fs::read_to_string(log.path()).unwrap();
-        let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let lines: Vec<serde_json::Value> =
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["event"], "run_started");
         assert_eq!(lines[0]["correlation_id"], "run-1");

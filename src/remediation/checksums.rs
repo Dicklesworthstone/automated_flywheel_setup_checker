@@ -88,7 +88,10 @@ pub async fn plan_refresh(
     only: &[String],
     ledger: &Ledger,
 ) -> RefreshPlan {
-    let mut plan = RefreshPlan { checksums_path: checksums_path.to_string_lossy().to_string(), ..Default::default() };
+    let mut plan = RefreshPlan {
+        checksums_path: checksums_path.to_string_lossy().to_string(),
+        ..Default::default()
+    };
     let mut names: Vec<&String> = checksums.installers.keys().collect();
     names.sort();
     for name in names {
@@ -122,10 +125,24 @@ pub async fn plan_refresh(
             let _ = ledger.record(name, &bytes, Some(url), None);
             continue;
         }
-        let baseline = ledger.latest_verified(name).or_else(|| ledger.get(name, &old).map(|b| {
-            (crate::checksums::LedgerEntry { sha256: old.clone(), size: b.len() as u64, first_seen: Utc::now(), last_seen: Utc::now(), last_verified_pass_run: None, url: None }, b)
-        }));
-        let drift = baseline.map(|(_, old_bytes)| analyze(&String::from_utf8_lossy(&old_bytes), &String::from_utf8_lossy(&bytes)));
+        let baseline = ledger.latest_verified(name).or_else(|| {
+            ledger.get(name, &old).map(|b| {
+                (
+                    crate::checksums::LedgerEntry {
+                        sha256: old.clone(),
+                        size: b.len() as u64,
+                        first_seen: Utc::now(),
+                        last_seen: Utc::now(),
+                        last_verified_pass_run: None,
+                        url: None,
+                    },
+                    b,
+                )
+            })
+        });
+        let drift = baseline.map(|(_, old_bytes)| {
+            analyze(&String::from_utf8_lossy(&old_bytes), &String::from_utf8_lossy(&bytes))
+        });
         let _ = ledger.record(name, &bytes, Some(url), None);
         plan.entries.push(RefreshEntry {
             name: name.clone(),
@@ -153,7 +170,10 @@ pub fn render_candidate(original: &str, plan: &RefreshPlan, verified_only: bool)
     let mut current: Option<String> = None;
     for (i, line) in original.lines().enumerate() {
         if i == 0 && line.starts_with("# checksums.yaml - Auto-generated") {
-            out.push_str(&format!("# checksums.yaml - Auto-generated {}\n", Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00")));
+            out.push_str(&format!(
+                "# checksums.yaml - Auto-generated {}\n",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00")
+            ));
             continue;
         }
         let trimmed = line.trim_end();
@@ -167,7 +187,8 @@ pub fn render_candidate(original: &str, plan: &RefreshPlan, verified_only: bool)
             if let Some(new) = updates.get(name) {
                 let indent = &line[..line.len() - line.trim_start().len()];
                 let quoted = trimmed[idx + "sha256:".len()..].trim().starts_with('"');
-                let rendered = if quoted { format!("sha256: \"{new}\"") } else { format!("sha256: {new}") };
+                let rendered =
+                    if quoted { format!("sha256: \"{new}\"") } else { format!("sha256: {new}") };
                 out.push_str(indent);
                 out.push_str(&rendered);
                 out.push('\n');
@@ -181,7 +202,11 @@ pub fn render_candidate(original: &str, plan: &RefreshPlan, verified_only: bool)
 }
 
 /// Run one drifted installer with its new hash through the executor; records the verdict.
-pub async fn verify_entry(entry: &mut RefreshEntry, spec: &InstallerSpec, runner_config: RunnerConfig) -> bool {
+pub async fn verify_entry(
+    entry: &mut RefreshEntry,
+    spec: &InstallerSpec,
+    runner_config: RunnerConfig,
+) -> bool {
     let mut test = spec.to_test().with_sha256(entry.new_sha256.clone());
     test.name = entry.name.clone();
     let runner = InstallerTestRunner::new(runner_config);
@@ -215,7 +240,8 @@ pub fn commit_message(plan: &RefreshPlan, verified_only: bool) -> String {
         .iter()
         .filter(|e| !verified_only || e.verification.as_ref().is_some_and(|v| v.passed))
         .collect();
-    let mut msg = format!("chore(checksums): refresh {} drifted installer pin(s)\n\n", entries.len());
+    let mut msg =
+        format!("chore(checksums): refresh {} drifted installer pin(s)\n\n", entries.len());
     for e in &entries {
         msg.push_str(&format!(
             "- {}: {}… → {}… ({}{})\n",
@@ -223,7 +249,14 @@ pub fn commit_message(plan: &RefreshPlan, verified_only: bool) -> String {
             &e.old_sha256[..12],
             &e.new_sha256[..12],
             e.drift.as_ref().map(|d| d.score.as_str()).unwrap_or("no baseline"),
-            e.verification.as_ref().map(|v| if v.passed { ", verified in a fresh container" } else { ", NOT verified" }).unwrap_or("")
+            e.verification
+                .as_ref()
+                .map(|v| if v.passed {
+                    ", verified in a fresh container"
+                } else {
+                    ", NOT verified"
+                })
+                .unwrap_or("")
         ));
     }
     msg.push_str("\nGenerated by automated_flywheel_setup_checker remediate checksums.\n");
@@ -269,7 +302,16 @@ pub fn propose(
     git(&worktree, &["add", "checksums.yaml"])?;
     git(
         &worktree,
-        &["-c", "user.name=automated_flywheel_setup_checker", "-c", "user.email=afsc@localhost", "commit", "-q", "-m", message],
+        &[
+            "-c",
+            "user.name=automated_flywheel_setup_checker",
+            "-c",
+            "user.email=afsc@localhost",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
     )?;
     let commit = git(&worktree, &["rev-parse", "HEAD"])?;
     let mut pushed = false;
@@ -285,18 +327,29 @@ pub fn propose(
             .output();
         match out {
             Ok(o) if o.status.success() => {
-                pr_url = String::from_utf8_lossy(&o.stdout).lines().last().map(|s| s.trim().to_string());
+                pr_url =
+                    String::from_utf8_lossy(&o.stdout).lines().last().map(|s| s.trim().to_string());
             }
-            Ok(o) => tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr).trim(), "gh pr create failed"),
+            Ok(o) => {
+                tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr).trim(), "gh pr create failed")
+            }
             Err(e) => tracing::warn!(error = %e, "gh not available; branch created without a PR"),
         }
     }
-    Ok(ProposalResult { branch, worktree: worktree.to_string_lossy().to_string(), commit, pr_url, pushed })
+    Ok(ProposalResult {
+        branch,
+        worktree: worktree.to_string_lossy().to_string(),
+        commit,
+        pr_url,
+        pushed,
+    })
 }
 
 /// Where candidates are written for advisory runs.
 pub fn candidate_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("candidates").join(format!("checksums-{}.yaml", Utc::now().format("%Y%m%dT%H%M%S")))
+    data_dir
+        .join("candidates")
+        .join(format!("checksums-{}.yaml", Utc::now().format("%Y%m%dT%H%M%S")))
 }
 
 #[cfg(test)]
@@ -313,19 +366,44 @@ mod tests {
             new_sha256: new.to_string().repeat(64),
             size: 10,
             drift: None,
-            verification: passed.map(|p| Verification { status: if p { "passed" } else { "failed" }.into(), exit_code: Some(if p { 0 } else { 1 }), duration_ms: 1, installed_version: None, stderr_tail: String::new(), passed: p }),
+            verification: passed.map(|p| Verification {
+                status: if p { "passed" } else { "failed" }.into(),
+                exit_code: Some(if p { 0 } else { 1 }),
+                duration_ms: 1,
+                installed_version: None,
+                stderr_tail: String::new(),
+                passed: p,
+            }),
         }
     }
 
     #[test]
     fn candidate_rewrites_only_the_drifted_pins_and_keeps_layout() {
-        let plan = RefreshPlan { entries: vec![entry("uv", '2', 'a', Some(true)), entry("zoxide", '3', 'b', Some(false))], ..Default::default() };
+        let plan = RefreshPlan {
+            entries: vec![
+                entry("uv", '2', 'a', Some(true)),
+                entry("zoxide", '3', 'b', Some(false)),
+            ],
+            ..Default::default()
+        };
         let all = render_candidate(ORIGINAL, &plan, false);
-        assert!(all.contains("sha256: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""));
-        assert!(all.contains("sha256: \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""));
-        assert!(all.contains("sha256: \"1111111111111111111111111111111111111111111111111111111111111111\""), "untouched pin kept");
+        assert!(all.contains(
+            "sha256: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+        ));
+        assert!(all.contains(
+            "sha256: \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+        ));
+        assert!(
+            all.contains(
+                "sha256: \"1111111111111111111111111111111111111111111111111111111111111111\""
+            ),
+            "untouched pin kept"
+        );
         assert!(all.starts_with("# checksums.yaml - Auto-generated 20"), "header refreshed");
-        assert!(all.contains("# Run: ./scripts/lib/security.sh --update-checksums"), "comments kept");
+        assert!(
+            all.contains("# Run: ./scripts/lib/security.sh --update-checksums"),
+            "comments kept"
+        );
         assert_eq!(all.lines().count(), ORIGINAL.lines().count(), "line structure preserved");
 
         let verified = render_candidate(ORIGINAL, &plan, true);
@@ -336,10 +414,21 @@ mod tests {
 
     #[test]
     fn commit_message_lists_pins_and_verification() {
-        let plan = RefreshPlan { entries: vec![entry("uv", '2', 'a', Some(true)), entry("zoxide", '3', 'b', Some(false))], ..Default::default() };
+        let plan = RefreshPlan {
+            entries: vec![
+                entry("uv", '2', 'a', Some(true)),
+                entry("zoxide", '3', 'b', Some(false)),
+            ],
+            ..Default::default()
+        };
         let msg = commit_message(&plan, true);
         assert!(msg.starts_with("chore(checksums): refresh 1 drifted installer pin(s)"));
-        assert!(msg.contains("- uv: 222222222222… → aaaaaaaaaaaa… (no baseline, verified in a fresh container)"), "{msg}");
+        assert!(
+            msg.contains(
+                "- uv: 222222222222… → aaaaaaaaaaaa… (no baseline, verified in a fresh container)"
+            ),
+            "{msg}"
+        );
         assert!(!msg.contains("zoxide"));
         assert_eq!(plan.verified().count(), 1);
         assert_eq!(plan.unverified().count(), 1);
@@ -365,7 +454,9 @@ mod tests {
         let checksums = crate::checksums::parse_checksums(&path).unwrap();
         let ledger = Ledger::new(&dir.path().join("data"));
         // Baseline for the drifted tool: an older verified version.
-        let old_sha = ledger.record("drift_tool", b"#!/bin/bash\nVERSION=1.0.0\necho drift\n", None, Some("run-0")).unwrap();
+        let old_sha = ledger
+            .record("drift_tool", b"#!/bin/bash\nVERSION=1.0.0\necho drift\n", None, Some("run-0"))
+            .unwrap();
         assert_ne!(old_sha, "0".repeat(64));
 
         let plan = plan_refresh(&path, &checksums, &[], &ledger).await;
@@ -394,18 +485,34 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]).unwrap();
         std::fs::write(repo.join("checksums.yaml"), ORIGINAL).unwrap();
         git(&repo, &["add", "."]).unwrap();
-        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
-        let plan = RefreshPlan { entries: vec![entry("uv", '2', 'a', Some(true))], ..Default::default() };
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"])
+            .unwrap();
+        let plan =
+            RefreshPlan { entries: vec![entry("uv", '2', 'a', Some(true))], ..Default::default() };
         let candidate = render_candidate(ORIGINAL, &plan, true);
-        let result = propose(&repo, &dir.path().join("worktrees"), &candidate, &commit_message(&plan, true), false, false).unwrap();
+        let result = propose(
+            &repo,
+            &dir.path().join("worktrees"),
+            &candidate,
+            &commit_message(&plan, true),
+            false,
+            false,
+        )
+        .unwrap();
         assert!(result.branch.starts_with("afsc/checksum-refresh-"));
         assert!(!result.pushed && result.pr_url.is_none());
         let wt = Path::new(&result.worktree);
-        assert!(std::fs::read_to_string(wt.join("checksums.yaml")).unwrap().contains("aaaaaaaaaaaa"));
+        assert!(std::fs::read_to_string(wt.join("checksums.yaml"))
+            .unwrap()
+            .contains("aaaaaaaaaaaa"));
         assert_eq!(git(wt, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), result.branch);
         // The original checkout is untouched.
-        assert!(std::fs::read_to_string(repo.join("checksums.yaml")).unwrap().contains("2222222222222222"));
+        assert!(std::fs::read_to_string(repo.join("checksums.yaml"))
+            .unwrap()
+            .contains("2222222222222222"));
         assert_eq!(git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main");
-        assert!(git(&repo, &["log", "--oneline", "-1", &result.branch]).unwrap().contains("refresh 1 drifted"));
+        assert!(git(&repo, &["log", "--oneline", "-1", &result.branch])
+            .unwrap()
+            .contains("refresh 1 drifted"));
     }
 }

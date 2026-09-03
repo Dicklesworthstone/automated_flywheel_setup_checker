@@ -20,8 +20,14 @@ const RULES: &[Rule] = &[
     Rule { kind: "slack_webhook", pattern: r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+" },
     Rule { kind: "aws_access_key", pattern: r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b" },
     Rule { kind: "api_key", pattern: r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}\b" },
-    Rule { kind: "private_key", pattern: r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----" },
-    Rule { kind: "authorization", pattern: r"(?i)\b(authorization\s*:\s*(?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=-]{8,}" },
+    Rule {
+        kind: "private_key",
+        pattern: r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+    },
+    Rule {
+        kind: "authorization",
+        pattern: r"(?i)\b(authorization\s*:\s*(?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=-]{8,}",
+    },
     Rule {
         kind: "secret_assignment",
         pattern: r#"(?i)\b((?:[A-Z0-9_]*_)?(?:token|password|passwd|secret|api[_-]?key|access[_-]?key)s?\s*[=:]\s*["']?)([^\s"'&;]{6,})"#,
@@ -43,9 +49,9 @@ pub fn redact(text: &str) -> String {
         let marker = format!("[redacted:{kind}]");
         out = match *kind {
             // Keep the key/header name, replace only the value.
-            "authorization" | "secret_assignment" => {
-                re.replace_all(&out, |caps: &regex::Captures| format!("{}{}", &caps[1], marker)).to_string()
-            }
+            "authorization" | "secret_assignment" => re
+                .replace_all(&out, |caps: &regex::Captures| format!("{}{}", &caps[1], marker))
+                .to_string(),
             _ => re.replace_all(&out, marker.as_str()).to_string(),
         };
     }
@@ -70,7 +76,10 @@ mod tests {
             ("https://hooks.slack.com/services/T000/B000/XXXXXXXX", "[redacted:slack_webhook]"),
             ("AKIAABCDEFGHIJKLMNOP", "[redacted:aws_access_key]"),
             ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz", "[redacted:api_key]"),
-            ("Authorization: Bearer abcdef.ghijkl.mnopqr", "Authorization: Bearer [redacted:authorization]"),
+            (
+                "Authorization: Bearer abcdef.ghijkl.mnopqr",
+                "Authorization: Bearer [redacted:authorization]",
+            ),
             ("GITHUB_TOKEN=supersecretvalue123", "GITHUB_TOKEN=[redacted:secret_assignment]"),
             ("password: hunter22hunter", "password: [redacted:secret_assignment]"),
         ];

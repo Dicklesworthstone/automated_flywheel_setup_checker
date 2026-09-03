@@ -55,11 +55,10 @@ impl MonitoringServerConfig {
         let configured_port =
             if config.health_endpoint { config.health_port } else { config.metrics_port };
         let listen_port = health_port_override.or(metrics_port_override).unwrap_or(configured_port);
-        let bind: IpAddr = config
-            .bind
-            .trim()
-            .parse()
-            .with_context(|| format!("[monitoring].bind {:?} is not an IP address", config.bind))?;
+        let bind: IpAddr =
+            config.bind.trim().parse().with_context(|| {
+                format!("[monitoring].bind {:?} is not an IP address", config.bind)
+            })?;
 
         Ok(Self {
             health_enabled: config.health_endpoint,
@@ -189,7 +188,9 @@ fn health_status(report: &MetricsReport, stale_status_code: u16) -> StatusCode {
 
 fn metrics_response(config: &MonitoringServerConfig) -> Response<ResponseBody> {
     match compute(config) {
-        Ok(report) => text_response(StatusCode::OK, PROMETHEUS_CONTENT_TYPE, report.to_prometheus()),
+        Ok(report) => {
+            text_response(StatusCode::OK, PROMETHEUS_CONTENT_TYPE, report.to_prometheus())
+        }
         Err(error) => text_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             TEXT_CONTENT_TYPE,
@@ -200,7 +201,8 @@ fn metrics_response(config: &MonitoringServerConfig) -> Response<ResponseBody> {
 
 /// Health document for a data dir (used by `status` and tests without a listener).
 pub fn health_document(data_dir: &Path, stale_after_seconds: u64) -> Result<serde_json::Value> {
-    Ok(MetricsReport::from_data_dir(data_dir, chrono::Utc::now(), stale_after_seconds)?.health_json())
+    Ok(MetricsReport::from_data_dir(data_dir, chrono::Utc::now(), stale_after_seconds)?
+        .health_json())
 }
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<ResponseBody> {
@@ -256,11 +258,17 @@ mod tests {
     #[test]
     fn server_config_requires_enabled_endpoints_and_a_valid_bind() {
         let config = MonitoringConfig::default();
-        let error = MonitoringServerConfig::from_config(&config, None, None, PathBuf::from("/x")).unwrap_err();
+        let error = MonitoringServerConfig::from_config(&config, None, None, PathBuf::from("/x"))
+            .unwrap_err();
         assert!(error.to_string().contains("monitoring endpoints are disabled"));
 
-        let bad_bind = MonitoringConfig { health_endpoint: true, bind: "localhost".into(), ..Default::default() };
-        let error = MonitoringServerConfig::from_config(&bad_bind, None, None, PathBuf::from("/x")).unwrap_err();
+        let bad_bind = MonitoringConfig {
+            health_endpoint: true,
+            bind: "localhost".into(),
+            ..Default::default()
+        };
+        let error = MonitoringServerConfig::from_config(&bad_bind, None, None, PathBuf::from("/x"))
+            .unwrap_err();
         assert!(error.to_string().contains("not an IP address"), "{error}");
     }
 
@@ -274,12 +282,15 @@ mod tests {
             bind: "127.0.0.1".into(),
             ..Default::default()
         };
-        let server_config = MonitoringServerConfig::from_config(&config, None, None, PathBuf::from("/x")).unwrap();
+        let server_config =
+            MonitoringServerConfig::from_config(&config, None, None, PathBuf::from("/x")).unwrap();
         assert_eq!(server_config.listen_port, 9191);
         assert_eq!(server_config.bind, IpAddr::from([127, 0, 0, 1]));
         assert!(!server_config.health_enabled);
         assert!(server_config.metrics_enabled);
-        let overridden = MonitoringServerConfig::from_config(&config, Some(0), None, PathBuf::from("/x")).unwrap();
+        let overridden =
+            MonitoringServerConfig::from_config(&config, Some(0), None, PathBuf::from("/x"))
+                .unwrap();
         assert_eq!(overridden.listen_port, 0);
     }
 
@@ -303,7 +314,12 @@ mod tests {
         persister2.persist_with_header(&[TestResult::new("a").passed()], &old, false).unwrap();
         let doc = health_document(&dir.path().join("nested"), 100).unwrap();
         assert_eq!(doc["status"], "no_data");
-        let report = MetricsReport::from_data_dir(dir.path(), chrono::Utc::now() + chrono::Duration::seconds(200), 100).unwrap();
+        let report = MetricsReport::from_data_dir(
+            dir.path(),
+            chrono::Utc::now() + chrono::Duration::seconds(200),
+            100,
+        )
+        .unwrap();
         assert_eq!(report.health, HealthState::Stale);
         assert_eq!(health_status(&report, 503), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(health_status(&report, 299), StatusCode::from_u16(299).unwrap());

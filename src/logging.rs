@@ -46,8 +46,7 @@ pub fn init_with(verbosity: u8, format: LogFormat, configured_level: Option<&str
             .unwrap_or_else(|| default_filter(0).to_string())
     };
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
 
     let ansi = std::io::stderr().is_terminal();
 

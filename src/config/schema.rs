@@ -543,7 +543,11 @@ mod tests {
     fn remediation_effective_mode_is_backwards_compatible() {
         let c = RemediationConfig { enabled: true, ..Default::default() };
         assert_eq!(c.effective_mode(), RemediationMode::Advisory);
-        let c = RemediationConfig { enabled: false, mode: RemediationMode::Propose, ..Default::default() };
+        let c = RemediationConfig {
+            enabled: false,
+            mode: RemediationMode::Propose,
+            ..Default::default()
+        };
         assert_eq!(c.effective_mode(), RemediationMode::Propose);
         assert_eq!(RemediationMode::parse("APPLY"), Some(RemediationMode::Apply));
         assert_eq!(RemediationMode::parse("nope"), None);

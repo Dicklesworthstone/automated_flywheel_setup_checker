@@ -128,8 +128,8 @@ impl Notifier {
         }
 
         if let Some(slack) = &self.config.slack {
-            let wanted =
-                (n.is_failure && slack.notify_on_failure) || (!n.is_failure && slack.notify_on_success);
+            let wanted = (n.is_failure && slack.notify_on_failure)
+                || (!n.is_failure && slack.notify_on_success);
             if !wanted {
                 outcome.slack = Some("skipped".into());
             } else {
@@ -178,7 +178,11 @@ impl Notifier {
         }
     }
 
-    async fn github(&self, github: &GitHubConfig, n: &Notification) -> Result<(String, Option<u64>)> {
+    async fn github(
+        &self,
+        github: &GitHubConfig,
+        n: &Notification,
+    ) -> Result<(String, Option<u64>)> {
         let Some(token) = Self::github_token(github) else {
             return Ok(("unconfigured".into(), None));
         };
@@ -203,7 +207,9 @@ impl Notifier {
                     Ok(("skipped".into(), Some(number)))
                 }
                 None if github.create_issues => {
-                    let number = self.create_issue(&base, &token, &github.issue_title, &n.body_markdown).await?;
+                    let number = self
+                        .create_issue(&base, &token, &github.issue_title, &n.body_markdown)
+                        .await?;
                     info!(repo = %github.repo, issue = number, "Created GitHub issue");
                     Ok(("created".into(), Some(number)))
                 }
@@ -223,7 +229,12 @@ impl Notifier {
         }
     }
 
-    fn github_request(&self, method: reqwest::Method, url: &str, token: &str) -> reqwest::RequestBuilder {
+    fn github_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
             .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -419,8 +430,24 @@ mod tests {
             run_id: "run-1".into(),
             summary_fields: vec![("Passed".into(), "3".into()), ("Failed".into(), "2".into())],
             failures: vec![
-                FailureLine { installer: "rust".into(), status: "failed".into(), category: "network".into(), severity: "Transient".into(), duration_ms: 1500, attempts: 4, hint: "curl: (7) Failed".into() },
-                FailureLine { installer: "bun".into(), status: "timedout".into(), category: "timeout".into(), severity: "Transient".into(), duration_ms: 300000, attempts: 1, hint: String::new() },
+                FailureLine {
+                    installer: "rust".into(),
+                    status: "failed".into(),
+                    category: "network".into(),
+                    severity: "Transient".into(),
+                    duration_ms: 1500,
+                    attempts: 4,
+                    hint: "curl: (7) Failed".into(),
+                },
+                FailureLine {
+                    installer: "bun".into(),
+                    status: "timedout".into(),
+                    category: "timeout".into(),
+                    severity: "Transient".into(),
+                    duration_ms: 300000,
+                    attempts: 1,
+                    hint: String::new(),
+                },
             ],
             kind: "failure".into(),
         };
@@ -428,10 +455,16 @@ mod tests {
         let blocks = p["blocks"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "header");
         assert_eq!(blocks[1]["fields"].as_array().unwrap().len(), 2);
-        assert!(blocks[2]["text"]["text"].as_str().unwrap().contains("*rust* — failed (network, Transient)"));
+        assert!(blocks[2]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("*rust* — failed (network, Transient)"));
         assert!(blocks[2]["text"]["text"].as_str().unwrap().contains("curl: (7) Failed"));
         assert!(blocks[3]["text"]["text"].as_str().unwrap().contains("300.0s"));
-        assert!(blocks.last().unwrap()["elements"][0]["text"].as_str().unwrap().contains("run `run-1`"));
+        assert!(blocks.last().unwrap()["elements"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("run `run-1`"));
         assert_eq!(p["attachments"][0]["color"], "#d73a49");
     }
 }

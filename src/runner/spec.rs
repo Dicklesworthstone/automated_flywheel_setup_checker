@@ -66,7 +66,9 @@ pub fn resolve_spec(
     // interpreter
     let (interpreter, src) = match ovr.and_then(|o| o.interpreter.as_deref()) {
         Some(s) => (
-            Interpreter::parse(s).map(|i| i.as_str().to_string()).unwrap_or_else(|| s.trim().to_string()),
+            Interpreter::parse(s)
+                .map(|i| i.as_str().to_string())
+                .unwrap_or_else(|| s.trim().to_string()),
             FieldSource::Override,
         ),
         None if has_profile => (profile.interpreter.as_str().to_string(), FieldSource::Profile),
@@ -169,7 +171,9 @@ impl InstallerSpec {
         if let Some(c) = &self.version_cmd {
             test = test.with_version_cmd(c);
         }
-        if let Some(bytes) = self.memory_limit.as_deref().and_then(super::container::parse_memory_limit) {
+        if let Some(bytes) =
+            self.memory_limit.as_deref().and_then(super::container::parse_memory_limit)
+        {
             test = test.with_memory_limit(bytes);
         }
         if let Some(net) = &self.network {
@@ -289,7 +293,11 @@ mod tests {
 
     #[test]
     fn skip_override_carries_reason() {
-        let ovr = InstallerOverride { skip: Some(true), skip_reason: Some("upstream gone".into()), ..Default::default() };
+        let ovr = InstallerOverride {
+            skip: Some(true),
+            skip_reason: Some("upstream gone".into()),
+            ..Default::default()
+        };
         let s = resolve_spec("x", &entry("https://x"), Some(&ovr), G);
         assert_eq!(s.skip_reason.as_deref(), Some("upstream gone"));
         let ovr = InstallerOverride { skip: Some(true), ..Default::default() };

@@ -42,14 +42,22 @@ async fn create_exec_and_cleanup_with_labels_limits_and_env() {
     assert_eq!(docker_inspect(&id, "{{.HostConfig.Memory}}"), (256 * 1024 * 1024).to_string());
 
     // Exec: env vars, non-root user, exit codes
-    let (code, out, _) = must(manager.exec_in_container(&id, &["bash", "-c", "echo $TEST_VAR"]).await, "exec_in_container");
+    let (code, out, _) = must(
+        manager.exec_in_container(&id, &["bash", "-c", "echo $TEST_VAR"]).await,
+        "exec_in_container",
+    );
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "test_value");
-    let (_, out, _) = must(manager.exec_in_container(&id, &["bash", "-c", "echo $DEBIAN_FRONTEND"]).await, "exec_in_container");
+    let (_, out, _) = must(
+        manager.exec_in_container(&id, &["bash", "-c", "echo $DEBIAN_FRONTEND"]).await,
+        "exec_in_container",
+    );
     assert_eq!(out.trim(), "noninteractive");
-    let (_, out, _) = must(manager.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
+    let (_, out, _) =
+        must(manager.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(out.trim(), "afsc-user", "default image runs as the non-root user");
-    let (code, _, _) = must(manager.exec_in_container(&id, &["bash", "-c", "exit 42"]).await, "exec_in_container");
+    let (code, _, _) =
+        must(manager.exec_in_container(&id, &["bash", "-c", "exit 42"]).await, "exec_in_container");
     assert_eq!(code, 42);
     // stdout and stderr are separated (no tty on exec)
     let (_, out, err) =
@@ -72,10 +80,14 @@ async fn real_run_verifies_checksum_and_refuses_mismatch() {
         "pass",
         "#!/bin/bash\necho \"ran as $(id -un) HOME=$HOME\"\ntouch \"$HOME/.afsc-ran\"\nexit 0\n",
     );
-    let (bad_url, _) = fx.add_installer("bad", "#!/bin/bash\ntouch /tmp/afsc-must-not-exist\nexit 0\n");
+    let (bad_url, _) =
+        fx.add_installer("bad", "#!/bin/bash\ntouch /tmp/afsc-must-not-exist\nexit 0\n");
     let runner = InstallerTestRunner::new(fx.runner_config(Duration::from_secs(120)));
 
-    let ok = must(runner.run_test_with_retry(&fx.test("pass", &url, &sha, Duration::from_secs(120))).await, "run_test_with_retry");
+    let ok = must(
+        runner.run_test_with_retry(&fx.test("pass", &url, &sha, Duration::from_secs(120))).await,
+        "run_test_with_retry",
+    );
     assert_eq!(ok.status, TestStatus::Passed, "stderr: {}", ok.stderr);
     assert_eq!(ok.checksum_state, ChecksumState::Verified);
     assert!(ok.stdout.contains("ran as afsc-user"), "{}", ok.stdout);
@@ -91,9 +103,16 @@ async fn real_run_verifies_checksum_and_refuses_mismatch() {
     assert!(!refused.stdout.contains("must-not-exist"));
 
     // Verified-but-failed: checksum state stays Verified and the failure is classified.
-    let (fail_url, fail_sha) =
-        fx.add_installer("dep", "#!/bin/bash\necho 'E: Unable to locate package foo' >&2\nexit 100\n");
-    let failed = must(runner.run_test_with_retry(&fx.test("dep", &fail_url, &fail_sha, Duration::from_secs(120))).await, "run_test_with_retry");
+    let (fail_url, fail_sha) = fx.add_installer(
+        "dep",
+        "#!/bin/bash\necho 'E: Unable to locate package foo' >&2\nexit 100\n",
+    );
+    let failed = must(
+        runner
+            .run_test_with_retry(&fx.test("dep", &fail_url, &fail_sha, Duration::from_secs(120)))
+            .await,
+        "run_test_with_retry",
+    );
     assert_eq!(failed.status, TestStatus::Failed);
     assert_eq!(failed.checksum_state, ChecksumState::Verified);
     assert_eq!(failed.error.as_ref().unwrap().category, "dependency");
@@ -109,7 +128,10 @@ async fn timeout_kills_the_installer_and_removes_the_container() {
     let (url, sha) = fx.add_installer("sleeper", "#!/bin/bash\nsleep 120\nexit 0\n");
     let runner = InstallerTestRunner::new(fx.runner_config(Duration::from_secs(5)));
     let start = Instant::now();
-    let r = must(runner.run_test_with_retry(&fx.test("sleeper", &url, &sha, Duration::from_secs(5))).await, "run_test_with_retry");
+    let r = must(
+        runner.run_test_with_retry(&fx.test("sleeper", &url, &sha, Duration::from_secs(5))).await,
+        "run_test_with_retry",
+    );
     assert_eq!(r.status, TestStatus::TimedOut);
     assert_eq!(r.error.as_ref().unwrap().category, "timeout");
     assert!(start.elapsed() < Duration::from_secs(40), "{:?}", start.elapsed());
@@ -131,7 +153,12 @@ async fn cancellation_stops_the_installer_and_removes_the_container() {
         canceller.cancel();
     });
     let start = Instant::now();
-    let r = must(runner.run_test_with_retry(&fx.test("cancelme", &url, &sha, Duration::from_secs(300))).await, "run_test_with_retry");
+    let r = must(
+        runner
+            .run_test_with_retry(&fx.test("cancelme", &url, &sha, Duration::from_secs(300)))
+            .await,
+        "run_test_with_retry",
+    );
     assert_eq!(r.status, TestStatus::Cancelled, "stderr: {}", r.stderr);
     assert_eq!(r.error.as_ref().unwrap().category, "cancelled");
     assert!(start.elapsed() < Duration::from_secs(30), "{:?}", start.elapsed());

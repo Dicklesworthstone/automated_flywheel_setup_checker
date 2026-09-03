@@ -950,7 +950,12 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let kinds: Vec<String> = content
             .lines()
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"].as_str().unwrap().to_string())
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         assert_eq!(kinds, vec!["run", "result", "result", "summary"]);
 

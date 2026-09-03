@@ -20,10 +20,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use automated_flywheel_setup_checker::config::Config;
 use automated_flywheel_setup_checker::config::{RemediationMode, RunOrder};
 use automated_flywheel_setup_checker::reporting::RunInfo;
-use automated_flywheel_setup_checker::config::Config;
-use automated_flywheel_setup_checker::reporting::{diff_runs, render_diff, render_run, render_timeline, History};
+use automated_flywheel_setup_checker::reporting::{
+    diff_runs, render_diff, render_run, render_timeline, History,
+};
 
 use automated_flywheel_setup_checker::{
     checksums::{
@@ -37,8 +39,8 @@ use automated_flywheel_setup_checker::{
     reporting::{ResultPersister, RunHeader},
     runner::{
         parse_memory_limit, resolve_spec, ContainerConfig, ContainerManager, ExecutionBackend,
-        GlobalDefaults, InstallerSpec, InstallerTest, InstallerTestRunner, PullPolicy,
-        RetryConfig, RunnerConfig, TestResult, TestStatus,
+        GlobalDefaults, InstallerSpec, InstallerTest, InstallerTestRunner, PullPolicy, RetryConfig,
+        RunnerConfig, TestResult, TestStatus,
     },
     SystemdWatchdog,
 };
@@ -524,7 +526,8 @@ async fn run_command(
         && !matches!(&cli.command, Commands::Status { .. })
     {
         return Err(AfscError::Usage(
-            "--format prometheus and --format markdown are only supported for the status command".into(),
+            "--format prometheus and --format markdown are only supported for the status command"
+                .into(),
         ));
     }
 
@@ -533,7 +536,17 @@ async fn run_command(
     match &cli.command {
         Commands::Check { reap: true, .. } => cmd_reap(settings, cli.format).await,
 
-        Commands::Check { installers, dry_run, remediate, local, yes, allow_concurrent, rebuild_base, failed_from, .. } => {
+        Commands::Check {
+            installers,
+            dry_run,
+            remediate,
+            local,
+            yes,
+            allow_concurrent,
+            rebuild_base,
+            failed_from,
+            ..
+        } => {
             if let Some(wd) = watchdog {
                 wd.notify_status("Running installer checks");
             }
@@ -592,7 +605,8 @@ async fn run_command(
                 let text = format!("{e:#}");
                 if text.contains("failed to bind") {
                     AfscError::Infra(text)
-                } else if text.contains("disabled in config") || text.contains("not an IP address") {
+                } else if text.contains("disabled in config") || text.contains("not an IP address")
+                {
                     AfscError::Config(text)
                 } else {
                     AfscError::Other(e)
@@ -602,9 +616,16 @@ async fn run_command(
 
         Commands::List { runnable } => cmd_list(settings, *runnable, cli.format),
 
-        Commands::Status { detailed, list, run, history, last, diff } => {
-            cmd_status(settings, *detailed, *list, run.as_deref(), history.as_deref(), *last, diff, cli.format)
-        }
+        Commands::Status { detailed, list, run, history, last, diff } => cmd_status(
+            settings,
+            *detailed,
+            *list,
+            run.as_deref(),
+            history.as_deref(),
+            *last,
+            diff,
+            cli.format,
+        ),
 
         Commands::Validate { path, check_urls, check_hashes, profile } => {
             cmd_validate(settings, path.clone(), *check_urls, *check_hashes, *profile, cli.format)
@@ -617,11 +638,22 @@ async fn run_command(
 
         Commands::Doctor { local } => cmd_doctor(settings, *local, cli.format).await,
 
-        Commands::Remediate { what: RemediateCmd::Checksums { from_last_run, only, mode, no_verify, local, yes } } => {
+        Commands::Remediate {
+            what: RemediateCmd::Checksums { from_last_run, only, mode, no_verify, local, yes },
+        } => {
             if *local && !*no_verify {
                 local_consent(*yes)?;
             }
-            cmd_remediate_checksums(settings, *from_last_run, only, *mode, !*no_verify, *local, cli.format).await
+            cmd_remediate_checksums(
+                settings,
+                *from_last_run,
+                only,
+                *mode,
+                !*no_verify,
+                *local,
+                cli.format,
+            )
+            .await
         }
 
         Commands::Notify { last_run, run, digest } => {
@@ -727,7 +759,9 @@ fn build_runner_config(
             prepare: config.docker.prepare,
             build_timeout_seconds: config.docker.build_timeout_seconds,
             rebuild: rebuild_base,
-            network_mode: if config.docker.network.trim().is_empty() || config.docker.network == "bridge" {
+            network_mode: if config.docker.network.trim().is_empty()
+                || config.docker.network == "bridge"
+            {
                 None
             } else {
                 Some(config.docker.network.clone())
@@ -759,7 +793,8 @@ async fn remediate_results(
     event_log: Option<&mut automated_flywheel_setup_checker::reporting::EventLog>,
 ) {
     use automated_flywheel_setup_checker::remediation::{
-        annotate_risks, generate_suggestions, ClaudeRemediation, ClaudeRemediationConfig as RemConfig, RemediationMethod, RemediationOutcome,
+        annotate_risks, generate_suggestions, ClaudeRemediation,
+        ClaudeRemediationConfig as RemConfig, RemediationMethod, RemediationOutcome,
     };
 
     let config = &settings.config;
@@ -774,39 +809,70 @@ async fn remediate_results(
     // 1. Checksum drift: deterministic refresh, verified in a fresh sandbox.
     let drifted: Vec<String> = results
         .iter()
-        .filter(|r| is_failure(r) && r.error.as_ref().is_some_and(|e| e.category == "checksum_mismatch"))
+        .filter(|r| {
+            is_failure(r) && r.error.as_ref().is_some_and(|e| e.category == "checksum_mismatch")
+        })
         .map(|r| r.installer_name.clone())
         .collect();
     if !drifted.is_empty() {
         match refresh_checksums(settings, &drifted, mode, true, local).await {
             Ok(run) => {
                 for r in results.iter_mut().filter(|r| drifted.contains(&r.installer_name)) {
-                    let outcome = match run.plan.entries.iter().find(|e| e.name == r.installer_name) {
+                    let outcome = match run.plan.entries.iter().find(|e| e.name == r.installer_name)
+                    {
                         Some(e) if e.verification.as_ref().is_some_and(|v| v.passed) => {
-                            let candidate_path = run.candidate_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            let candidate_path = run
+                                .candidate_path
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
                             match &run.proposal {
-                                Some(pr) if pr.pushed => RemediationOutcome::Applied { branch: pr.branch.clone(), sha: pr.commit.clone(), pr_url: pr.pr_url.clone(), cost_usd: 0.0 },
-                                Some(pr) => RemediationOutcome::Proposed { branch: pr.branch.clone(), commit: Some(pr.commit.clone()), pr_url: pr.pr_url.clone(), cost_usd: 0.0 },
+                                Some(pr) if pr.pushed => RemediationOutcome::Applied {
+                                    branch: pr.branch.clone(),
+                                    sha: pr.commit.clone(),
+                                    pr_url: pr.pr_url.clone(),
+                                    cost_usd: 0.0,
+                                },
+                                Some(pr) => RemediationOutcome::Proposed {
+                                    branch: pr.branch.clone(),
+                                    commit: Some(pr.commit.clone()),
+                                    pr_url: pr.pr_url.clone(),
+                                    cost_usd: 0.0,
+                                },
                                 None => RemediationOutcome::Verified {
                                     installer: e.name.clone(),
                                     old_sha256: e.old_sha256.clone(),
                                     new_sha256: e.new_sha256.clone(),
                                     candidate_path,
-                                    drift_score: e.drift.as_ref().map(|d| d.score.as_str().to_string()),
+                                    drift_score: e
+                                        .drift
+                                        .as_ref()
+                                        .map(|d| d.score.as_str().to_string()),
                                 },
                             }
                         }
                         Some(e) => RemediationOutcome::Failed {
                             reason: format!(
                                 "installer still fails with the refreshed hash ({}{})",
-                                e.verification.as_ref().map(|v| v.status.clone()).unwrap_or_else(|| "not verified".into()),
-                                e.drift.as_ref().map(|d| format!(", drift {}", d.score.as_str())).unwrap_or_default()
+                                e.verification
+                                    .as_ref()
+                                    .map(|v| v.status.clone())
+                                    .unwrap_or_else(|| "not verified".into()),
+                                e.drift
+                                    .as_ref()
+                                    .map(|d| format!(", drift {}", d.score.as_str()))
+                                    .unwrap_or_default()
                             ),
                             cost_usd: 0.0,
                         },
-                        None => match run.plan.skipped.iter().find(|(n, _)| n == &r.installer_name) {
-                            Some((_, reason)) => RemediationOutcome::Failed { reason: reason.clone(), cost_usd: 0.0 },
-                            None => RemediationOutcome::Skipped { reason: "served bytes match the pin again; rerun".into() },
+                        None => match run.plan.skipped.iter().find(|(n, _)| n == &r.installer_name)
+                        {
+                            Some((_, reason)) => {
+                                RemediationOutcome::Failed { reason: reason.clone(), cost_usd: 0.0 }
+                            }
+                            None => RemediationOutcome::Skipped {
+                                reason: "served bytes match the pin again; rerun".into(),
+                            },
                         },
                     };
                     r.remediation = Some(outcome);
@@ -814,7 +880,10 @@ async fn remediate_results(
             }
             Err(e) => {
                 for r in results.iter_mut().filter(|r| drifted.contains(&r.installer_name)) {
-                    r.remediation = Some(RemediationOutcome::Failed { reason: format!("checksum refresh failed: {e}"), cost_usd: 0.0 });
+                    r.remediation = Some(RemediationOutcome::Failed {
+                        reason: format!("checksum refresh failed: {e}"),
+                        cost_usd: 0.0,
+                    });
                 }
             }
         }
@@ -839,12 +908,23 @@ async fn remediate_results(
     let editing = matches!(mode, RemediationMode::Propose | RemediationMode::Apply);
     let data_dir = config.general.data_dir_path();
     let edit_runner_config = editing.then(|| {
-        build_runner_config(config, local, config.docker.timeout_seconds, 0, false, &format!("remediate-{}", uuid::Uuid::new_v4()), CancellationToken::new())
+        build_runner_config(
+            config,
+            local,
+            config.docker.timeout_seconds,
+            0,
+            false,
+            &format!("remediate-{}", uuid::Uuid::new_v4()),
+            CancellationToken::new(),
+        )
     });
     let globals = GlobalDefaults { timeout_seconds: config.docker.timeout_seconds, retries: 0 };
     for r in results.iter_mut().filter(|r| is_failure(r) && r.remediation.is_none()) {
         let classification = r.error.clone().unwrap_or_else(|| {
-            automated_flywheel_setup_checker::parser::classify_error(&r.stderr, r.exit_code.unwrap_or(-1))
+            automated_flywheel_setup_checker::parser::classify_error(
+                &r.stderr,
+                r.exit_code.unwrap_or(-1),
+            )
         });
         if let Some(runner_config) = edit_runner_config.as_ref() {
             let outcome = automated_flywheel_setup_checker::remediation::remediate_with_claude(
@@ -872,10 +952,26 @@ async fn remediate_results(
             let suggestions = generate_suggestions(&classification);
             let text = suggestions
                 .iter()
-                .map(|s| format!("{}: {}{}", s.title, s.description, if s.commands.is_empty() { String::new() } else { format!("\n  $ {}", s.commands.join("\n  $ ")) }))
+                .map(|s| {
+                    format!(
+                        "{}: {}{}",
+                        s.title,
+                        s.description,
+                        if s.commands.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n  $ {}", s.commands.join("\n  $ "))
+                        }
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
-            RemediationOutcome::Advised { risks: annotate_risks(&text), suggestion: text, cost_usd: 0.0, source: "fallback".into() }
+            RemediationOutcome::Advised {
+                risks: annotate_risks(&text),
+                suggestion: text,
+                cost_usd: 0.0,
+                source: "fallback".into(),
+            }
         };
         // The category prompts read like a fix recipe; advisory runs must not try to carry it
         // out (they have no edit tools anyway), so say so up front and ask for a compact answer.
@@ -887,12 +983,25 @@ async fn remediate_results(
         let outcome = match remediation.execute_with_resilience(&prompt).await {
             Ok(res) if res.method == RemediationMethod::ManualRequired => fallback(),
             Ok(res) => {
-                let suggestion = automated_flywheel_setup_checker::reporting::redact(&res.claude_output);
-                let cost_usd = res.envelope.as_ref().map(|e| e.total_cost_usd).unwrap_or(res.estimated_cost_usd as f64);
-                RemediationOutcome::Advised { risks: annotate_risks(&suggestion), suggestion, cost_usd, source: "claude".into() }
+                let suggestion =
+                    automated_flywheel_setup_checker::reporting::redact(&res.claude_output);
+                let cost_usd = res
+                    .envelope
+                    .as_ref()
+                    .map(|e| e.total_cost_usd)
+                    .unwrap_or(res.estimated_cost_usd as f64);
+                RemediationOutcome::Advised {
+                    risks: annotate_risks(&suggestion),
+                    suggestion,
+                    cost_usd,
+                    source: "claude".into(),
+                }
             }
             // A cap or error still cost whatever the CLI billed before stopping.
-            Err(e) => RemediationOutcome::Failed { reason: e.to_string(), cost_usd: (remediation.total_cost_usd_exact() - spent_before).max(0.0) },
+            Err(e) => RemediationOutcome::Failed {
+                reason: e.to_string(),
+                cost_usd: (remediation.total_cost_usd_exact() - spent_before).max(0.0),
+            },
         };
         r.remediation = Some(outcome);
     }
@@ -925,19 +1034,29 @@ async fn refresh_checksums(
     local: bool,
 ) -> std::result::Result<RefreshRun, AfscError> {
     use automated_flywheel_setup_checker::checksums::Ledger;
-    use automated_flywheel_setup_checker::remediation::{candidate_path, commit_message, plan_refresh, propose, render_candidate, verify_entry};
+    use automated_flywheel_setup_checker::remediation::{
+        candidate_path, commit_message, plan_refresh, propose, render_candidate, verify_entry,
+    };
 
     let config = &settings.config;
     let checksums_path = config.general.acfs_repo.join("checksums.yaml");
     if !checksums_path.exists() {
-        return Err(AfscError::Config(format!("checksums.yaml not found at {}", checksums_path.display())));
+        return Err(AfscError::Config(format!(
+            "checksums.yaml not found at {}",
+            checksums_path.display()
+        )));
     }
-    let original = std::fs::read_to_string(&checksums_path).map_err(|e| AfscError::Config(format!("reading {}: {e}", checksums_path.display())))?;
+    let original = std::fs::read_to_string(&checksums_path)
+        .map_err(|e| AfscError::Config(format!("reading {}: {e}", checksums_path.display())))?;
     let checksums = parse_checksums(&checksums_path)?;
     let policy_errors = validate_url_policy(&checksums, config.general.allow_file_urls);
     if !policy_errors.is_empty() {
         let list: Vec<String> = policy_errors.iter().map(|e| e.to_string()).collect();
-        return Err(AfscError::Config(format!("{} installer URL(s) violate the URL policy:\n  {}", list.len(), list.join("\n  "))));
+        return Err(AfscError::Config(format!(
+            "{} installer URL(s) violate the URL policy:\n  {}",
+            list.len(),
+            list.join("\n  ")
+        )));
     }
     let data_dir = config.general.data_dir_path();
     let ledger = Ledger::new(&data_dir);
@@ -949,10 +1068,19 @@ async fn refresh_checksums(
         }
         let run_id = format!("refresh-{}", uuid::Uuid::new_v4());
         let globals = GlobalDefaults { timeout_seconds: config.docker.timeout_seconds, retries: 0 };
-        let runner_config = build_runner_config(config, local, config.docker.timeout_seconds, 0, false, &run_id, CancellationToken::new());
+        let runner_config = build_runner_config(
+            config,
+            local,
+            config.docker.timeout_seconds,
+            0,
+            false,
+            &run_id,
+            CancellationToken::new(),
+        );
         for entry in plan.entries.iter_mut() {
             let Some(raw) = checksums.installers.get(&entry.name) else { continue };
-            let spec = resolve_spec(&entry.name, raw, config.installers.get(entry.name.as_str()), globals);
+            let spec =
+                resolve_spec(&entry.name, raw, config.installers.get(entry.name.as_str()), globals);
             tracing::info!(installer = %entry.name, new_sha = %entry.new_sha256, "Verifying installer with the refreshed hash");
             let passed = verify_entry(entry, &spec, runner_config.clone()).await;
             if passed {
@@ -961,7 +1089,13 @@ async fn refresh_checksums(
         }
     }
 
-    let mut out = RefreshRun { plan: automated_flywheel_setup_checker::remediation::RefreshPlan::default(), candidate_path: None, diff: String::new(), proposal: None, verified: verify };
+    let mut out = RefreshRun {
+        plan: automated_flywheel_setup_checker::remediation::RefreshPlan::default(),
+        candidate_path: None,
+        diff: String::new(),
+        proposal: None,
+        verified: verify,
+    };
     if plan.entries.is_empty() {
         out.plan = plan;
         return Ok(out);
@@ -974,9 +1108,11 @@ async fn refresh_checksums(
         .to_string();
     let path = candidate_path(&data_dir);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AfscError::Infra(format!("creating {}: {e}", parent.display())))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AfscError::Infra(format!("creating {}: {e}", parent.display())))?;
     }
-    std::fs::write(&path, &candidate).map_err(|e| AfscError::Infra(format!("writing {}: {e}", path.display())))?;
+    std::fs::write(&path, &candidate)
+        .map_err(|e| AfscError::Infra(format!("writing {}: {e}", path.display())))?;
     out.candidate_path = Some(path);
 
     let includable = if verify { plan.verified().count() } else { plan.entries.len() };
@@ -1028,13 +1164,25 @@ async fn cmd_remediate_checksums(
         names = run
             .entries
             .iter()
-            .filter(|e| e.error_classification.as_ref().is_some_and(|c| c.category == "checksum_mismatch") || e.checksum_state == "mismatch")
+            .filter(|e| {
+                e.error_classification.as_ref().is_some_and(|c| c.category == "checksum_mismatch")
+                    || e.checksum_state == "mismatch"
+            })
             .map(|e| e.installer_name.clone())
             .collect();
         if names.is_empty() {
             match format {
-                OutputFormat::Human => println!("Nothing to refresh: run {} had no checksum mismatches", run.run_id().chars().take(8).collect::<String>()),
-                _ => println!("{}", to_json(&serde_json::json!({"kind": "refresh", "schema_version": SCHEMA_VERSION, "status": "nothing_to_refresh", "run_id": run.run_id()}), matches!(format, OutputFormat::Json))),
+                OutputFormat::Human => println!(
+                    "Nothing to refresh: run {} had no checksum mismatches",
+                    run.run_id().chars().take(8).collect::<String>()
+                ),
+                _ => println!(
+                    "{}",
+                    to_json(
+                        &serde_json::json!({"kind": "refresh", "schema_version": SCHEMA_VERSION, "status": "nothing_to_refresh", "run_id": run.run_id()}),
+                        matches!(format, OutputFormat::Json)
+                    )
+                ),
             }
             return Ok(());
         }
@@ -1051,7 +1199,11 @@ async fn cmd_remediate_checksums(
                 plan.checked,
                 plan.entries.len(),
                 plan.skipped.len(),
-                if verify { format!(", {} verified", plan.verified().count()) } else { String::new() }
+                if verify {
+                    format!(", {} verified", plan.verified().count())
+                } else {
+                    String::new()
+                }
             );
             for (name, reason) in &plan.skipped {
                 println!("  - {name}: skipped ({reason})");
@@ -1059,12 +1211,31 @@ async fn cmd_remediate_checksums(
             for e in &plan.entries {
                 println!(
                     "  {} {}  {}… -> {}…  drift: {}  verify: {}",
-                    if e.verification.as_ref().is_some_and(|v| v.passed) { "\u{2713}" } else if e.verification.is_some() { "\u{2717}" } else { "-" },
+                    if e.verification.as_ref().is_some_and(|v| v.passed) {
+                        "\u{2713}"
+                    } else if e.verification.is_some() {
+                        "\u{2717}"
+                    } else {
+                        "-"
+                    },
                     e.name,
                     &e.old_sha256[..12],
                     &e.new_sha256[..12],
-                    e.drift.as_ref().map(drift_summary).unwrap_or_else(|| "no known-good baseline in the ledger".into()),
-                    e.verification.as_ref().map(|v| format!("{}{}", v.status, v.installed_version.as_ref().map(|s| format!(" ({s})")).unwrap_or_default())).unwrap_or_else(|| "not run".into())
+                    e.drift
+                        .as_ref()
+                        .map(drift_summary)
+                        .unwrap_or_else(|| "no known-good baseline in the ledger".into()),
+                    e.verification
+                        .as_ref()
+                        .map(|v| format!(
+                            "{}{}",
+                            v.status,
+                            v.installed_version
+                                .as_ref()
+                                .map(|s| format!(" ({s})"))
+                                .unwrap_or_default()
+                        ))
+                        .unwrap_or_else(|| "not run".into())
                 );
                 // A failed or timed-out verification is only actionable with the installer's last
                 // words; the pin is not refreshed for this entry, so show them here (redacted).
@@ -1073,7 +1244,10 @@ async fn cmd_remediate_checksums(
                         v.stderr_tail.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
                     let last = tail.iter().rev().take(5).rev();
                     for line in last {
-                        println!("      stderr: {}", automated_flywheel_setup_checker::reporting::redact(line));
+                        println!(
+                            "      stderr: {}",
+                            automated_flywheel_setup_checker::reporting::redact(line)
+                        );
                     }
                     if v.status == "timedout" {
                         println!(
@@ -1088,7 +1262,10 @@ async fn cmd_remediate_checksums(
                             println!("      {line}");
                         }
                         if d.diff_truncated || d.unified_diff.lines().count() > 40 {
-                            println!("      … (full diff in the ledger under {})", config.general.data_dir_path().join("scripts").display());
+                            println!(
+                                "      … (full diff in the ledger under {})",
+                                config.general.data_dir_path().join("scripts").display()
+                            );
                         }
                     }
                 }
@@ -1101,7 +1278,14 @@ async fn cmd_remediate_checksums(
                 println!("\nCandidate written to {}", p.display());
             }
             if let Some(pr) = &run.proposal {
-                println!("Branch {} ({}) in worktree {}{}{}", pr.branch, &pr.commit[..12], pr.worktree, if pr.pushed { ", pushed" } else { "" }, pr.pr_url.as_ref().map(|u| format!(", PR {u}")).unwrap_or_default());
+                println!(
+                    "Branch {} ({}) in worktree {}{}{}",
+                    pr.branch,
+                    &pr.commit[..12],
+                    pr.worktree,
+                    if pr.pushed { ", pushed" } else { "" },
+                    pr.pr_url.as_ref().map(|u| format!(", PR {u}")).unwrap_or_default()
+                );
             } else if plan.entries.is_empty() {
                 println!("No drift: every pinned hash matches what is served.");
             } else if matches!(mode, RemediationMode::Propose | RemediationMode::Apply) {
@@ -1137,7 +1321,10 @@ async fn cmd_remediate_checksums(
     }
 
     if verify && failed_verification > 0 {
-        return Err(AfscError::InstallerFailures { failed: failed_verification, total: plan.entries.len() });
+        return Err(AfscError::InstallerFailures {
+            failed: failed_verification,
+            total: plan.entries.len(),
+        });
     }
     Ok(())
 }
@@ -1281,7 +1468,9 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             if failed.is_empty() {
                 let short: String = run.run_id().chars().take(8).collect();
                 match options.format {
-                    OutputFormat::Human => println!("Nothing to rerun: run {short} had no failures"),
+                    OutputFormat::Human => {
+                        println!("Nothing to rerun: run {short} had no failures")
+                    }
                     _ => println!(
                         "{}",
                         to_json(
@@ -1335,7 +1524,8 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             resolve_spec(name.as_str(), entry, config.installers.get(name.as_str()), globals)
         })
         .collect();
-    let specs = order_specs(specs, config.execution.order, &checksums_path, &config.general.results_dir());
+    let specs =
+        order_specs(specs, config.execution.order, &checksums_path, &config.general.results_dir());
 
     let backend_name = if options.local { "local" } else { "docker" };
     let mut header = RunHeader {
@@ -1383,23 +1573,36 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                     specs.iter().filter(|s| s.skip_reason.is_none()).count(),
                     options.parallel,
                     backend_name,
-                    if options.local { String::new() } else { format!(", image {}", config.docker.image) }
+                    if options.local {
+                        String::new()
+                    } else {
+                        format!(", image {}", config.docker.image)
+                    }
                 );
                 println!(
                     "Defaults: timeout {}s, {} retries (transient failures only), image build timeout {}s",
                     options.timeout, options.retries, config.docker.build_timeout_seconds
                 );
                 println!();
-                println!("  {:<16} {:<5} {:>8} {:>7} {:<7} command", "installer", "sha", "timeout", "retries", "checks");
+                println!(
+                    "  {:<16} {:<5} {:>8} {:>7} {:<7} command",
+                    "installer", "sha", "timeout", "retries", "checks"
+                );
                 for spec in &specs {
                     if let Some(reason) = &spec.skip_reason {
                         println!("  {:<16} (skipped: {})", spec.name, reason);
                         continue;
                     }
                     let mut checks = Vec::new();
-                    if spec.expect_binary.is_some() { checks.push("bin"); }
-                    if spec.verify_cmd.is_some() { checks.push("verify"); }
-                    if spec.version_cmd.is_some() { checks.push("version"); }
+                    if spec.expect_binary.is_some() {
+                        checks.push("bin");
+                    }
+                    if spec.verify_cmd.is_some() {
+                        checks.push("verify");
+                    }
+                    if spec.version_cmd.is_some() {
+                        checks.push("version");
+                    }
                     let overrides = spec.overridden_fields();
                     println!(
                         "  {:<16} {:<5} {:>7}s {:>7} {:<7} {}{}",
@@ -1409,15 +1612,23 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                         spec.retries,
                         checks.join(","),
                         spec.command_line(),
-                        if overrides.is_empty() { String::new() } else { format!("  [overrides: {}]", overrides.join(", ")) }
+                        if overrides.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [overrides: {}]", overrides.join(", "))
+                        }
                     );
                     if !spec.env.is_empty() {
-                        let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                        let env: Vec<String> =
+                            spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
                         println!("  {:<16} env: {}", "", env.join(" "));
                     }
                 }
             }
-            OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+            OutputFormat::Json
+            | OutputFormat::Jsonl
+            | OutputFormat::Prometheus
+            | OutputFormat::Markdown => {
                 let mut output = run_header.clone();
                 let installers: Vec<serde_json::Value> = specs
                     .iter()
@@ -1429,7 +1640,8 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
                     })
                     .collect();
                 output["installers"] = serde_json::json!(installers);
-                output["build_timeout_seconds"] = serde_json::json!(config.docker.build_timeout_seconds);
+                output["build_timeout_seconds"] =
+                    serde_json::json!(config.docker.build_timeout_seconds);
                 println!("{}", to_json(&output, matches!(options.format, OutputFormat::Json)));
             }
         }
@@ -1449,7 +1661,10 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
             let max_age = Duration::from_secs(options.timeout.saturating_mul(2).max(60));
             match manager.reap_orphans(max_age).await {
                 Ok(reaped) if !reaped.is_empty() => {
-                    tracing::warn!(count = reaped.len(), "Removed orphaned containers from earlier runs");
+                    tracing::warn!(
+                        count = reaped.len(),
+                        "Removed orphaned containers from earlier runs"
+                    );
                     reaped_orphans = reaped.iter().map(|c| c.name.clone()).collect();
                 }
                 Ok(_) => {}
@@ -1529,7 +1744,10 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(deadline_seconds)).await;
             if !token.is_cancelled() {
-                tracing::warn!(deadline_seconds, "Run deadline exceeded; cancelling remaining installers");
+                tracing::warn!(
+                    deadline_seconds,
+                    "Run deadline exceeded; cancelling remaining installers"
+                );
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 token.cancel();
             }
@@ -1537,7 +1755,15 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     }
 
     // Set up the runner with configuration
-    let runner_config = build_runner_config(config, options.local, options.timeout, options.retries, options.rebuild_base, &run_id, cancel.clone());
+    let runner_config = build_runner_config(
+        config,
+        options.local,
+        options.timeout,
+        options.retries,
+        options.rebuild_base,
+        &run_id,
+        cancel.clone(),
+    );
     let runner = InstallerTestRunner::new(runner_config.clone());
 
     // Skipped installers produce results without running anything.
@@ -1585,8 +1811,10 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
         }
         for test in queue {
             let r = if cancel.is_cancelled() {
-                let mut r = TestResult::new(&test.name)
-                    .cancelled(format!("{} before start", automated_flywheel_setup_checker::parser::CANCELLED_MARKER));
+                let mut r = TestResult::new(&test.name).cancelled(format!(
+                    "{} before start",
+                    automated_flywheel_setup_checker::parser::CANCELLED_MARKER
+                ));
                 automated_flywheel_setup_checker::runner::finalize_failure(&mut r, None);
                 r
             } else {
@@ -1606,9 +1834,9 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     let interrupted = cancel.is_cancelled();
     // Deadline cancellations are a policy outcome, not an installer failure: exit 1 only when
     // something actually failed or timed out (or a signal interrupted the run).
-    let any_failed = results
-        .iter()
-        .any(|r| is_failure(r) && !(deadline_exceeded && !signalled && r.status == TestStatus::Cancelled));
+    let any_failed = results.iter().any(|r| {
+        is_failure(r) && !(deadline_exceeded && !signalled && r.status == TestStatus::Cancelled)
+    });
     if deadline_exceeded && !signalled {
         tracing::warn!(
             cancelled = results.iter().filter(|r| r.status == TestStatus::Cancelled).count(),
@@ -1643,7 +1871,14 @@ async fn cmd_check(settings: &Settings, options: CheckOptions) -> CmdResult {
     // checksum refresh for drift, read-only Claude advice (or fallback suggestions) for the rest.
     // Outcomes land on the results so they are printed and persisted with them.
     if options.remediate && any_failed && !interrupted {
-        remediate_results(settings, &mut results, options.local, options.format, event_log.as_mut()).await;
+        remediate_results(
+            settings,
+            &mut results,
+            options.local,
+            options.format,
+            event_log.as_mut(),
+        )
+        .await;
     }
 
     // Print per-result output
@@ -1826,16 +2061,19 @@ fn cmd_list(settings: &Settings, runnable: bool, format: OutputFormat) -> CmdRes
         retries: config.execution.retry_transient,
     };
 
-    let mut rows: Vec<(String, &automated_flywheel_setup_checker::checksums::InstallerEntry, InstallerSpec)> =
-        checksums
-            .installers
-            .iter()
-            .map(|(name, entry)| {
-                let spec = resolve_spec(name, entry, config.installers.get(name), globals);
-                (name.clone(), entry, spec)
-            })
-            .filter(|(_, entry, spec)| !runnable || (entry.enabled && spec.skip_reason.is_none()))
-            .collect();
+    let mut rows: Vec<(
+        String,
+        &automated_flywheel_setup_checker::checksums::InstallerEntry,
+        InstallerSpec,
+    )> = checksums
+        .installers
+        .iter()
+        .map(|(name, entry)| {
+            let spec = resolve_spec(name, entry, config.installers.get(name), globals);
+            (name.clone(), entry, spec)
+        })
+        .filter(|(_, entry, spec)| !runnable || (entry.enabled && spec.skip_reason.is_none()))
+        .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     match format {
@@ -1843,11 +2081,8 @@ fn cmd_list(settings: &Settings, runnable: bool, format: OutputFormat) -> CmdRes
             println!("Installers ({}):", rows.len());
             for (name, entry, spec) in &rows {
                 let has_checksum = if entry.sha256.is_some() { " sha256" } else { "" };
-                let skip = spec
-                    .skip_reason
-                    .as_ref()
-                    .map(|r| format!(" [skip: {r}]"))
-                    .unwrap_or_default();
+                let skip =
+                    spec.skip_reason.as_ref().map(|r| format!(" [skip: {r}]")).unwrap_or_default();
                 let overrides = spec.overridden_fields();
                 let ov = if overrides.is_empty() {
                     String::new()
@@ -1938,7 +2173,10 @@ fn cmd_status(
                     return Ok(());
                 }
                 println!("Recent runs ({}), newest first:", runs.len());
-                println!("  {:<8}  {:<20}  {:>5}  {:>6}  {:>6}  note", "run", "started (UTC)", "total", "passed", "failed");
+                println!(
+                    "  {:<8}  {:<20}  {:>5}  {:>6}  {:>6}  note",
+                    "run", "started (UTC)", "total", "passed", "failed"
+                );
                 for r in &runs {
                     println!(
                         "  {:<8}  {:<20}  {:>5}  {:>6}  {:>6}  {}",
@@ -1988,7 +2226,10 @@ fn cmd_status(
                 OutputFormat::Human => {
                     println!("No runs found. Run: automated_flywheel_setup_checker check");
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+                OutputFormat::Json
+                | OutputFormat::Jsonl
+                | OutputFormat::Prometheus
+                | OutputFormat::Markdown => {
                     let output = serde_json::json!({
                         "kind": "status",
                         "schema_version": SCHEMA_VERSION,
@@ -2008,15 +2249,23 @@ fn cmd_status(
 
     // Flakiness / breakage labels need more than one run; cheap to compute from headers + entries.
     let history = History::load(&config.general.results_dir()).unwrap_or_default();
-    let assessments: std::collections::BTreeMap<String, automated_flywheel_setup_checker::reporting::Assessment> =
-        if history.len() > 1 {
-            entries.iter().map(|e| (e.installer_name.clone(), history.assess(&e.installer_name))).collect()
-        } else {
-            Default::default()
-        };
+    let assessments: std::collections::BTreeMap<
+        String,
+        automated_flywheel_setup_checker::reporting::Assessment,
+    > = if history.len() > 1 {
+        entries
+            .iter()
+            .map(|e| (e.installer_name.clone(), history.assess(&e.installer_name)))
+            .collect()
+    } else {
+        Default::default()
+    };
 
     if matches!(format, OutputFormat::Markdown) {
-        let run_id = file.header.as_ref().map(|h| h.run_id.clone())
+        let run_id = file
+            .header
+            .as_ref()
+            .map(|h| h.run_id.clone())
             .or_else(|| summary.as_ref().map(|s| s.run_id.clone()))
             .unwrap_or_default();
         let loaded = history.find(&run_id).map(|r| render_run(r, &assessments));
@@ -2024,7 +2273,15 @@ fn cmd_status(
             Some(md) => print!("{md}"),
             None => {
                 let run = automated_flywheel_setup_checker::reporting::LoadedRun {
-                    info: RunInfo { path: results_path.clone(), run_id, started_at: chrono::Utc::now(), total: entries.len(), passed: 0, failed: 0, interrupted: false },
+                    info: RunInfo {
+                        path: results_path.clone(),
+                        run_id,
+                        started_at: chrono::Utc::now(),
+                        total: entries.len(),
+                        passed: 0,
+                        failed: 0,
+                        interrupted: false,
+                    },
                     header: file.header.clone(),
                     entries: Vec::new(),
                     summary: file.summary.clone(),
@@ -2208,7 +2465,10 @@ fn cmd_status_history(
                     e.category.as_deref().unwrap_or(""),
                     e.duration_ms,
                     e.attempts,
-                    e.script_sha256.as_deref().map(|s| s.chars().take(8).collect::<String>()).unwrap_or_default(),
+                    e.script_sha256
+                        .as_deref()
+                        .map(|s| s.chars().take(8).collect::<String>())
+                        .unwrap_or_default(),
                     e.installed_version.as_deref().unwrap_or("")
                 );
             }
@@ -2247,9 +2507,9 @@ fn cmd_status_history(
 fn cmd_status_diff(config: &Config, a: &str, b: &str, format: OutputFormat) -> CmdResult {
     let history = History::load(&config.general.results_dir())?;
     let find = |prefix: &str| {
-        history
-            .find(prefix)
-            .ok_or_else(|| AfscError::Usage(format!("no run matches {prefix:?} (try: status --list)")))
+        history.find(prefix).ok_or_else(|| {
+            AfscError::Usage(format!("no run matches {prefix:?} (try: status --list)"))
+        })
     };
     let (from, to) = (find(a)?, find(b)?);
     let diff = diff_runs(from, to);
@@ -2320,9 +2580,11 @@ async fn cmd_validate(
             Ok(scan) => {
                 let cc = cross_check(&checksums, &scan.known_installers);
                 for name in &cc.missing_from_checksums {
-                    result.add_error(automated_flywheel_setup_checker::checksums::ValidationError::MissingUrl(
-                        format!("{name} (in KNOWN_INSTALLERS but not in checksums.yaml)"),
-                    ));
+                    result.add_error(
+                        automated_flywheel_setup_checker::checksums::ValidationError::MissingUrl(
+                            format!("{name} (in KNOWN_INSTALLERS but not in checksums.yaml)"),
+                        ),
+                    );
                 }
                 for (name, yaml_url, known_url) in &cc.url_mismatches {
                     result.add_error(automated_flywheel_setup_checker::checksums::ValidationError::InvalidUrl(
@@ -2331,7 +2593,9 @@ async fn cmd_validate(
                     ));
                 }
                 for name in &cc.extra_in_checksums {
-                    result.add_warning(format!("{name} is in checksums.yaml but not in KNOWN_INSTALLERS"));
+                    result.add_warning(format!(
+                        "{name} is in checksums.yaml but not in KNOWN_INSTALLERS"
+                    ));
                 }
                 if profile_flag {
                     drift = profile_drift(&scan.call_sites);
@@ -2513,8 +2777,16 @@ async fn cmd_validate(
             checksums_path: checksums_path.to_string_lossy().to_string(),
             total: hash_results.len() as u64,
             matched: matched as u64,
-            mismatched: hash_results.iter().filter(|r| !r.matches && r.error.is_none()).map(|r| r.name.clone()).collect(),
-            unreachable: hash_results.iter().filter(|r| !r.matches && r.error.is_some()).map(|r| r.name.clone()).collect(),
+            mismatched: hash_results
+                .iter()
+                .filter(|r| !r.matches && r.error.is_none())
+                .map(|r| r.name.clone())
+                .collect(),
+            unreachable: hash_results
+                .iter()
+                .filter(|r| !r.matches && r.error.is_some())
+                .map(|r| r.name.clone())
+                .collect(),
         };
         if let Err(e) = validation.save(&config.general.data_dir_path()) {
             tracing::warn!(error = %e, "Failed to persist validation report");
@@ -2578,7 +2850,10 @@ fn cmd_classify_error(
                 }
             }
         }
-        OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+        OutputFormat::Json
+        | OutputFormat::Jsonl
+        | OutputFormat::Prometheus
+        | OutputFormat::Markdown => {
             let mut v = with_kind("classification", &classification)?;
             if explain {
                 v["explain"] = match &explanation {
@@ -2604,7 +2879,10 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                         println!("# Resolved configuration (value  # source)");
                         print!("{}", settings.render_annotated()?);
                     }
-                    OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+                    OutputFormat::Json
+                    | OutputFormat::Jsonl
+                    | OutputFormat::Prometheus
+                    | OutputFormat::Markdown => {
                         let output = serde_json::json!({
                             "kind": "config",
                             "schema_version": SCHEMA_VERSION,
@@ -2627,7 +2905,10 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                             .map_err(|e| AfscError::Other(e.into()))?
                     );
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+                OutputFormat::Json
+                | OutputFormat::Jsonl
+                | OutputFormat::Prometheus
+                | OutputFormat::Markdown => {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&settings.config)
@@ -2646,7 +2927,10 @@ fn cmd_config(cmd: ConfigCmd, settings: &Settings, format: OutputFormat) -> CmdR
                         toml::to_string_pretty(&config).map_err(|e| AfscError::Other(e.into()))?
                     );
                 }
-                OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Prometheus | OutputFormat::Markdown => {
+                OutputFormat::Json
+                | OutputFormat::Jsonl
+                | OutputFormat::Prometheus
+                | OutputFormat::Markdown => {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&config)
@@ -2708,10 +2992,15 @@ fn persist_metrics_snapshot(
 /// failures and summary fields (Slack). Captured hints are redacted.
 fn build_notification(
     run: &automated_flywheel_setup_checker::reporting::LoadedRun,
-    assessments: &std::collections::BTreeMap<String, automated_flywheel_setup_checker::reporting::Assessment>,
+    assessments: &std::collections::BTreeMap<
+        String,
+        automated_flywheel_setup_checker::reporting::Assessment,
+    >,
     kind: &str,
 ) -> automated_flywheel_setup_checker::reporting::Notification {
-    use automated_flywheel_setup_checker::reporting::{is_failure_status, redact, FailureLine, Notification};
+    use automated_flywheel_setup_checker::reporting::{
+        is_failure_status, redact, FailureLine, Notification,
+    };
 
     let short: String = run.run_id().chars().take(8).collect();
     let total = run.entries.len();
@@ -2724,17 +3013,31 @@ fn build_notification(
         _ => format!("AFSC: {passed}/{total} passed (run {short})"),
     };
     let mut body = render_run(run, assessments);
-    body.push_str(&format!("\nRun id: `{}`  \nResults file: `{}`\n", run.run_id(), run.info.path.display()));
+    body.push_str(&format!(
+        "\nRun id: `{}`  \nResults file: `{}`\n",
+        run.run_id(),
+        run.info.path.display()
+    ));
     let failures = failing
         .iter()
         .map(|e| FailureLine {
             installer: e.installer_name.clone(),
             status: e.status.clone(),
-            category: e.error_classification.as_ref().map(|c| c.category.clone()).unwrap_or_else(|| "unknown".into()),
-            severity: e.error_classification.as_ref().map(|c| c.severity.clone()).unwrap_or_default(),
+            category: e
+                .error_classification
+                .as_ref()
+                .map(|c| c.category.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            severity: e
+                .error_classification
+                .as_ref()
+                .map(|c| c.severity.clone())
+                .unwrap_or_default(),
             duration_ms: e.duration_ms,
             attempts: e.attempts.len().max(1),
-            hint: redact(e.stderr_tail.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")),
+            hint: redact(
+                e.stderr_tail.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(""),
+            ),
         })
         .collect();
     let mut summary_fields = vec![
@@ -2744,7 +3047,14 @@ fn build_notification(
         ("Started (UTC)".to_string(), run.started_at().format("%Y-%m-%d %H:%M").to_string()),
     ];
     if let Some(h) = &run.header {
-        summary_fields.push(("Backend".to_string(), format!("{}{}", h.backend, h.image.as_ref().map(|i| format!(" ({i})")).unwrap_or_default())));
+        summary_fields.push((
+            "Backend".to_string(),
+            format!(
+                "{}{}",
+                h.backend,
+                h.image.as_ref().map(|i| format!(" ({i})")).unwrap_or_default()
+            ),
+        ));
     }
     Notification {
         title,
@@ -2776,7 +3086,11 @@ async fn dispatch_notification(
     let previous = history.previous(run.run_id());
     let previously_failing = previous.map(|p| p.failing_set()).unwrap_or_default();
     let kind = if failing_now.is_empty() {
-        if previously_failing.is_empty() { "success" } else { "recovered" }
+        if previously_failing.is_empty() {
+            "success"
+        } else {
+            "recovered"
+        }
     } else {
         "failure"
     };
@@ -2810,10 +3124,19 @@ async fn dispatch_notification(
                     .and_then(|r| r.ok())
                     .and_then(|_| {
                         use std::io::Write;
-                        std::fs::OpenOptions::new().create(true).append(true).open(&path).ok().and_then(|mut f| writeln!(f, "{line}").ok())
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .ok()
+                            .and_then(|mut f| writeln!(f, "{line}").ok())
                     })
                     .is_some();
-                if queued { "queued" } else { "queue_failed" }
+                if queued {
+                    "queued"
+                } else {
+                    "queue_failed"
+                }
             }
         }
     };
@@ -2824,7 +3147,10 @@ async fn dispatch_notification(
     }
 
     let assessments: std::collections::BTreeMap<_, _> = if history.len() > 1 {
-        run.entries.iter().map(|e| (e.installer_name.clone(), history.assess(&e.installer_name))).collect()
+        run.entries
+            .iter()
+            .map(|e| (e.installer_name.clone(), history.assess(&e.installer_name)))
+            .collect()
     } else {
         Default::default()
     };
@@ -2852,7 +3178,12 @@ async fn dispatch_notification(
 }
 
 /// `notify --last-run | --run <id> | --digest`.
-async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, format: OutputFormat) -> CmdResult {
+async fn cmd_notify(
+    settings: &Settings,
+    selector: Option<&str>,
+    digest: bool,
+    format: OutputFormat,
+) -> CmdResult {
     use automated_flywheel_setup_checker::reporting::{Notification, Notifier};
 
     let config = &settings.config;
@@ -2877,18 +3208,43 @@ async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, f
             let last_run = last["run_id"].as_str().and_then(|id| history.find(id));
             let failing: std::collections::BTreeMap<String, String> = last["failing"]
                 .as_object()
-                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("unknown").to_string())).collect())
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("unknown").to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let title = format!("AFSC daily digest: {} run(s), {} installer(s) currently failing", pending.len(), failing.len());
+            let title = format!(
+                "AFSC daily digest: {} run(s), {} installer(s) currently failing",
+                pending.len(),
+                failing.len()
+            );
             let mut body = format!("## AFSC daily digest — {} run(s)\n\n| run | started (UTC) | total | failing |\n|---|---|---|---|\n", pending.len());
             for p in &pending {
-                let started = p["started_at"].as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-                let names: Vec<&str> = p["failing"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
-                body.push_str(&format!("| `{}` | {} | {} | {} |\n", p["run_id"].as_str().unwrap_or("").chars().take(8).collect::<String>(), started, p["total"], if names.is_empty() { "—".to_string() } else { names.join(", ") }));
+                let started = p["started_at"]
+                    .as_str()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default();
+                let names: Vec<&str> = p["failing"]
+                    .as_object()
+                    .map(|m| m.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                body.push_str(&format!(
+                    "| `{}` | {} | {} | {} |\n",
+                    p["run_id"].as_str().unwrap_or("").chars().take(8).collect::<String>(),
+                    started,
+                    p["total"],
+                    if names.is_empty() { "—".to_string() } else { names.join(", ") }
+                ));
             }
             let mut notification = match last_run {
                 Some(run) => {
-                    let mut n = build_notification(run, &Default::default(), if failing.is_empty() { "success" } else { "failure" });
+                    let mut n = build_notification(
+                        run,
+                        &Default::default(),
+                        if failing.is_empty() { "success" } else { "failure" },
+                    );
                     body.push_str("\n### Latest run\n\n");
                     body.push_str(&n.body_markdown);
                     n.body_markdown = body;
@@ -2909,7 +3265,10 @@ async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, f
             let notifier = Notifier::new(config.notifications.to_internal());
             let sent = notifier.send(&notification).await.map_err(AfscError::Other)?;
             // Keep the record: rotate the queue instead of deleting it.
-            let rotated = path.with_file_name(format!("sent_{}.jsonl", chrono::Utc::now().format("%Y%m%dT%H%M%S")));
+            let rotated = path.with_file_name(format!(
+                "sent_{}.jsonl",
+                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+            ));
             if let Err(e) = std::fs::rename(&path, &rotated) {
                 tracing::warn!(error = %e, "Failed to rotate the digest queue");
             }
@@ -2922,9 +3281,9 @@ async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, f
         }
     } else {
         let selector = selector.unwrap_or("last");
-        let run = history
-            .find(selector)
-            .ok_or_else(|| AfscError::Usage(format!("no run matches {selector:?} (try: status --list)")))?;
+        let run = history.find(selector).ok_or_else(|| {
+            AfscError::Usage(format!("no run matches {selector:?} (try: status --list)"))
+        })?;
         let mut doc = dispatch_notification(config, &history, run, true).await;
         doc["kind"] = serde_json::json!("notify");
         doc["schema_version"] = serde_json::json!(SCHEMA_VERSION);
@@ -2937,7 +3296,16 @@ async fn cmd_notify(settings: &Settings, selector: Option<&str>, digest: bool, f
                 "Notification: {}{}{}{}",
                 outcome["decision"].as_str().unwrap_or("?"),
                 outcome["title"].as_str().map(|t| format!(" — {t}")).unwrap_or_default(),
-                outcome["github"].as_str().map(|g| format!(" [github: {g}{}]", outcome["github_issue"].as_u64().map(|n| format!(" #{n}")).unwrap_or_default())).unwrap_or_default(),
+                outcome["github"]
+                    .as_str()
+                    .map(|g| format!(
+                        " [github: {g}{}]",
+                        outcome["github_issue"]
+                            .as_u64()
+                            .map(|n| format!(" #{n}"))
+                            .unwrap_or_default()
+                    ))
+                    .unwrap_or_default(),
                 outcome["slack"].as_str().map(|s| format!(" [slack: {s}]")).unwrap_or_default(),
             );
         }
@@ -2978,7 +3346,8 @@ mod tests {
 
     #[test]
     fn cli_overrides_only_carry_passed_flags() {
-        let cli = Cli::try_parse_from(["afsc", "check", "--parallel", "auto", "--fail-fast"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["afsc", "check", "--parallel", "auto", "--fail-fast"]).unwrap();
         let o = cli_overrides(&cli);
         assert_eq!(o.parallel.as_deref(), Some("auto"));
         assert_eq!(o.fail_fast, Some(true));
@@ -3010,19 +3379,39 @@ mod tests {
                 .replace("@CONFIG_DIR@", "/etc/flywheel-checker")
                 .replace("@CONFIG@", "/etc/flywheel-checker/config.toml");
             assert!(!rendered.contains('@'), "unrendered placeholder in {}", path.display());
-            assert!(!rendered.contains("NOTIFY_SOCKET"), "{}: never pin NOTIFY_SOCKET", path.display());
+            assert!(
+                !rendered.contains("NOTIFY_SOCKET"),
+                "{}: never pin NOTIFY_SOCKET",
+                path.display()
+            );
             assert!(!rendered.contains("IOReadBandwidthMax"), "{}: no device pins", path.display());
             for line in rendered.lines() {
-                let Some(cmd) = line.strip_prefix("ExecStart=").or_else(|| line.strip_prefix("ExecStopPost=")) else { continue };
+                let Some(cmd) =
+                    line.strip_prefix("ExecStart=").or_else(|| line.strip_prefix("ExecStopPost="))
+                else {
+                    continue;
+                };
                 let argv: Vec<&str> = cmd.split_whitespace().collect();
                 assert_eq!(argv[0], "afsc", "{}: {line}", path.display());
-                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{}: {line}\n{e}", path.display()));
+                Cli::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("{}: {line}\n{e}", path.display()));
                 checked += 1;
             }
-            if path.file_name().is_some_and(|n| n != "automated-flywheel-checker-serve.service.in") {
-                assert!(rendered.contains("ReadWritePaths=/var/lib/flywheel-checker /var/log/flywheel-checker"), "{}", path.display());
+            if path.file_name().is_some_and(|n| n != "automated-flywheel-checker-serve.service.in")
+            {
+                assert!(
+                    rendered.contains(
+                        "ReadWritePaths=/var/lib/flywheel-checker /var/log/flywheel-checker"
+                    ),
+                    "{}",
+                    path.display()
+                );
                 assert!(rendered.contains("SupplementaryGroups=docker"), "{}", path.display());
-                assert!(rendered.contains("RestrictAddressFamilies=AF_UNIX"), "{}: docker socket needs AF_UNIX", path.display());
+                assert!(
+                    rendered.contains("RestrictAddressFamilies=AF_UNIX"),
+                    "{}: docker socket needs AF_UNIX",
+                    path.display()
+                );
             }
         }
         assert!(checked >= 5, "expected ExecStart lines in the templates, checked {checked}");
@@ -3052,11 +3441,22 @@ mod docs_drift_tests {
     /// README command headings (`### \`name\``) must match the real subcommands, both ways.
     #[test]
     fn readme_documents_every_subcommand_and_nothing_else() {
-        let readme = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .unwrap();
         let documented: std::collections::BTreeSet<String> = readme
             .lines()
             .filter_map(|l| l.strip_prefix("### `"))
-            .map(|rest| rest.split('`').next().unwrap_or("").split_whitespace().next().unwrap_or("").to_string())
+            .map(|rest| {
+                rest.split('`')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .collect();
         let real: std::collections::BTreeSet<String> = Cli::command()
@@ -3073,9 +3473,19 @@ mod docs_drift_tests {
     /// Every top-level key in config/default.toml is mentioned in the README configuration text.
     #[test]
     fn readme_mentions_every_config_section() {
-        let readme = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
-        let toml = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml")).unwrap();
-        let sections: Vec<&str> = toml.lines().filter_map(|l| l.strip_prefix('[')).map(|l| l.trim_end_matches(']')).collect();
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .unwrap();
+        let toml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/default.toml"),
+        )
+        .unwrap();
+        let sections: Vec<&str> = toml
+            .lines()
+            .filter_map(|l| l.strip_prefix('['))
+            .map(|l| l.trim_end_matches(']'))
+            .collect();
         let missing: Vec<&&str> = sections
             .iter()
             .filter(|s| !readme.contains(&format!("[{s}]")) && !readme.contains(&format!("[{s}.")))
@@ -3086,7 +3496,10 @@ mod docs_drift_tests {
     /// CHANGELOG exists and has an Unreleased section (release tooling relies on it).
     #[test]
     fn changelog_has_unreleased_section() {
-        let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md")).unwrap();
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md"),
+        )
+        .unwrap();
         assert!(text.contains("## [Unreleased]"));
     }
 }

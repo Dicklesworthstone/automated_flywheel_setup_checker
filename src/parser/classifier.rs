@@ -316,12 +316,7 @@ impl Patterns {
     }
 
     fn get(&self) -> &Vec<Regex> {
-        self.cell.get_or_init(|| {
-            self.sources
-                .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect()
-        })
+        self.cell.get_or_init(|| self.sources.iter().filter_map(|p| Regex::new(p).ok()).collect())
     }
 }
 

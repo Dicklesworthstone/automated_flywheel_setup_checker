@@ -514,7 +514,8 @@ fn test_error_severity_variants() {
 fn classifier_golden_corpus_is_fully_correct() {
     use automated_flywheel_setup_checker::parser::classify_error;
     use std::collections::BTreeMap;
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/classifier_corpus.jsonl");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/classifier_corpus.jsonl");
     let text = std::fs::read_to_string(&path).unwrap();
     let mut per_category: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -524,7 +525,10 @@ fn classifier_golden_corpus_is_fully_correct() {
         total += 1;
         let name = case["name"].as_str().unwrap();
         let expected = case["expected"].as_str().unwrap();
-        let got = classify_error(case["stderr"].as_str().unwrap(), case["exit_code"].as_i64().unwrap() as i32);
+        let got = classify_error(
+            case["stderr"].as_str().unwrap(),
+            case["exit_code"].as_i64().unwrap() as i32,
+        );
         let entry = per_category.entry(expected.to_string()).or_insert((0, 0));
         entry.1 += 1;
         if got.category == expected && got.retryable == case["retryable"].as_bool().unwrap() {

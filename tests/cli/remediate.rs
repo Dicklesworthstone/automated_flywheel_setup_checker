@@ -45,7 +45,11 @@ fn remediate_checksums_advisory_writes_a_verified_candidate() {
     let text = std::fs::read_to_string(candidate).unwrap();
     assert!(text.contains(&real), "candidate carries the new pin");
     assert!(text.contains("good_tool"), "untouched entries kept");
-    assert!(doc["diff"].as_str().unwrap().contains(&format!("+    sha256: \"{real}\"")), "{}", doc["diff"]);
+    assert!(
+        doc["diff"].as_str().unwrap().contains(&format!("+    sha256: \"{real}\"")),
+        "{}",
+        doc["diff"]
+    );
     assert!(doc["proposal"].is_null(), "advisory proposes nothing");
     // The ledger now holds the served script.
     let ledger = fx.home.join(".local/share/afsc/scripts/drifted_tool");
@@ -74,12 +78,18 @@ fn remediate_checksums_excludes_entries_that_fail_verification() {
     let mut fx = Fixture::new();
     // Drifted AND broken: the new bytes exit 1, so the refreshed pin must not be proposed.
     let path = fx.scripts_dir().join("broken_tool.sh");
-    std::fs::write(&path, "#!/bin/bash\necho 'E: Unable to locate package foo' >&2\nexit 100\n").unwrap();
+    std::fs::write(&path, "#!/bin/bash\necho 'E: Unable to locate package foo' >&2\nexit 100\n")
+        .unwrap();
     fx.add_entry("broken_tool", &format!("file://{}", path.display()), &"0".repeat(64));
     let real = add_drifted(&mut fx, "ok_tool");
 
     let out = fx.run(&["remediate", "checksums", "--local", "--format", "json"]);
-    assert_eq!(out.status.code(), Some(1), "an unverifiable entry is reported as a failure: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unverifiable entry is reported as a failure: {}",
+        stderr(&out)
+    );
     let doc = json_doc(&out);
     let entries = doc["plan"]["entries"].as_array().unwrap();
     let broken = entries.iter().find(|e| e["name"] == "broken_tool").unwrap();
@@ -104,7 +114,8 @@ fn remediate_checksums_propose_creates_a_branch_in_a_worktree() {
     let real = add_drifted(&mut fx, "drifted_tool");
     // Make the fixture ACFS dir a git repository (the propose path needs one).
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git").arg("-C").arg(&fx.acfs).args(args).output().unwrap();
+        let out =
+            std::process::Command::new("git").arg("-C").arg(&fx.acfs).args(args).output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
@@ -112,7 +123,8 @@ fn remediate_checksums_propose_creates_a_branch_in_a_worktree() {
     git(&["add", "."]);
     git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
 
-    let out = fx.run(&["remediate", "checksums", "--local", "--mode", "propose", "--format", "json"]);
+    let out =
+        fx.run(&["remediate", "checksums", "--local", "--mode", "propose", "--format", "json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let doc = json_doc(&out);
     assert_eq!(doc["mode"], "propose");
@@ -121,9 +133,13 @@ fn remediate_checksums_propose_creates_a_branch_in_a_worktree() {
     assert!(branch.starts_with("afsc/checksum-refresh-"), "{proposal}");
     assert_eq!(proposal["pushed"], false);
     let worktree = proposal["worktree"].as_str().unwrap();
-    assert!(std::fs::read_to_string(std::path::Path::new(worktree).join("checksums.yaml")).unwrap().contains(&real));
+    assert!(std::fs::read_to_string(std::path::Path::new(worktree).join("checksums.yaml"))
+        .unwrap()
+        .contains(&real));
     // Original checkout untouched, branch commit message well-formed.
-    assert!(std::fs::read_to_string(fx.acfs.join("checksums.yaml")).unwrap().contains(&"0".repeat(64)));
+    assert!(std::fs::read_to_string(fx.acfs.join("checksums.yaml"))
+        .unwrap()
+        .contains(&"0".repeat(64)));
     assert_eq!(git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
     let msg = git(&["log", "-1", "--format=%B", branch]);
     assert!(msg.starts_with("chore(checksums): refresh 1 drifted installer pin(s)"), "{msg}");
@@ -135,7 +151,8 @@ fn remediate_from_last_run_uses_the_persisted_mismatches() {
     let mut fx = Fixture::new();
     fx.add_pass("good_tool");
     add_drifted(&mut fx, "drifted_tool");
-    let nothing = fx.run(&["remediate", "checksums", "--from-last-run", "--local", "--format", "json"]);
+    let nothing =
+        fx.run(&["remediate", "checksums", "--from-last-run", "--local", "--format", "json"]);
     assert_eq!(nothing.status.code(), Some(2), "no runs yet is a usage error");
     let run = fx.run(&["check", "--local", "--format", "jsonl"]);
     assert_eq!(run.status.code(), Some(1));
@@ -159,7 +176,11 @@ fn check_remediate_attaches_honest_outcomes() {
     // Without --remediate nothing is attempted and claude is never invoked.
     let out = fx.run_with(
         &["check", "--local", "--format", "jsonl"],
-        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_CLAUDE_BIN", &fake_claude_bin()), ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap())],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap()),
+        ],
         &[],
     );
     assert_eq!(out.status.code(), Some(1));
@@ -169,10 +190,20 @@ fn check_remediate_attaches_honest_outcomes() {
     // With --remediate: drift is refreshed and verified; the dependency failure gets advice.
     let out = fx.run_with(
         &["check", "--local", "--remediate", "--format", "jsonl"],
-        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_CLAUDE_BIN", &fake_claude_bin()), ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap()), ("AFSC_FAKE_CLAUDE", "success")],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap()),
+            ("AFSC_FAKE_CLAUDE", "success"),
+        ],
         &[],
     );
-    assert_eq!(out.status.code(), Some(1), "advice does not turn a failure into a pass: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "advice does not turn a failure into a pass: {}",
+        stderr(&out)
+    );
     let lines = jsonl_lines(&out);
     let drifted = find_result(&lines, "drifted_tool");
     assert_eq!(drifted["remediation"]["outcome"], "verified", "{drifted}");
@@ -194,7 +225,12 @@ fn check_remediate_attaches_honest_outcomes() {
     assert!(invocations.contains(&format!("cwd={}", fx.acfs.display())), "{invocations}");
     // Persisted and visible in status, counted in metrics.
     let status = json_doc(&fx.run(&["status", "--format", "json"]));
-    let persisted = status["results"].as_array().unwrap().iter().find(|r| r["installer_name"] == "dep_tool").unwrap();
+    let persisted = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["installer_name"] == "dep_tool")
+        .unwrap();
     assert_eq!(persisted["remediation"]["outcome"], "advised");
     let prom = stdout(&fx.run(&["status", "--format", "prometheus"]));
     assert!(prom.contains("afsc_remediations_total_24h 2"), "{prom}");
@@ -203,7 +239,11 @@ fn check_remediate_attaches_honest_outcomes() {
     // Human wording never says "succeeded" for advice.
     let human = fx.run_with(
         &["check", "--local", "--remediate"],
-        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_CLAUDE_BIN", &fake_claude_bin()), ("AFSC_FAKE_CLAUDE", "success")],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE", "success"),
+        ],
         &[],
     );
     let text = stdout(&human);
@@ -215,7 +255,8 @@ fn check_remediate_attaches_honest_outcomes() {
 /// Turn the fixture ACFS dir into a git repo on `main` (the propose path needs one).
 fn git_init_fixture(fx: &Fixture) -> impl Fn(&[&str]) -> String + '_ {
     let git = move |args: &[&str]| {
-        let out = std::process::Command::new("git").arg("-C").arg(&fx.acfs).args(args).output().unwrap();
+        let out =
+            std::process::Command::new("git").arg("-C").arg(&fx.acfs).args(args).output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
@@ -269,7 +310,12 @@ fn check_remediate_propose_lands_verified_edits_on_a_branch_with_a_pr() {
         ],
         &[],
     );
-    assert_eq!(out.status.code(), Some(1), "a proposal does not turn the run green: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a proposal does not turn the run green: {}",
+        stderr(&out)
+    );
     let lines = jsonl_lines(&out);
     let dep = find_result(&lines, "dep_tool");
     assert_eq!(dep["remediation"]["outcome"], "proposed", "{dep}");
@@ -283,7 +329,9 @@ fn check_remediate_propose_lands_verified_edits_on_a_branch_with_a_pr() {
     assert_eq!(git(&["rev-parse", &branch]), commit);
     assert_eq!(git(&["diff", "--name-only", "main", &branch]), "checksums.yaml");
     assert!(git(&["show", &format!("{branch}:checksums.yaml")]).contains("dep_tool_fixed.sh"));
-    assert!(std::fs::read_to_string(fx.acfs.join("checksums.yaml")).unwrap().contains("dep_tool.sh"));
+    assert!(std::fs::read_to_string(fx.acfs.join("checksums.yaml"))
+        .unwrap()
+        .contains("dep_tool.sh"));
     let msg = git(&["log", "-1", "--format=%B", &branch]);
     assert!(msg.starts_with("fix(dep_tool): remediate installer failure (dependency)"), "{msg}");
     assert!(msg.contains("re-run against this branch and passed"), "{msg}");
@@ -325,7 +373,11 @@ fn check_remediate_propose_rejects_policy_violations_unsafe_transcripts_and_unve
     let git = git_init_fixture(&fx);
     let bin = fake_claude_bin();
     let run = |scenario: &str, extra: &[(&str, &str)]| -> serde_json::Value {
-        let mut set: Vec<(&str, &str)> = vec![("AFSC_ALLOW_LOCAL", "1"), ("AFSC_FAKE_CLAUDE", scenario), ("AFSC_CLAUDE_BIN", &bin)];
+        let mut set: Vec<(&str, &str)> = vec![
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_FAKE_CLAUDE", scenario),
+            ("AFSC_CLAUDE_BIN", &bin),
+        ];
         set.extend_from_slice(extra);
         let out = fx.run_with(&["check", "--local", "--remediate", "--format", "jsonl"], &set, &[]);
         let lines = jsonl_lines(&out);
@@ -374,7 +426,10 @@ fn check_remediate_apply_pushes_the_verified_branch() {
     fx.add_config_toml("[remediation]\nenabled = true\nmode = \"apply\"\ncreate_pr = false\ntimeout_seconds = 20\nmax_attempts = 1\n");
     let git = git_init_fixture(&fx);
     let bare = fx.root.path().join("origin.git");
-    let init = std::process::Command::new("git").args(["init", "-q", "--bare", bare.to_str().unwrap()]).output().unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "--bare", bare.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(init.status.success());
     git(&["remote", "add", "origin", bare.to_str().unwrap()]);
     let fixed_yaml = fixed_checksums(&fx);
@@ -392,11 +447,21 @@ fn check_remediate_apply_pushes_the_verified_branch() {
     let sha = dep["remediation"]["sha"].as_str().unwrap().to_string();
     assert!(dep["remediation"]["pr_url"].is_null());
     // Pushed to origin on the session branch only; origin has no main.
-    let remote = std::process::Command::new("git").arg("-C").arg(&bare).args(["branch", "--list"]).output().unwrap();
+    let remote = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&bare)
+        .args(["branch", "--list"])
+        .output()
+        .unwrap();
     let remote_branches = String::from_utf8_lossy(&remote.stdout).to_string();
     assert!(remote_branches.contains(&branch), "{remote_branches}");
     assert!(!remote_branches.contains("main"), "{remote_branches}");
-    let remote_sha = std::process::Command::new("git").arg("-C").arg(&bare).args(["rev-parse", &branch]).output().unwrap();
+    let remote_sha = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&bare)
+        .args(["rev-parse", &branch])
+        .output()
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&remote_sha.stdout).trim(), sha);
     let text = stdout(&fx.run_with(&["check", "--local", "--remediate"], &env, &[]));
     assert!(text.contains("succeeded: pushed afsc/remediate-dep_tool-"), "{text}");
@@ -411,7 +476,12 @@ fn check_remediate_reports_a_budget_cap_once_without_retrying() {
     let log = fx.root.path().join("claude.log");
     let out = fx.run_with(
         &["check", "--local", "--remediate", "--format", "jsonl"],
-        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_CLAUDE_BIN", &fake_claude_bin()), ("AFSC_FAKE_CLAUDE", "budget"), ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap())],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_CLAUDE_BIN", &fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE", "budget"),
+            ("AFSC_FAKE_CLAUDE_LOG", log.to_str().unwrap()),
+        ],
         &[],
     );
     let lines = jsonl_lines(&out);
@@ -420,7 +490,11 @@ fn check_remediate_reports_a_budget_cap_once_without_retrying() {
     let reason = dep["remediation"]["reason"].as_str().unwrap();
     assert!(reason.contains("Reached maximum budget ($0.05)"), "{reason}");
     assert!(reason.contains("1 turn(s)"), "{reason}");
-    assert_eq!(std::fs::read_to_string(&log).unwrap().matches("argv=").count(), 1, "a cap is not retried");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().matches("argv=").count(),
+        1,
+        "a cap is not retried"
+    );
 }
 
 #[test]
@@ -429,7 +503,13 @@ fn check_remediate_flags_unsafe_advice_and_reports_claude_errors() {
     fx.set_execution(1, 0, false);
     fx.add_dependency_failure("dep_tool");
     fx.add_config_toml("[remediation]\nenabled = true\nmode = \"advisory\"\ntimeout_seconds = 20\nmax_attempts = 1\n");
-    let env = |scenario: &str| vec![("AFSC_ALLOW_LOCAL", "1".to_string()), ("AFSC_CLAUDE_BIN", fake_claude_bin()), ("AFSC_FAKE_CLAUDE", scenario.to_string())];
+    let env = |scenario: &str| {
+        vec![
+            ("AFSC_ALLOW_LOCAL", "1".to_string()),
+            ("AFSC_CLAUDE_BIN", fake_claude_bin()),
+            ("AFSC_FAKE_CLAUDE", scenario.to_string()),
+        ]
+    };
 
     let e = env("unsafe");
     let set: Vec<(&str, &str)> = e.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -449,7 +529,10 @@ fn check_remediate_flags_unsafe_advice_and_reports_claude_errors() {
     let lines = jsonl_lines(&out);
     let dep = find_result(&lines, "dep_tool");
     // is_error envelopes exhaust the attempts and fall back to built-in suggestions.
-    assert!(matches!(dep["remediation"]["outcome"].as_str().unwrap(), "advised" | "failed"), "{dep}");
+    assert!(
+        matches!(dep["remediation"]["outcome"].as_str().unwrap(), "advised" | "failed"),
+        "{dep}"
+    );
     if dep["remediation"]["outcome"] == "advised" {
         assert_eq!(dep["remediation"]["source"], "fallback", "{dep}");
     }
@@ -459,7 +542,10 @@ fn check_remediate_flags_unsafe_advice_and_reports_claude_errors() {
     let out = fx.run_with(&["check", "--local", "--remediate", "--format", "jsonl"], &set, &[]);
     let lines = jsonl_lines(&out);
     let dep = find_result(&lines, "dep_tool");
-    assert!(matches!(dep["remediation"]["outcome"].as_str().unwrap(), "advised" | "failed"), "{dep}");
+    assert!(
+        matches!(dep["remediation"]["outcome"].as_str().unwrap(), "advised" | "failed"),
+        "{dep}"
+    );
     assert_ne!(dep["remediation"]["source"], "claude");
 
     // No claude at all: fallback suggestions, still honest.

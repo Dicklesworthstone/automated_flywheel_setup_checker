@@ -10,7 +10,8 @@ use std::time::Duration;
 fn http(addr: &str, method: &str, path: &str) -> (u16, Vec<(String, String)>, String) {
     let mut stream = TcpStream::connect(addr).expect("connect");
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").unwrap();
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+        .unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8_lossy(&raw).to_string();
@@ -18,7 +19,9 @@ fn http(addr: &str, method: &str, path: &str) -> (u16, Vec<(String, String)>, St
     let mut lines = head.lines();
     let status: u16 = lines.next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
     let headers = lines
-        .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string())))
+        .filter_map(|l| {
+            l.split_once(':').map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+        })
         .collect();
     (status, headers, body.to_string())
 }
@@ -65,8 +68,10 @@ fn validate_check_hashes_persists_drift_for_metrics() {
     fx.add_installer_with_wrong_hash("drifted_tool", "#!/bin/bash\necho hi\n");
     let out = fx.run(&["validate", "--check-hashes", "--format", "json"]);
     assert_eq!(out.status.code(), Some(4), "drift exits 4");
-    let report: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(fx.home.join(".local/share/afsc/validate.json")).unwrap()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fx.home.join(".local/share/afsc/validate.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(report["mismatched"], serde_json::json!(["drifted_tool"]));
     assert_eq!(report["matched"], 1);
     let text = stdout(&fx.run(&["status", "--format", "prometheus"]));
@@ -140,7 +145,12 @@ fn serve_exposes_health_and_metrics_and_reports_stale_runs() {
 
         // Age the run past the stale threshold by rewriting its header timestamp.
         let results_dir = fx.home.join(".local/share/afsc/results");
-        let file = std::fs::read_dir(&results_dir).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "jsonl")).unwrap();
+        let file = std::fs::read_dir(&results_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .unwrap();
         let old = chrono::Utc::now() - chrono::Duration::hours(30);
         let rewritten: Vec<String> = std::fs::read_to_string(&file)
             .unwrap()
@@ -175,7 +185,12 @@ fn serve_exposes_health_and_metrics_and_reports_stale_runs() {
 fn serve_refuses_disabled_endpoints_and_bad_bind() {
     let fx = Fixture::new();
     let out = fx.run(&["serve", "--health-port", "0"]);
-    assert_eq!(out.status.code(), Some(2), "endpoints disabled is a config error: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "endpoints disabled is a config error: {}",
+        stderr(&out)
+    );
     let mut fx = Fixture::new();
     fx.add_config_toml("[monitoring]\nhealth_endpoint = true\nbind = \"nowhere\"\n");
     let out = fx.run(&["serve", "--health-port", "0"]);

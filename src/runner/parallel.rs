@@ -78,8 +78,8 @@ impl ParallelRunner {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(installer = %test.name, error = %e, "Test execution failed");
-                        let mut r =
-                            TestResult::new(&test.name).failed(-1, format!("Execution error: {}", e));
+                        let mut r = TestResult::new(&test.name)
+                            .failed(-1, format!("Execution error: {}", e));
                         finalize_failure(&mut r, None);
                         r
                     }

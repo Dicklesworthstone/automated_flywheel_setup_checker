@@ -104,7 +104,11 @@ fn results_retention_prunes_only_old_result_files() {
     fx.add_pass("good_tool");
     // Fixture config carries [general] with acfs_repo; append a retention of 2.
     let cfg = std::fs::read_to_string(&fx.config).unwrap();
-    std::fs::write(&fx.config, cfg.replace("log_level = \"info\"", "log_level = \"info\"\nresults_retention = 2")).unwrap();
+    std::fs::write(
+        &fx.config,
+        cfg.replace("log_level = \"info\"", "log_level = \"info\"\nresults_retention = 2"),
+    )
+    .unwrap();
     for _ in 0..4 {
         fx.run(&["check", "--local", "--format", "jsonl"]);
     }
@@ -160,12 +164,18 @@ fn structured_event_log_records_each_run_and_prunes_old_files() {
     let first = jsonl_lines(&fx.run(&["check", "--local", "--format", "jsonl"]));
     let run_id = first[0]["run_id"].as_str().unwrap().to_string();
     assert!(!stale.exists(), "logs older than the retention are pruned");
-    let files: Vec<_> = std::fs::read_dir(&log_dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let files: Vec<_> = std::fs::read_dir(&log_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
     assert_eq!(files.len(), 1, "{files:?}");
     assert!(files[0].starts_with("checker_") && files[0].ends_with(".jsonl"));
     let text = std::fs::read_to_string(log_dir.join(&files[0])).unwrap();
-    let events: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    let mine: Vec<&serde_json::Value> = events.iter().filter(|e| e["correlation_id"] == run_id).collect();
+    let events: Vec<serde_json::Value> =
+        text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let mine: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["correlation_id"] == run_id).collect();
     assert_eq!(mine.iter().filter(|e| e["event"] == "run_started").count(), 1);
     assert_eq!(mine.iter().filter(|e| e["event"] == "installer_finished").count(), 2);
     let dep = mine.iter().find(|e| e["installer"] == "dep_fail_tool").unwrap();

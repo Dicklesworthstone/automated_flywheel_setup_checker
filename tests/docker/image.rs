@@ -45,9 +45,23 @@ async fn foreign_base_is_prepared_once_and_cached() {
     let id = must(m.create_container("prep1").await, "create_container");
     let (_, user, _) = must(m.exec_in_container(&id, &["id", "-un"]).await, "exec_in_container");
     assert_eq!(user.trim(), "afsc-user");
-    let (_, rel, _) = must(m.exec_in_container(&id, &["bash", "-c", "lsb_release -rs 2>/dev/null || cat /etc/os-release"]).await, "exec_in_container");
+    let (_, rel, _) = must(
+        m.exec_in_container(
+            &id,
+            &["bash", "-c", "lsb_release -rs 2>/dev/null || cat /etc/os-release"],
+        )
+        .await,
+        "exec_in_container",
+    );
     assert!(rel.contains("22.04"), "{rel}");
-    let (code, _, _) = must(m.exec_in_container(&id, &["bash", "-lc", "command -v cargo && command -v node && command -v jq"]).await, "exec_in_container");
+    let (code, _, _) = must(
+        m.exec_in_container(
+            &id,
+            &["bash", "-lc", "command -v cargo && command -v node && command -v jq"],
+        )
+        .await,
+        "exec_in_container",
+    );
     assert_eq!(code, 0, "prerequisites present on the derived image");
     must(m.cleanup_container(&id).await, "cleanup_container");
 

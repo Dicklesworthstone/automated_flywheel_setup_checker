@@ -41,7 +41,15 @@ fn history_diff_markdown_and_failed_from_over_two_runs() {
     assert_eq!(entries[1]["status"], "passed");
     assert_eq!(hist["assessment"]["trials"], 2);
     assert_eq!(hist["assessment"]["flaky"], false, "too few trials");
-    let limited = json_doc(&fx.run(&["status", "--history", "flaky_tool", "--last", "1", "--format", "json"]));
+    let limited = json_doc(&fx.run(&[
+        "status",
+        "--history",
+        "flaky_tool",
+        "--last",
+        "1",
+        "--format",
+        "json",
+    ]));
     assert_eq!(limited["entries"].as_array().unwrap().len(), 1);
     let human = fx.run(&["status", "--history", "flaky_tool"]);
     assert!(stdout(&human).contains("flaky_tool: 2 run(s)"), "{}", stdout(&human));
@@ -85,7 +93,12 @@ fn longest_first_ordering_uses_history_and_name_order_is_alphabetical() {
     // No history: unknown durations are ordered by name.
     let dry = json_doc(&fx.run(&["check", "--local", "--dry-run", "--format", "json"]));
     let names = |doc: &serde_json::Value| -> Vec<String> {
-        doc["installers"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect()
+        doc["installers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect()
     };
     assert_eq!(names(&dry), vec!["quick_tool", "slow_tool"]);
 
@@ -106,7 +119,11 @@ fn longest_first_ordering_uses_history_and_name_order_is_alphabetical() {
         &[("AFSC_EXECUTION_ORDER", "manifest")],
         &[],
     ));
-    assert_eq!(names(&manifest), vec!["slow_tool", "quick_tool"], "checksums.yaml order (insertion)");
+    assert_eq!(
+        names(&manifest),
+        vec!["slow_tool", "quick_tool"],
+        "checksums.yaml order (insertion)"
+    );
 }
 
 #[test]
@@ -117,11 +134,20 @@ fn run_deadline_cancels_remaining_work_without_failing_the_run() {
     let start = std::time::Instant::now();
     let out = fx.run_with(
         &["check", "--local", "--format", "jsonl"],
-        &[("AFSC_ALLOW_LOCAL", "1"), ("AFSC_EXECUTION_RUN_DEADLINE_SECONDS", "2"), ("AFSC_EXECUTION_ORDER", "name")],
+        &[
+            ("AFSC_ALLOW_LOCAL", "1"),
+            ("AFSC_EXECUTION_RUN_DEADLINE_SECONDS", "2"),
+            ("AFSC_EXECUTION_ORDER", "name"),
+        ],
         &[],
     );
     assert!(start.elapsed().as_secs() < 12, "deadline stopped the sleeper: {:?}", start.elapsed());
-    assert_eq!(out.status.code(), Some(0), "deadline is not an installer failure: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "deadline is not an installer failure: {}",
+        stderr(&out)
+    );
     let lines = jsonl_lines(&out);
     assert_eq!(find_result(&lines, "a_quick_tool")["status"], "passed");
     let slow = find_result(&lines, "b_slow_tool");
@@ -135,6 +161,11 @@ fn run_deadline_cancels_remaining_work_without_failing_the_run() {
     assert!(stderr(&out).contains("deadline"), "{}", stderr(&out));
     // The persisted run reports the cancellation too.
     let status = json_doc(&fx.run(&["status", "--format", "json"]));
-    let slow = status["results"].as_array().unwrap().iter().find(|r| r["installer_name"] == "b_slow_tool").unwrap();
+    let slow = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["installer_name"] == "b_slow_tool")
+        .unwrap();
     assert_eq!(slow["status"], "cancelled");
 }

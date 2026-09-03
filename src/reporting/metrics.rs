@@ -316,7 +316,11 @@ impl MetricsReport {
     }
 
     /// Load history and the validation report from a data dir and compute.
-    pub fn from_data_dir(data_dir: &Path, now: DateTime<Utc>, stale_after_seconds: u64) -> Result<Self> {
+    pub fn from_data_dir(
+        data_dir: &Path,
+        now: DateTime<Utc>,
+        stale_after_seconds: u64,
+    ) -> Result<Self> {
         let history = History::load(&data_dir.join("results"))?;
         let validation = ValidationReport::load(data_dir);
         let remediations = MetricsSnapshot::load(&data_dir.join("metrics.json"))
@@ -677,14 +681,22 @@ mod tests {
     #[test]
     fn prometheus_output_is_sorted_labeled_and_stable() {
         let now = Utc::now();
-        let history = History::from_runs(vec![run("r", 1, &[("zeta", "passed"), ("alpha", "failed")], now)]);
-        let v = ValidationReport { mismatched: vec!["x".into(), "y".into()], unreachable: vec!["z".into()], ..Default::default() };
+        let history =
+            History::from_runs(vec![run("r", 1, &[("zeta", "passed"), ("alpha", "failed")], now)]);
+        let v = ValidationReport {
+            mismatched: vec!["x".into(), "y".into()],
+            unreachable: vec!["z".into()],
+            ..Default::default()
+        };
         let m = MetricsReport::compute(&history, now, 93_600, Some(&v), 2);
         let text = m.to_prometheus();
         assert_eq!(text, m.to_prometheus(), "deterministic");
         assert!(text.contains("afsc_installer_status{installer=\"alpha\"} 0\n"), "{text}");
         assert!(text.contains("afsc_installer_status{installer=\"zeta\"} 1\n"), "{text}");
-        assert!(text.contains("afsc_installer_duration_seconds{installer=\"alpha\"} 1.5\n"), "{text}");
+        assert!(
+            text.contains("afsc_installer_duration_seconds{installer=\"alpha\"} 1.5\n"),
+            "{text}"
+        );
         assert!(text.contains("afsc_checksum_drift_total 3\n"), "{text}");
         assert!(text.contains("afsc_remediations_total_24h 2\n"), "{text}");
         assert!(text.contains("afsc_run_last_duration_seconds 4.2\n"), "{text}");
@@ -739,7 +751,11 @@ mod tests {
         };
         stale.reset_if_stale();
         assert_eq!(stale.total_tests_24h, 0);
-        let mut fresh = MetricsSnapshot { total_tests_24h: 10, snapshot_time: Utc::now() - Duration::hours(23), ..Default::default() };
+        let mut fresh = MetricsSnapshot {
+            total_tests_24h: 10,
+            snapshot_time: Utc::now() - Duration::hours(23),
+            ..Default::default()
+        };
         fresh.reset_if_stale();
         assert_eq!(fresh.total_tests_24h, 10);
         assert_eq!(MetricsSnapshot::default_path().file_name().unwrap(), "metrics.json");

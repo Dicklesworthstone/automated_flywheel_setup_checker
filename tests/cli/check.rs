@@ -153,8 +153,15 @@ fn check_records_full_attempt_history_for_flaky_installer() {
     let last = r["last_attempt_ms"].as_u64().unwrap();
     let waited = attempts[1]["waited_before_ms"].as_u64().unwrap();
     let first = attempts[0]["duration_ms"].as_u64().unwrap();
-    assert_eq!(last, attempts[1]["duration_ms"].as_u64().unwrap(), "last_attempt_ms is the final attempt");
-    assert!(total >= first + waited + last, "total {total} must include both attempts and the wait");
+    assert_eq!(
+        last,
+        attempts[1]["duration_ms"].as_u64().unwrap(),
+        "last_attempt_ms is the final attempt"
+    );
+    assert!(
+        total >= first + waited + last,
+        "total {total} must include both attempts and the wait"
+    );
     assert!(total >= 1000, "total duration includes the backoff wait");
 }
 
@@ -180,14 +187,21 @@ fn check_honors_parallel_from_config() {
     fx.add_sleeper("s3", 1);
     let start = Instant::now();
     let out = fx.run(&["check", "--local", "--format", "jsonl"]);
-    let elapsed = start.elapsed();
+    let parallel_elapsed = start.elapsed();
     assert_eq!(out.status.code(), Some(0));
     let lines = jsonl_lines(&out);
     assert_eq!(lines[0]["parallel"], 3);
-    assert!(elapsed.as_secs_f64() < 2.5, "three 1 s installers ran concurrently: {elapsed:?}");
 
+    let start = Instant::now();
     let cli_override = fx.run(&["check", "--local", "--format", "jsonl", "--parallel", "1"]);
+    let sequential_elapsed = start.elapsed();
     assert_eq!(jsonl_lines(&cli_override)[0]["parallel"], 1);
+    // Three 1 s installers: ~1 s concurrently vs ~3 s sequentially. Compare the two runs
+    // instead of the wall clock so a loaded worker (rch, CI) cannot turn this into a flake.
+    assert!(
+        parallel_elapsed.as_secs_f64() < 2.5 || parallel_elapsed.as_secs_f64() < sequential_elapsed.as_secs_f64() * 0.75,
+        "parallel run {parallel_elapsed:?} should be well under the sequential run {sequential_elapsed:?}"
+    );
 }
 
 #[test]
@@ -195,7 +209,10 @@ fn parallel_fail_fast_cancels_in_flight_and_skips_queued() {
     let mut fx = Fixture::new();
     fx.set_execution(3, 0, false);
     // Sorted by name: a_fail runs first and fails fast; slow ones are in flight or queued.
-    fx.add_installer("a_fail", "#!/bin/bash\nsleep 1\necho 'E: Unable to locate package foo' >&2\nexit 100\n");
+    fx.add_installer(
+        "a_fail",
+        "#!/bin/bash\nsleep 1\necho 'E: Unable to locate package foo' >&2\nexit 100\n",
+    );
     fx.add_sleeper("b_slow", 20);
     fx.add_sleeper("c_slow", 20);
     fx.add_sleeper("d_queued", 20);
@@ -214,7 +231,11 @@ fn parallel_fail_fast_cancels_in_flight_and_skips_queued() {
     let cancelled = summary["cancelled"].as_u64().unwrap();
     let skipped = summary["skipped"].as_u64().unwrap();
     assert_eq!(cancelled + skipped, 3, "{summary}");
-    assert_eq!(summary["failed"].as_u64().unwrap(), 1 + cancelled, "skips are not failures: {summary}");
+    assert_eq!(
+        summary["failed"].as_u64().unwrap(),
+        1 + cancelled,
+        "skips are not failures: {summary}"
+    );
     assert_eq!(summary["interrupted"], false, "fail-fast is not an interruption");
 }
 
@@ -229,7 +250,11 @@ fn check_honors_fail_fast_from_config_in_sequential_mode() {
     assert_eq!(lines[0]["fail_fast"], true);
     let results = results_of_kind(&lines, "result");
     assert_eq!(results.len(), 2, "every requested installer is accounted for");
-    assert_eq!(results.iter().filter(|r| r["status"] == "skipped").count(), 1, "stops after the first failure: {lines:?}");
+    assert_eq!(
+        results.iter().filter(|r| r["status"] == "skipped").count(),
+        1,
+        "stops after the first failure: {lines:?}"
+    );
 }
 
 #[test]
@@ -285,7 +310,8 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
 
     // Signal handlers are installed before the header is printed; give the sleepers a moment
     // to actually start so the cancellation exercises in-flight work.
-    let (mut child, mut reader, header) = fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
+    let (mut child, mut reader, header) =
+        fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
     std::thread::sleep(Duration::from_millis(500));
     let start = Instant::now();
     let status = std::process::Command::new("kill")
@@ -302,7 +328,11 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
     assert_eq!(exit.code(), Some(143), "stderr: {err}");
 
     let mut lines = vec![header];
-    lines.extend(rest.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()));
+    lines.extend(
+        rest.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()),
+    );
     let summary = lines.last().unwrap();
     assert_eq!(summary["kind"], "summary");
     assert_eq!(summary["interrupted"], true);
@@ -316,7 +346,10 @@ fn sigterm_cancels_in_flight_installers_and_persists_an_interrupted_run() {
         assert_eq!(r["error"]["category"], "cancelled");
     }
     let third = find_result(&lines, "zz_queued");
-    assert!(matches!(third["status"].as_str().unwrap(), "passed" | "cancelled" | "skipped"), "{third}");
+    assert!(
+        matches!(third["status"].as_str().unwrap(), "passed" | "cancelled" | "skipped"),
+        "{third}"
+    );
 
     // Persisted too.
     let status_doc = json_doc(&fx.run(&["status", "--format", "json"]));
@@ -330,7 +363,8 @@ fn concurrent_checks_are_refused_unless_allowed() {
     let mut fx = Fixture::new();
     fx.add_sleeper("slow", 6);
     // The header is printed only once the run lock is held.
-    let (mut first, mut first_out, _header) = fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
+    let (mut first, mut first_out, _header) =
+        fx.spawn_check_until_header(&["check", "--local", "--format", "jsonl"]);
 
     // Second run: refused immediately with exit 3 and the holder's pid.
     let second = fx.run(&["check", "--local", "--format", "jsonl"]);

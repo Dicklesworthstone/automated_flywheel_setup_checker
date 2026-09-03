@@ -65,7 +65,10 @@ impl Ledger {
         std::fs::read_to_string(self.index_path(installer))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_else(|| LedgerIndex { installer: installer.to_string(), entries: BTreeMap::new() })
+            .unwrap_or_else(|| LedgerIndex {
+                installer: installer.to_string(),
+                entries: BTreeMap::new(),
+            })
     }
 
     fn save_index(&self, index: &LedgerIndex) -> Result<()> {
@@ -194,7 +197,8 @@ mod tests {
     fn records_marks_verified_and_prunes_oldest_unverified_first() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::new(dir.path());
-        let sha_a = ledger.record("tool", b"#!/bin/bash\necho a\n", Some("https://x/a.sh"), None).unwrap();
+        let sha_a =
+            ledger.record("tool", b"#!/bin/bash\necho a\n", Some("https://x/a.sh"), None).unwrap();
         assert_eq!(sha_a, sha256_hex(b"#!/bin/bash\necho a\n"));
         assert!(ledger.script_path("tool", &sha_a).exists());
         assert!(ledger.latest_verified("tool").is_none());
@@ -218,6 +222,9 @@ mod tests {
         // Re-recording the same bytes updates last_seen but not first_seen.
         let again = ledger.record("tool", b"#!/bin/bash\necho a\n", None, Some("run-2")).unwrap();
         assert_eq!(again, sha_a);
-        assert_eq!(ledger.load_index("tool").entries[&sha_a].last_verified_pass_run.as_deref(), Some("run-2"));
+        assert_eq!(
+            ledger.load_index("tool").entries[&sha_a].last_verified_pass_run.as_deref(),
+            Some("run-2")
+        );
     }
 }

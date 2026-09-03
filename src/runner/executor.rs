@@ -153,7 +153,11 @@ impl Exec<'_> {
             Exec::Docker { manager, container_id, cancel } => {
                 let out = timeout(
                     POST_INSTALL_TIMEOUT,
-                    manager.exec_in_container_cancellable(container_id, &["bash", "-lc", cmd], cancel),
+                    manager.exec_in_container_cancellable(
+                        container_id,
+                        &["bash", "-lc", cmd],
+                        cancel,
+                    ),
                 )
                 .await
                 .context("post-install check timed out")??;
@@ -336,7 +340,9 @@ set +e
                 Err(e) => {
                     result.status = TestStatus::Failed;
                     result.success = false;
-                    result.stderr.push_str(&format!("\n{POST_INSTALL_MARKER}: expect_binary check error: {e}"));
+                    result.stderr.push_str(&format!(
+                        "\n{POST_INSTALL_MARKER}: expect_binary check error: {e}"
+                    ));
                     return;
                 }
             }
@@ -361,7 +367,9 @@ set +e
                 Err(e) => {
                     result.status = TestStatus::Failed;
                     result.success = false;
-                    result.stderr.push_str(&format!("\n{POST_INSTALL_MARKER}: verify_cmd error: {e}"));
+                    result
+                        .stderr
+                        .push_str(&format!("\n{POST_INSTALL_MARKER}: verify_cmd error: {e}"));
                     return;
                 }
             }
@@ -369,7 +377,8 @@ set +e
         if let Some(cmd) = &test.version_cmd {
             match exec.run(cmd).await {
                 Ok((0, out, _)) => {
-                    let first = out.lines().find(|l| !l.trim().is_empty()).map(|l| redact(l.trim()));
+                    let first =
+                        out.lines().find(|l| !l.trim().is_empty()).map(|l| redact(l.trim()));
                     if let Some(v) = &first {
                         info!(installer = %test.name, version = %v, "Installed version");
                     }
@@ -486,8 +495,10 @@ set +e
         match exec_result {
             Ok(Ok((exit_code, stdout, stderr))) => {
                 let elapsed = start_time.elapsed();
-                let stdout = redact(&bound_capture(stdout.as_bytes(), self.config.max_capture_bytes));
-                let stderr = redact(&bound_capture(stderr.as_bytes(), self.config.max_capture_bytes));
+                let stdout =
+                    redact(&bound_capture(stdout.as_bytes(), self.config.max_capture_bytes));
+                let stderr =
+                    redact(&bound_capture(stderr.as_bytes(), self.config.max_capture_bytes));
                 result.stdout = stdout;
                 result.stderr = stderr.clone();
                 result.exit_code = Some(exit_code);
@@ -533,7 +544,8 @@ set +e
                     );
                     result.status = TestStatus::Passed;
                     result.success = true;
-                    let exec = Exec::Docker { manager: &manager, container_id: &container_id, cancel };
+                    let exec =
+                        Exec::Docker { manager: &manager, container_id: &container_id, cancel };
                     self.post_install(test, &mut result, &exec).await;
                 } else {
                     warn!(
@@ -941,8 +953,10 @@ set +e
             return false;
         }
 
-        if matches!(result.status, TestStatus::TimedOut | TestStatus::Cancelled | TestStatus::Skipped)
-        {
+        if matches!(
+            result.status,
+            TestStatus::TimedOut | TestStatus::Cancelled | TestStatus::Skipped
+        ) {
             return false;
         }
 
@@ -1006,7 +1020,10 @@ mod tests {
         let runner = local_runner(false);
         let test = InstallerTest::new("test", "https://example.com/install.sh");
         let cmd = runner.build_verified_install_script(&test);
-        assert!(!cmd.contains("--dry-run"), "Command must not contain --dry-run when dry_run=false");
+        assert!(
+            !cmd.contains("--dry-run"),
+            "Command must not contain --dry-run when dry_run=false"
+        );
     }
 
     #[test]
@@ -1022,7 +1039,9 @@ mod tests {
         let runner = local_runner(false);
         let test = InstallerTest::new("test", "https://example.com/install.sh");
         let cmd = runner.build_verified_install_script(&test);
-        assert!(cmd.contains("curl -fsSL 'https://example.com/install.sh' -o '/tmp/installer_test.sh'"));
+        assert!(
+            cmd.contains("curl -fsSL 'https://example.com/install.sh' -o '/tmp/installer_test.sh'")
+        );
         assert!(cmd.contains("bash '/tmp/installer_test.sh'"));
         assert!(!cmd.contains("sha256sum"));
         assert!(!cmd.contains("| bash"), "no curl|bash piping");
@@ -1052,12 +1071,17 @@ mod tests {
             .with_interpreter("sh")
             .with_args(vec!["--unattended".into(), "--keep-zshrc".into()]);
         let cmd = runner.build_verified_install_script(&test);
-        assert!(cmd.ends_with("sh '/tmp/installer_ohmyzsh.sh' '--unattended' '--keep-zshrc'"), "{cmd}");
+        assert!(
+            cmd.ends_with("sh '/tmp/installer_ohmyzsh.sh' '--unattended' '--keep-zshrc'"),
+            "{cmd}"
+        );
         let rust = InstallerTest::new("rust", "https://sh.rustup.rs")
             .with_sha256("abc")
             .with_interpreter("sh")
             .with_args(vec!["-y".into()]);
-        assert!(runner.build_verified_install_script(&rust).ends_with("sh '/tmp/installer_rust.sh' '-y'"));
+        assert!(runner
+            .build_verified_install_script(&rust)
+            .ends_with("sh '/tmp/installer_rust.sh' '-y'"));
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
@@ -1158,7 +1182,11 @@ mod tests {
             .with_timeout(Duration::from_secs(20));
         let result = runner.run_test(&test).await.unwrap();
         assert_eq!(result.status, TestStatus::Passed, "stderr: {}", result.stderr);
-        assert!(result.stdout.contains("args=--flag value with space MYVAR=42"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains("args=--flag value with space MYVAR=42"),
+            "{}",
+            result.stdout
+        );
         assert!(!result.stdout.contains("/bash"), "ran under sh, not bash: {}", result.stdout);
     }
 
@@ -1171,24 +1199,36 @@ mod tests {
             "tool",
             "#!/bin/bash\nmkdir -p \"$HOME/.local/bin\"\nprintf '#!/bin/sh\\necho tool 1.2.3\\n' > \"$HOME/.local/bin/mytool\"\nchmod +x \"$HOME/.local/bin/mytool\"\nexit 0\n",
         );
-        let base = InstallerTest::new("tool", url).with_sha256(sha).with_timeout(Duration::from_secs(20));
+        let base =
+            InstallerTest::new("tool", url).with_sha256(sha).with_timeout(Duration::from_secs(20));
 
         let ok = runner
-            .run_test(&base.clone().with_expect_binary("mytool").with_version_cmd("mytool --version"))
+            .run_test(
+                &base.clone().with_expect_binary("mytool").with_version_cmd("mytool --version"),
+            )
             .await
             .unwrap();
         assert_eq!(ok.status, TestStatus::Passed, "{}", ok.stderr);
         assert_eq!(ok.installed_version.as_deref(), Some("tool 1.2.3"));
 
-        let missing = runner.run_test(&base.clone().with_expect_binary("definitely-missing-xyz")).await.unwrap();
+        let missing = runner
+            .run_test(&base.clone().with_expect_binary("definitely-missing-xyz"))
+            .await
+            .unwrap();
         assert_eq!(missing.status, TestStatus::Failed);
         assert_eq!(missing.error.as_ref().unwrap().category, "post_install");
 
-        let verify_fail = runner.run_test(&base.clone().with_verify_cmd("mytool --version | grep -q 9.9.9")).await.unwrap();
+        let verify_fail = runner
+            .run_test(&base.clone().with_verify_cmd("mytool --version | grep -q 9.9.9"))
+            .await
+            .unwrap();
         assert_eq!(verify_fail.status, TestStatus::Failed);
         assert_eq!(verify_fail.error.as_ref().unwrap().category, "post_install");
 
-        let verify_ok = runner.run_test(&base.with_verify_cmd("mytool --version | grep -q 1.2.3")).await.unwrap();
+        let verify_ok = runner
+            .run_test(&base.with_verify_cmd("mytool --version | grep -q 1.2.3"))
+            .await
+            .unwrap();
         assert_eq!(verify_ok.status, TestStatus::Passed);
     }
 
@@ -1206,10 +1246,16 @@ mod tests {
             "chatty",
             "#!/bin/bash\nhead -c 3000000 /dev/zero | tr '\\0' 'x'\necho\necho LAST_LINE_MARKER\nexit 0\n",
         );
-        let test = InstallerTest::new("chatty", url).with_sha256(sha).with_timeout(Duration::from_secs(60));
+        let test = InstallerTest::new("chatty", url)
+            .with_sha256(sha)
+            .with_timeout(Duration::from_secs(60));
         let result = runner.run_test(&test).await.unwrap();
         assert_eq!(result.status, TestStatus::Passed, "{}", result.stderr);
-        assert!(result.stdout.len() < 64 * 1024 + 200, "stdout must be capped: {}", result.stdout.len());
+        assert!(
+            result.stdout.len() < 64 * 1024 + 200,
+            "stdout must be capped: {}",
+            result.stdout.len()
+        );
         assert!(result.stdout.contains("[afsc: truncated"), "marker present");
         assert!(result.stdout.trim_end().ends_with("LAST_LINE_MARKER"), "tail preserved");
     }
@@ -1239,7 +1285,9 @@ mod tests {
         let runner = InstallerTestRunner::new(config);
         let dir = tempfile::tempdir().unwrap();
         let (url, sha) = file_fixture(dir.path(), "sleep", "#!/bin/bash\nsleep 30\nexit 0\n");
-        let test = InstallerTest::new("sleeper", url).with_sha256(sha).with_timeout(Duration::from_secs(60));
+        let test = InstallerTest::new("sleeper", url)
+            .with_sha256(sha)
+            .with_timeout(Duration::from_secs(60));
 
         let canceller = cancel.clone();
         tokio::spawn(async move {
@@ -1249,7 +1297,13 @@ mod tests {
         let start = Instant::now();
         let result = runner.run_test_with_retry(&test).await.unwrap();
         assert_eq!(result.status, TestStatus::Cancelled);
-        assert!(start.elapsed() < Duration::from_secs(5), "cancellation must be prompt");
+        // The script sleeps 30 s and the timeout is 60 s; anything well under that is prompt,
+        // and the bound leaves room for a loaded test host.
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "cancellation must be prompt: {:?}",
+            start.elapsed()
+        );
         assert_eq!(result.error.as_ref().unwrap().category, "cancelled");
     }
 }

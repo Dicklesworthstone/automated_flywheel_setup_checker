@@ -72,7 +72,10 @@ pub fn url_policy_violation(url: &str, allow_file_urls: bool) -> Option<String> 
 }
 
 /// Apply the URL policy to every enabled installer, returning one error per violation.
-pub fn validate_url_policy(checksums: &ChecksumsFile, allow_file_urls: bool) -> Vec<ValidationError> {
+pub fn validate_url_policy(
+    checksums: &ChecksumsFile,
+    allow_file_urls: bool,
+) -> Vec<ValidationError> {
     let mut names: Vec<&String> = checksums.installers.keys().collect();
     names.sort();
     let mut errors = Vec::new();
@@ -329,7 +332,8 @@ pub async fn check_hashes(checksums: &ChecksumsFile) -> Vec<HashCheckResult> {
                 return match std::fs::read(&path) {
                     Ok(bytes) => {
                         let actual = hex::encode(Sha256::digest(&bytes));
-                        let matches = expected.as_deref().is_some_and(|e| hash_hex_matches(e, &actual));
+                        let matches =
+                            expected.as_deref().is_some_and(|e| hash_hex_matches(e, &actual));
                         HashCheckResult {
                             name,
                             url,
@@ -454,10 +458,26 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
-        Mock::given(method("HEAD")).and(path("/no-head.sh")).respond_with(ResponseTemplate::new(405)).mount(&server).await;
-        Mock::given(method("GET")).and(path("/no-head.sh")).respond_with(ResponseTemplate::new(206).set_body_string("#")).mount(&server).await;
-        Mock::given(method("HEAD")).and(path("/gone.sh")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
-        Mock::given(method("HEAD")).and(path("/ok.sh")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("HEAD"))
+            .and(path("/no-head.sh"))
+            .respond_with(ResponseTemplate::new(405))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/no-head.sh"))
+            .respond_with(ResponseTemplate::new(206).set_body_string("#"))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/gone.sh"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/ok.sh"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
 
         let mut installers = HashMap::new();
         for (name, p) in [("a_nohead", "/no-head.sh"), ("b_gone", "/gone.sh"), ("c_ok", "/ok.sh")] {
@@ -486,7 +506,9 @@ mod tests {
         assert!(url_policy_violation("https://example.com/i.sh", false).is_none());
         assert!(url_policy_violation("HTTPS://example.com/i.sh", false).is_none());
         assert!(url_policy_violation("file:///tmp/i.sh", true).is_none());
-        assert!(url_policy_violation("file:///tmp/i.sh", false).unwrap().contains("allow-file-urls"));
+        assert!(url_policy_violation("file:///tmp/i.sh", false)
+            .unwrap()
+            .contains("allow-file-urls"));
         assert!(url_policy_violation("http://example.com/i.sh", true).unwrap().contains("https"));
         assert!(url_policy_violation("ftp://example.com/i.sh", true).is_some());
 

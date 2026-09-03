@@ -149,7 +149,9 @@ fn cli_beats_env_beats_file_for_flagged_keys() {
 
 #[test]
 fn partial_sections_for_every_section_parse() {
-    for section in ["general", "docker", "execution", "remediation", "notifications", "monitoring", "watchdog"] {
+    for section in
+        ["general", "docker", "execution", "remediation", "notifications", "monitoring", "watchdog"]
+    {
         let f = file_with(&format!("[{section}]\n"));
         let s = resolve(Some(f.path()), &BTreeMap::new(), &CliOverrides::default())
             .unwrap_or_else(|e| panic!("empty [{section}] should parse: {e}"));
@@ -188,6 +190,9 @@ fn auto_parallelism_resolves_to_at_least_one() {
 fn defaults_helper_matches_resolve_none() {
     let a = Settings::defaults();
     let b = resolve(None, &BTreeMap::new(), &CliOverrides::default()).unwrap();
-    assert_eq!(toml::Value::try_from(&a.config).unwrap(), toml::Value::try_from(&b.config).unwrap());
+    assert_eq!(
+        toml::Value::try_from(&a.config).unwrap(),
+        toml::Value::try_from(&b.config).unwrap()
+    );
     assert!(a.sources.is_empty());
 }

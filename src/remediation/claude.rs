@@ -358,13 +358,26 @@ impl ClaudeEnvelope {
 /// Interpret one CLI run. The envelope is on stdout even when the exit status is non-zero
 /// (budget/turn caps exit 1 with an `is_error` envelope and nothing on stderr), so it is parsed
 /// first and its cost is always accounted.
-fn interpret_run(status_ok: bool, stdout: &str, stderr: &str) -> std::result::Result<ClaudeEnvelope, (RemediationError, f32)> {
+fn interpret_run(
+    status_ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> std::result::Result<ClaudeEnvelope, (RemediationError, f32)> {
     let envelope = ClaudeEnvelope::parse(stdout);
     let cost = envelope.total_cost_usd as f32;
     let looks_like_envelope = stdout.trim_start().starts_with('{');
     if envelope.is_error {
-        let reason = format!("{} (after {} turn(s), ${:.4})", envelope.error_reason(), envelope.num_turns, envelope.total_cost_usd);
-        let err = if envelope.hit_cap() { RemediationError::CapReached(reason) } else { RemediationError::ClaudeError(reason) };
+        let reason = format!(
+            "{} (after {} turn(s), ${:.4})",
+            envelope.error_reason(),
+            envelope.num_turns,
+            envelope.total_cost_usd
+        );
+        let err = if envelope.hit_cap() {
+            RemediationError::CapReached(reason)
+        } else {
+            RemediationError::ClaudeError(reason)
+        };
         return Err((err, cost));
     }
     if !status_ok {
@@ -373,14 +386,23 @@ fn interpret_run(status_ok: bool, stdout: &str, stderr: &str) -> std::result::Re
             return Err((RemediationError::ApiError("Rate limited by Anthropic API".into()), cost));
         }
         if stderr.contains("authentication") || stderr.contains("401") {
-            return Err((RemediationError::ClaudeUnavailable("Authentication failed".into()), cost));
+            return Err((
+                RemediationError::ClaudeUnavailable("Authentication failed".into()),
+                cost,
+            ));
         }
         let detail = if !stderr.is_empty() {
             stderr.to_string()
         } else if looks_like_envelope {
-            format!("exit status non-zero with a non-error envelope (subtype {:?})", envelope.subtype)
+            format!(
+                "exit status non-zero with a non-error envelope (subtype {:?})",
+                envelope.subtype
+            )
         } else {
-            format!("exit status non-zero, no envelope; stdout: {}", stdout.trim().chars().take(300).collect::<String>())
+            format!(
+                "exit status non-zero, no envelope; stdout: {}",
+                stdout.trim().chars().take(300).collect::<String>()
+            )
         };
         return Err((RemediationError::ClaudeError(detail), cost));
     }
@@ -428,12 +450,18 @@ pub fn advisory_args(max_turns: u32, max_budget_usd: f32, prompt: &str) -> Vec<S
     ]
 }
 
-
 /// Arguments for a propose/apply edit session: edits are accepted without prompts but only
 /// inside `worktree` (`--add-dir`), Bash only when the operator opted in. Never includes
 /// `--dangerously-skip-permissions`.
-pub fn edit_args(max_turns: u32, max_budget_usd: f32, worktree: &std::path::Path, allow_bash: bool, prompt: &str) -> Vec<String> {
-    let tools = if allow_bash { "Read,Grep,Glob,Edit,Write,Bash" } else { "Read,Grep,Glob,Edit,Write" };
+pub fn edit_args(
+    max_turns: u32,
+    max_budget_usd: f32,
+    worktree: &std::path::Path,
+    allow_bash: bool,
+    prompt: &str,
+) -> Vec<String> {
+    let tools =
+        if allow_bash { "Read,Grep,Glob,Edit,Write,Bash" } else { "Read,Grep,Glob,Edit,Write" };
     vec![
         "--print".into(),
         "--output-format".into(),
@@ -571,7 +599,11 @@ impl ClaudeRemediation {
 
                     // A budget or turn cap is the operator's setting, not a transient fault:
                     // retrying would only spend the same money again.
-                    if matches!(&e, RemediationError::CapReached(_) | RemediationError::CostLimitExceeded { .. }) {
+                    if matches!(
+                        &e,
+                        RemediationError::CapReached(_)
+                            | RemediationError::CostLimitExceeded { .. }
+                    ) {
                         return Err(e);
                     }
                     // Only record circuit breaker failure for certain error types
@@ -664,7 +696,10 @@ impl ClaudeRemediation {
         }
         let current_cost = self.get_total_cost_usd();
         if current_cost >= self.config.cost_limit_usd {
-            return Err(RemediationError::CostLimitExceeded { current: current_cost, limit: self.config.cost_limit_usd });
+            return Err(RemediationError::CostLimitExceeded {
+                current: current_cost,
+                limit: self.config.cost_limit_usd,
+            });
         }
         self.request_count.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
@@ -673,7 +708,13 @@ impl ClaudeRemediation {
         let output = timeout(
             Duration::from_secs(self.config.timeout_seconds),
             Command::new(&bin)
-                .args(edit_args(self.config.max_turns, remaining_budget, worktree, allow_bash, prompt))
+                .args(edit_args(
+                    self.config.max_turns,
+                    remaining_budget,
+                    worktree,
+                    allow_bash,
+                    prompt,
+                ))
                 .current_dir(worktree)
                 .output(),
         )
@@ -687,7 +728,10 @@ impl ClaudeRemediation {
             Ok(env) => env,
             Err((e, cost)) => {
                 self.add_cost(cost);
-                if matches!(&e, RemediationError::ClaudeUnavailable(_) | RemediationError::ApiError(_)) {
+                if matches!(
+                    &e,
+                    RemediationError::ClaudeUnavailable(_) | RemediationError::ApiError(_)
+                ) {
                     self.circuit_breaker.record_failure().await;
                 }
                 return Err(e);
@@ -746,9 +790,7 @@ impl ClaudeRemediation {
     pub fn total_cost_usd_exact(&self) -> f64 {
         self.total_cost_usd.load(Ordering::SeqCst) as f64 / 1_000_000.0
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -850,12 +892,18 @@ mod tests {
         }
         // Other is_error envelopes stay ordinary (retryable) errors; a clean run passes through.
         let plain = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"result":"boom","total_cost_usd":0.01}"#;
-        assert!(matches!(interpret_run(true, plain, ""), Err((RemediationError::ClaudeError(r), _)) if r.starts_with("boom")));
+        assert!(
+            matches!(interpret_run(true, plain, ""), Err((RemediationError::ClaudeError(r), _)) if r.starts_with("boom"))
+        );
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"fine","total_cost_usd":0.2}"#;
         assert_eq!(interpret_run(true, ok, "").unwrap().result, "fine");
         // Non-zero exit without an envelope keeps stderr, or says so when both are empty.
-        assert!(matches!(interpret_run(false, "", "boom on stderr"), Err((RemediationError::ClaudeError(r), _)) if r == "boom on stderr"));
-        assert!(matches!(interpret_run(false, "", ""), Err((RemediationError::ClaudeError(r), _)) if r.contains("no envelope")));
+        assert!(
+            matches!(interpret_run(false, "", "boom on stderr"), Err((RemediationError::ClaudeError(r), _)) if r == "boom on stderr")
+        );
+        assert!(
+            matches!(interpret_run(false, "", ""), Err((RemediationError::ClaudeError(r), _)) if r.contains("no envelope"))
+        );
     }
 
     #[test]

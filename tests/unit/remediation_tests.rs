@@ -11,8 +11,8 @@
 //! exported, so we test them indirectly through the public API.
 
 use automated_flywheel_setup_checker::remediation::{
-    is_command_safe, CircuitState, ClaudeRemediation, ClaudeRemediationConfig,
-    FallbackSuggestion, RemediationMethod, RemediationResult, RetryConfig,
+    is_command_safe, CircuitState, ClaudeRemediation, ClaudeRemediationConfig, FallbackSuggestion,
+    RemediationMethod, RemediationResult, RetryConfig,
 };
 use std::path::PathBuf;
 use std::time::Duration;
