@@ -38,7 +38,7 @@ checks:
   - cargo fmt --check
   - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 rch exec -- cargo clippy --locked --all-targets --all-features -- -D warnings
   - RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --no-fail-fast
-  - AFSC_DOCKER_TESTS=1 RCH_ENV_ALLOWLIST=AFSC_DOCKER_TESTS RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --test docker -- --test-threads=1
+  - AFSC_DOCKER_TESTS=1 AFSC_DOCKER_TESTS_BUILD_TIMEOUT_SECONDS=2400 RCH_ENV_ALLOWLIST="AFSC_DOCKER_TESTS AFSC_DOCKER_TESTS_BUILD_TIMEOUT_SECONDS" RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=3600 rch exec -- cargo test --locked --test docker -- --test-threads=1
   - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 rch exec -- cargo build --release --locked && bash scripts/e2e/run_all_tests.sh
 
 artifact_naming: "${name}-${version}-${os}-${arch}"

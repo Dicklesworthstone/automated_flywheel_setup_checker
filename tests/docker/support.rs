@@ -68,6 +68,12 @@ impl DockerFixture {
         ContainerConfig {
             image: ContainerManager::AFSC_BASE_IMAGE.to_string(),
             volumes: vec![(format!("{}:ro", self.host_dir().display()), MOUNT.to_string())],
+            // A cold worker builds the prepared image from scratch (apt, rustup, nvm) and can
+            // need more than the 900 s default under load; the gate raises this via env.
+            build_timeout_seconds: std::env::var("AFSC_DOCKER_TESTS_BUILD_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
             ..Default::default()
         }
     }
