@@ -220,8 +220,8 @@ pub async fn remediate_with_claude(req: ClaudeEditRequest<'_>) -> RemediationOut
     let attempts = req.max_attempts.max(1);
     // Cost is what the client accounted for this session's invocations, including ones that
     // ended in an error envelope (a budget or turn cap still costs money).
-    let spent_before = req.claude.get_total_cost_usd();
-    let spent = || (req.claude.get_total_cost_usd() - spent_before).max(0.0) as f64;
+    let spent_before = req.claude.total_cost_usd_exact();
+    let spent = || (req.claude.total_cost_usd_exact() - spent_before).max(0.0);
     let mut previous: Option<String> = None;
     let mut summary = String::new();
     let mut verified = false;

@@ -878,7 +878,7 @@ async fn remediate_results(
             RemediationOutcome::Advised { risks: annotate_risks(&text), suggestion: text, cost_usd: 0.0, source: "fallback".into() }
         };
         let prompt = automated_flywheel_setup_checker::remediation::generate_prompt(&classification, &r.stderr, &config.general.acfs_repo);
-        let spent_before = remediation.get_total_cost_usd();
+        let spent_before = remediation.total_cost_usd_exact();
         let outcome = match remediation.execute_with_resilience(&prompt).await {
             Ok(res) if res.method == RemediationMethod::ManualRequired => fallback(),
             Ok(res) => {
@@ -887,7 +887,7 @@ async fn remediate_results(
                 RemediationOutcome::Advised { risks: annotate_risks(&suggestion), suggestion, cost_usd, source: "claude".into() }
             }
             // A cap or error still cost whatever the CLI billed before stopping.
-            Err(e) => RemediationOutcome::Failed { reason: e.to_string(), cost_usd: (remediation.get_total_cost_usd() - spent_before).max(0.0) as f64 },
+            Err(e) => RemediationOutcome::Failed { reason: e.to_string(), cost_usd: (remediation.total_cost_usd_exact() - spent_before).max(0.0) },
         };
         r.remediation = Some(outcome);
     }

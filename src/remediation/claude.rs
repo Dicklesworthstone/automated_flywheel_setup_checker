@@ -739,6 +739,11 @@ impl ClaudeRemediation {
         self.total_cost_usd.load(Ordering::SeqCst) as f32 / 1_000_000.0
     }
 
+    /// Same total, exact to the microdollar (for outcomes and metrics; no f32 noise).
+    pub fn total_cost_usd_exact(&self) -> f64 {
+        self.total_cost_usd.load(Ordering::SeqCst) as f64 / 1_000_000.0
+    }
+
 }
 
 
