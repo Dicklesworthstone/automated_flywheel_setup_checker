@@ -1000,7 +1000,14 @@ executing).
 
 ### Still open
 
-- Cutting the first `v0.1.0` tag (the release workflow is in place).
+- Cutting the first `v0.1.0` tag: `dsr version tag`, `dsr build`, `dsr release` on the release operator's machine.
+
+Update 2026-09-03 02:30 UTC: the owner ruled that GitHub Actions is never used, so every "CI"
+item above is superseded by dsr. Actions is disabled on the repository, the badges and CI passages
+are gone from the README, `.dsr/repos.yaml` carries the quality-gate recipe (fmt, clippy with
+`-D warnings`, full tests, Docker suite, bash E2E) and `.dsr/repos.d/` the build authority for
+four targets; `dsr repos validate` passes and `dsr build --dry-run` plans v0.1.0. The workflow
+files under `.github/` are inert until the owner gives the deletion command.
 
 Update 2026-09-03 00:50 UTC: `C12c` is implemented and proven. `[remediation].mode = propose|apply`
 runs a Claude edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits`,
