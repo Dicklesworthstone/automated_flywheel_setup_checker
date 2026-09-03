@@ -233,7 +233,7 @@ For failures that are not checksum drift, `[remediation].mode` decides how far C
 | mode | what Claude gets | what lands |
 |---|---|---|
 | `advisory` | read-only (`--permission-mode default --tools Read,Grep,Glob`) | advice on the result; commands it suggests are safety-flagged, never run |
-| `propose` | an edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits --tools Read,Grep,Glob,Edit,Write --add-dir <worktree>`) | a commit on `afsc/remediate-<installer>-<date>` plus a PR when `create_pr = true` |
+| `propose` | an edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits --tools Read,Grep,Glob,Edit,Write --add-dir <worktree>`) | a commit on `afsc/remediate-<installer>-<date>-<id>` plus a PR when `create_pr = true` |
 | `apply` | same as propose | the branch is also pushed (never `main`) |
 
 An edit session only lands if every gate passes, otherwise the worktree and branch are discarded

@@ -12,7 +12,7 @@
 //!    `checksums.yaml` (fresh container, or the local sandbox with `--local`); up to
 //!    `max_attempts` sessions, each told what still fails.
 //!
-//! Only then: commit on `afsc/remediate-<installer>-<date>`, push for `apply`, optional PR.
+//! Only then: commit on `afsc/remediate-<installer>-<date>-<id>`, push for `apply`, optional PR.
 
 use crate::checksums::parse_checksums;
 use crate::config::InstallerOverride;
@@ -81,7 +81,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// `git worktree add -b afsc/remediate-<installer>-<date> <worktrees_dir>/… HEAD`.
+/// `git worktree add -b afsc/remediate-<installer>-<date>-<id> <worktrees_dir>/… HEAD`.
 pub fn open_worktree(acfs_repo: &Path, worktrees_dir: &Path, installer: &str) -> Result<EditSession> {
     git(acfs_repo, &["rev-parse", "--git-dir"]).context("acfs_repo is not a git repository")?;
     // Seconds alone collide when the same installer is remediated twice in quick succession
