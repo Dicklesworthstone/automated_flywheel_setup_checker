@@ -406,14 +406,17 @@ impl ClaudeEnvelope {
     }
 }
 
-/// Arguments for a read-only advisory run. Never includes `--dangerously-skip-permissions`.
+/// Arguments for a read-only advisory run. Read-only is enforced by the tool list (no Edit,
+/// Write or Bash); the permission mode stays `default` because `plan` makes the CLI spend turns
+/// trying to write a plan file and call ExitPlanMode, which are not available here (observed
+/// with Claude Code 2.1.259). Never includes `--dangerously-skip-permissions`.
 pub fn advisory_args(max_turns: u32, max_budget_usd: f32, prompt: &str) -> Vec<String> {
     vec![
         "--print".into(),
         "--output-format".into(),
         "json".into(),
         "--permission-mode".into(),
-        "plan".into(),
+        "default".into(),
         "--tools".into(),
         "Read,Grep,Glob".into(),
         "--max-turns".into(),

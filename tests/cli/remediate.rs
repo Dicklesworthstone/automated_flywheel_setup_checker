@@ -187,7 +187,7 @@ fn check_remediate_attaches_honest_outcomes() {
     // Invocation shape: read-only plan mode, never skipping permissions, cwd = ACFS repo.
     // The fake logs argv with printf %q (commas escaped); strip the escapes before matching.
     let invocations = std::fs::read_to_string(&log).unwrap().replace('\\', "");
-    assert!(invocations.contains("--permission-mode plan"), "{invocations}");
+    assert!(invocations.contains("--permission-mode default"), "{invocations}");
     assert!(invocations.contains("--tools Read,Grep,Glob"), "{invocations}");
     assert!(invocations.contains("--max-turns 3"), "{invocations}");
     assert!(!invocations.contains("dangerously"), "{invocations}");

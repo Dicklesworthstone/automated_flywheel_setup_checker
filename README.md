@@ -28,7 +28,7 @@
 | **Error Classification** | Automatically categorizes failures: network, permission, dependency, configuration, resource |
 | **Parallel Execution** | Run N installer tests concurrently with configurable worker count |
 | **Retry with Backoff** | Transient failures (network timeouts, rate limits) are retried automatically |
-| **Claude Auto-Remediation** | Experimental: sends failure context to Claude for fix suggestions |
+| **Claude Remediation** | Read-only advice, or a verified branch/PR from a policy-gated edit session (`advisory` / `propose` / `apply`) |
 | **JSONL Structured Output** | Machine-readable output for CI/CD pipelines and dashboards |
 | **Monitoring Server** | `serve` exposes `/health` and `/metrics` from the persisted metrics snapshot |
 | **Prometheus Status Export** | `status --format prometheus` emits scrape-friendly metrics to stdout for one-shot export workflows |
@@ -232,7 +232,7 @@ For failures that are not checksum drift, `[remediation].mode` decides how far C
 
 | mode | what Claude gets | what lands |
 |---|---|---|
-| `advisory` | read-only (`--permission-mode plan --tools Read,Grep,Glob`) | advice on the result; commands it suggests are safety-flagged, never run |
+| `advisory` | read-only (`--permission-mode default --tools Read,Grep,Glob`) | advice on the result; commands it suggests are safety-flagged, never run |
 | `propose` | an edit session in a git worktree of the ACFS checkout (`--permission-mode acceptEdits --tools Read,Grep,Glob,Edit,Write --add-dir <worktree>`) | a commit on `afsc/remediate-<installer>-<date>` plus a PR when `create_pr = true` |
 | `apply` | same as propose | the branch is also pushed (never `main`) |
 
@@ -517,7 +517,12 @@ Yes. It uses the [Bollard](https://github.com/fussybeaver/bollard) crate to talk
 
 ### What does the Claude remediation actually do?
 
-When an installer fails and `--remediate` is enabled, the tool sends the failure context (stderr, exit code, installer name) to Claude and asks for a fix suggestion. Safety checks prevent any dangerous commands from being applied. It's experimental.
+Checksum drift never involves a model: the tool refreshes and verifies the pin itself. For other
+failures, `[remediation].mode` picks the depth. `advisory` invokes `claude` read-only with the
+failure context and records the advice on the result, with any risky command flagged; `propose`
+lets Claude edit inside a git worktree of the ACFS checkout and only commits a branch after the
+installer passes again; `apply` also pushes that branch. Costs come from the CLI's own envelope
+and are capped per run. See "remediate checksums" above for the gates and the budget note.
 
 ### Can I run this in CI?
 

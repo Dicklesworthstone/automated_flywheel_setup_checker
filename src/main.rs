@@ -877,7 +877,12 @@ async fn remediate_results(
                 .join("\n");
             RemediationOutcome::Advised { risks: annotate_risks(&text), suggestion: text, cost_usd: 0.0, source: "fallback".into() }
         };
-        let prompt = automated_flywheel_setup_checker::remediation::generate_prompt(&classification, &r.stderr, &config.general.acfs_repo);
+        // The category prompts read like a fix recipe; advisory runs must not try to carry it
+        // out (they have no edit tools anyway), so say so up front and ask for a compact answer.
+        let prompt = format!(
+            "You are advising only: do not edit files or change anything; a human applies the fix. Reply with (1) the root cause in one short paragraph and (2) the exact commands or file edits to apply, in a fenced shell block, or say plainly that nothing in this repository can fix it.\n\n{}",
+            automated_flywheel_setup_checker::remediation::generate_prompt(&classification, &r.stderr, &config.general.acfs_repo)
+        );
         let spent_before = remediation.total_cost_usd_exact();
         let outcome = match remediation.execute_with_resilience(&prompt).await {
             Ok(res) if res.method == RemediationMethod::ManualRequired => fallback(),
