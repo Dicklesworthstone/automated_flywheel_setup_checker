@@ -96,7 +96,25 @@ automated_flywheel_setup_checker status --format prometheus
 
 ## Installation
 
-### From Source (Recommended)
+### From a GitHub release (Linux x86_64 / arm64)
+
+Every release publishes Linux tarballs built by [dsr](https://github.com/Dicklesworthstone/doodlestein_self_releaser)
+against a glibc 2.28 floor (Ubuntu 22.04+, Debian 11+ and newer), each with a `.sha256` sidecar
+and a `SHA256SUMS` file. macOS binaries are not built by the release pipeline yet; use the
+source paths below on a Mac.
+
+```bash
+# Homebrew (Linux)
+brew install dicklesworthstone/tap/automated_flywheel_setup_checker
+
+# Or the tarball directly
+VERSION=0.1.0 ARCH=amd64   # or arm64
+curl -fsSL "https://github.com/Dicklesworthstone/automated_flywheel_setup_checker/releases/download/v${VERSION}/automated_flywheel_setup_checker-${VERSION}-linux-${ARCH}.tar.gz" \
+  | tar xz -C ~/.local/bin
+automated_flywheel_setup_checker --version
+```
+
+### From source
 
 ```bash
 git clone https://github.com/Dicklesworthstone/automated_flywheel_setup_checker.git

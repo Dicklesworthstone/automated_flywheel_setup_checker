@@ -6,6 +6,12 @@ All notable changes to `automated_flywheel_setup_checker`. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-04
+
+First release: Linux x86_64 and arm64 binaries built and published by dsr (glibc 2.28 floor), plus a Homebrew formula in `dicklesworthstone/tap`. macOS is not built by the release pipeline yet; build from source there.
+
 ### Added
 - `check`: verified installer execution loop against a prepared, non-root image
   (`afsc-base:<hash>` derived from `docker/Dockerfile.base` for any base), SHA-256 verification
