@@ -5,3 +5,6 @@
 target-codex-*/
 target-codex-*/
 target-codex-*
+
+# Remote compilation helper local config (machine-specific).
+.rch/
